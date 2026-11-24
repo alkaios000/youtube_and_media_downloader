@@ -1,7 +1,14 @@
 package com.linkdrop.linkdrop_downloader
 
+import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.net.Uri
+import android.os.Build
 import android.os.Bundle
+import android.provider.Settings
+import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.EventChannel
@@ -12,21 +19,24 @@ class MainActivity : FlutterActivity() {
         private const val ENGINE_CHANNEL = "com.linkdrop.downloader/engine"
         private const val PROGRESS_CHANNEL = "com.linkdrop.downloader/progress"
         private const val SHARE_CHANNEL = "com.linkdrop.downloader/share"
+        private const val PERMISSION_REQUEST_CODE = 4201
     }
 
     private lateinit var bridge: MediaEngineBridge
     private var initialSharedText: String? = null
     private var shareEventSink: EventChannel.EventSink? = null
+    private var pendingPermissionResult: MethodChannel.Result? = null
+    private var hasRequestedPermissionsBefore = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        handleIncomingIntent(intent, isLaunch = true)
+        runCatching { handleIncomingIntent(intent, isLaunch = true) }
     }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        handleIncomingIntent(intent, isLaunch = false)
+        runCatching { handleIncomingIntent(intent, isLaunch = false) }
     }
 
     private fun handleIncomingIntent(intent: Intent?, isLaunch: Boolean) {
@@ -40,6 +50,54 @@ class MainActivity : FlutterActivity() {
                     initialSharedText = shared
                 }
             }
+        }
+    }
+
+    private fun requiredStoragePermissions(): Array<String> {
+        return when {
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU -> arrayOf(
+                Manifest.permission.READ_MEDIA_VIDEO,
+                Manifest.permission.READ_MEDIA_AUDIO,
+                Manifest.permission.READ_MEDIA_IMAGES,
+            )
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q -> arrayOf(
+                Manifest.permission.READ_EXTERNAL_STORAGE,
+            )
+            else -> arrayOf(
+                Manifest.permission.WRITE_EXTERNAL_STORAGE,
+                Manifest.permission.READ_EXTERNAL_STORAGE,
+            )
+        }
+    }
+
+    private fun buildPermissionStatus(): Map<String, Any?> {
+        val perms = requiredStoragePermissions()
+        val missing = perms.filter { perm ->
+            ContextCompat.checkSelfPermission(this, perm) != PackageManager.PERMISSION_GRANTED
+        }
+        val granted = missing.isEmpty()
+        val permanentlyDenied = !granted && hasRequestedPermissionsBefore && missing.all { perm ->
+            !ActivityCompat.shouldShowRequestPermissionRationale(this, perm)
+        }
+        return mapOf(
+            "granted" to granted,
+            "permanentlyDenied" to permanentlyDenied,
+            "sdkInt" to Build.VERSION.SDK_INT,
+            "missing" to missing,
+        )
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray,
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == PERMISSION_REQUEST_CODE) {
+            hasRequestedPermissionsBefore = true
+            val result = pendingPermissionResult
+            pendingPermissionResult = null
+            result?.success(buildPermissionStatus())
         }
     }
 
@@ -78,6 +136,42 @@ class MainActivity : FlutterActivity() {
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, ENGINE_CHANNEL)
             .setMethodCallHandler { call, result ->
                 when (call.method) {
+                    "checkPermissions" -> {
+                        result.success(buildPermissionStatus())
+                    }
+
+                    "requestPermissions" -> {
+                        val perms = requiredStoragePermissions()
+                        val missing = perms.filter { perm ->
+                            ContextCompat.checkSelfPermission(this, perm) != PackageManager.PERMISSION_GRANTED
+                        }
+                        if (missing.isEmpty()) {
+                            result.success(buildPermissionStatus())
+                        } else {
+                            pendingPermissionResult?.success(buildPermissionStatus())
+                            pendingPermissionResult = result
+                            ActivityCompat.requestPermissions(
+                                this,
+                                missing.toTypedArray(),
+                                PERMISSION_REQUEST_CODE,
+                            )
+                        }
+                    }
+
+                    "openAppSettings" -> {
+                        val opened = runCatching {
+                            val intent = Intent(
+                                Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                                Uri.fromParts("package", packageName, null),
+                            ).apply {
+                                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            }
+                            startActivity(intent)
+                            true
+                        }.getOrDefault(false)
+                        result.success(opened)
+                    }
+
                     "initEngine" -> {
                         bridge.initEngine(
                             onSuccess = { info -> result.success(info) },

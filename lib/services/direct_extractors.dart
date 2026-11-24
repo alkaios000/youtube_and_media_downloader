@@ -381,7 +381,7 @@ class DirectExtractors {
     try {
       final res = await _dio.get<dynamic>(
         'https://api.vxtwitter.com/$handle/status/$tweetId',
-        options: Options(headers: {'User-Agent': 'LinkDrop/1.0'}),
+        options: Options(headers: {'User-Agent': 'all_download/1.0'}),
       );
       if (res.statusCode != 200) return null;
       final data = res.data is String ? jsonDecode(res.data as String) : res.data;
@@ -477,7 +477,7 @@ class DirectExtractors {
     try {
       final res = await _dio.get<dynamic>(
         'https://api.fxtwitter.com/$handle/status/$tweetId',
-        options: Options(headers: {'User-Agent': 'LinkDrop/1.0'}),
+        options: Options(headers: {'User-Agent': 'all_download/1.0'}),
       );
       if (res.statusCode != 200) return null;
       final body = res.data is String ? jsonDecode(res.data as String) : res.data;

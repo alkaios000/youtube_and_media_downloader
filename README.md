@@ -1,4 +1,4 @@
-# LinkDrop — All-in-One Android Media Downloader (Flutter)
+# all_download — All-in-One Android Media Downloader (Flutter)
 
 Aplikasi Android berbasis **Flutter + Native Kotlin (`youtubedl-android` / yt-dlp + FFmpeg + Aria2c)** untuk mengunduh video, audio (MP3/M4A), dan foto cukup dengan menempelkan tautan (atau langsung *Share* dari aplikasi media sosial).
 
@@ -10,10 +10,10 @@ Aplikasi Android berbasis **Flutter + Native Kotlin (`youtubedl-android` / yt-dl
 - **X (Twitter)** (Video, GIF, dan foto via `yt-dlp` + fallback `vxtwitter`/`fxtwitter`)
 
 ## Fitur Utama
-- **Hanya dari Link**: Cukup tempel link (termasuk teks share acak dari Douyin/TikTok) atau kirim lewat menu **Bagikan / Share** Android langsung ke **LinkDrop**.
+- **Hanya dari Link**: Cukup tempel link (termasuk teks share acak dari Douyin/TikTok) atau kirim lewat menu **Bagikan / Share** Android langsung ke **all_download**.
 - **Deteksi Otomatis Clipboard**: Banner 1-klik saat membuka aplikasi dengan tautan media di clipboard.
 - **Pilih Kualitas atau Unduh Cepat**: Pilih resolusi spesifik (4K / 1080p / 720p / 480p / MP3 / M4A) atau tekan **Unduh Cepat** dengan kualitas default.
-- **Langsung Masuk Galeri & File Manager**: Tersimpan otomatis di `Download/LinkDrop` menggunakan Android `MediaStore` (tanpa perlu izin penyimpanan rumit di Android 10+).
+- **Langsung Masuk Galeri & File Manager**: Tersimpan otomatis di `Download/all_download` menggunakan Android `MediaStore` (tanpa perlu izin penyimpanan rumit di Android 10+).
 - **Update Engine yt-dlp di Dalam Aplikasi**: Perbarui binary `yt-dlp` (Stable / Nightly) langsung dari tab **Pengaturan** tanpa harus install ulang APK.
 
 ## Cara Menjalankan di Android Studio / CLI

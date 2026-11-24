@@ -20,7 +20,7 @@ class EngineStatus {
         version: 'memuat...',
         ffmpegReady: false,
         aria2cReady: false,
-        downloadFolder: 'Download/LinkDrop',
+        downloadFolder: 'Download/all_download',
       );
 
   factory EngineStatus.fromMap(Map<dynamic, dynamic> map) {
@@ -29,7 +29,7 @@ class EngineStatus {
       version: map['version']?.toString() ?? 'bundled',
       ffmpegReady: map['ffmpegReady'] as bool? ?? false,
       aria2cReady: map['aria2cReady'] as bool? ?? false,
-      downloadFolder: map['downloadFolder']?.toString() ?? 'Download/LinkDrop',
+      downloadFolder: map['downloadFolder']?.toString() ?? 'Download/all_download',
     );
   }
 }
@@ -95,6 +95,39 @@ class EngineUpdateResult {
   });
 }
 
+class PermissionStatusInfo {
+  final bool granted;
+  final bool permanentlyDenied;
+  final int sdkInt;
+  final List<String> missing;
+
+  const PermissionStatusInfo({
+    required this.granted,
+    required this.permanentlyDenied,
+    required this.sdkInt,
+    required this.missing,
+  });
+
+  factory PermissionStatusInfo.unknown() => const PermissionStatusInfo(
+        granted: true,
+        permanentlyDenied: false,
+        sdkInt: 33,
+        missing: [],
+      );
+
+  factory PermissionStatusInfo.fromMap(Map<dynamic, dynamic> map) {
+    return PermissionStatusInfo(
+      granted: map['granted'] as bool? ?? false,
+      permanentlyDenied: map['permanentlyDenied'] as bool? ?? false,
+      sdkInt: (map['sdkInt'] as num?)?.toInt() ?? 33,
+      missing: (map['missing'] as List?)
+              ?.map((e) => e.toString())
+              .toList(growable: false) ??
+          const [],
+    );
+  }
+}
+
 class NativeBridge {
   static const MethodChannel _channel =
       MethodChannel('com.linkdrop.downloader/engine');
@@ -126,6 +159,25 @@ class NativeBridge {
     final result = await _channel.invokeMethod<Map<dynamic, dynamic>>('initEngine');
     if (result == null) return EngineStatus.initial();
     return EngineStatus.fromMap(result);
+  }
+
+  Future<PermissionStatusInfo> checkPermissions() async {
+    final result =
+        await _channel.invokeMethod<Map<dynamic, dynamic>>('checkPermissions');
+    if (result == null) return PermissionStatusInfo.unknown();
+    return PermissionStatusInfo.fromMap(result);
+  }
+
+  Future<PermissionStatusInfo> requestPermissions() async {
+    final result =
+        await _channel.invokeMethod<Map<dynamic, dynamic>>('requestPermissions');
+    if (result == null) return PermissionStatusInfo.unknown();
+    return PermissionStatusInfo.fromMap(result);
+  }
+
+  Future<bool> openAppSettings() async {
+    final ok = await _channel.invokeMethod<bool>('openAppSettings');
+    return ok ?? false;
   }
 
   Future<EngineUpdateResult> updateEngine(String channel) async {

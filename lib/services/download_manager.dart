@@ -21,12 +21,14 @@ class DownloadManager extends ChangeNotifier {
   final Dio _dio;
 
   EngineStatus _engineStatus = EngineStatus.initial();
+  PermissionStatusInfo _permissionStatus = PermissionStatusInfo.unknown();
   AppSettings _settings = const AppSettings();
   List<DownloadItem> _items = [];
 
   bool _isInitializing = true;
   bool _isAnalyzing = false;
   bool _isUpdatingEngine = false;
+  bool _permissionChecked = false;
   String? _engineError;
   String? _analyzeError;
   MediaInfo? _currentPreview;
@@ -55,6 +57,8 @@ class DownloadManager extends ChangeNotifier {
         );
 
   EngineStatus get engineStatus => _engineStatus;
+  PermissionStatusInfo get permissionStatus => _permissionStatus;
+  bool get permissionChecked => _permissionChecked;
   AppSettings get settings => _settings;
   List<DownloadItem> get items => List.unmodifiable(_items);
   List<DownloadItem> get activeDownloads =>
@@ -70,14 +74,32 @@ class DownloadManager extends ChangeNotifier {
   int get cacheBytes => _cacheBytes;
 
   Future<void> bootstrap() async {
-    _settings = await _storage.loadSettings();
-    _items = await _storage.loadHistory();
+    try {
+      _settings = await _storage.loadSettings();
+    } catch (_) {
+      _settings = const AppSettings();
+    }
+    try {
+      _items = await _storage.loadHistory();
+    } catch (_) {
+      _items = [];
+    }
     notifyListeners();
 
-    _progressSub = _bridge.progressStream.listen(_handleNativeProgress);
-    _shareSub = _bridge.shareStream.listen((sharedText) {
-      onIncomingSharedLink?.call(sharedText);
-    });
+    try {
+      _progressSub = _bridge.progressStream.listen(
+        _handleNativeProgress,
+        onError: (_) {},
+      );
+      _shareSub = _bridge.shareStream.listen(
+        (sharedText) {
+          onIncomingSharedLink?.call(sharedText);
+        },
+        onError: (_) {},
+      );
+    } catch (_) {}
+
+    await refreshPermissions();
 
     try {
       _engineStatus = await _bridge.initEngine();
@@ -97,6 +119,32 @@ class DownloadManager extends ChangeNotifier {
         onIncomingSharedLink?.call(initialShared);
       }
     } catch (_) {}
+  }
+
+  Future<PermissionStatusInfo> refreshPermissions() async {
+    try {
+      _permissionStatus = await _bridge.checkPermissions();
+      _permissionChecked = true;
+      notifyListeners();
+    } catch (_) {}
+    return _permissionStatus;
+  }
+
+  Future<PermissionStatusInfo> requestStoragePermissions() async {
+    try {
+      _permissionStatus = await _bridge.requestPermissions();
+      _permissionChecked = true;
+      notifyListeners();
+    } catch (_) {}
+    return _permissionStatus;
+  }
+
+  Future<bool> openAppSettings() async {
+    try {
+      return await _bridge.openAppSettings();
+    } catch (_) {
+      return false;
+    }
   }
 
   void clearPreview() {
@@ -179,6 +227,9 @@ class DownloadManager extends ChangeNotifier {
   }
 
   Future<DownloadItem> startDownload(MediaInfo info, MediaFormatOption option) async {
+    if (_permissionChecked && !_permissionStatus.granted && _permissionStatus.sdkInt <= 28) {
+      await requestStoragePermissions();
+    }
     final taskId = '${DateTime.now().millisecondsSinceEpoch}_${_items.length}';
     final initialItem = DownloadItem(
       id: taskId,
@@ -230,7 +281,7 @@ class DownloadManager extends ChangeNotifier {
         (item) => item.copyWith(
           status: DownloadStatus.completed,
           progress: 100,
-          statusText: 'Tersimpan di Download/LinkDrop',
+          statusText: 'Tersimpan di Download/all_download',
           savedPath: saved.savedPath,
           contentUri: saved.contentUri,
           fileName: saved.fileName,
@@ -352,8 +403,8 @@ class DownloadManager extends ChangeNotifier {
           status: DownloadStatus.completed,
           progress: 100,
           statusText: urlsToDownload.length > 1
-              ? '${urlsToDownload.length} gambar tersimpan di Download/LinkDrop'
-              : 'Tersimpan di Download/LinkDrop',
+              ? '${urlsToDownload.length} gambar tersimpan di Download/all_download'
+              : 'Tersimpan di Download/all_download',
           savedPath: finalSaved.savedPath,
           contentUri: finalSaved.contentUri,
           fileName: finalSaved.fileName,
@@ -536,7 +587,7 @@ class DownloadManager extends ChangeNotifier {
         .replaceAll(RegExp(r'[\\/:*?"<>|\r\n\t]+'), ' ')
         .replaceAll(RegExp(r'\s+'), ' ')
         .trim();
-    if (cleaned.isEmpty) return 'linkdrop_media';
+    if (cleaned.isEmpty) return 'all_download_media';
     return cleaned.length > 64 ? cleaned.substring(0, 64).trim() : cleaned;
   }
 

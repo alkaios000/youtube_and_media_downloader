@@ -129,7 +129,7 @@ class _DownloadsScreenState extends State<DownloadsScreen> {
                     const SizedBox(height: 6),
                     Text(
                       allItems.isEmpty
-                          ? 'Tempel tautan di tab Unduh untuk mulai menyimpan video, audio, atau foto ke folder Download/LinkDrop.'
+                          ? 'Tempel tautan di tab Unduh untuk mulai menyimpan video, audio, atau foto ke folder Download/all_download.'
                           : 'Coba ubah kata kunci pencarian atau filter kategori.',
                       textAlign: TextAlign.center,
                       style: theme.textTheme.bodySmall?.copyWith(
@@ -218,7 +218,7 @@ class _DownloadsScreenState extends State<DownloadsScreen> {
       builder: (ctx) => AlertDialog(
         title: const Text('Bersihkan Riwayat?'),
         content: const Text(
-          'Daftar riwayat akan dikosongkan. File yang sudah tersimpan di folder Download/LinkDrop tetap aman.',
+          'Daftar riwayat akan dikosongkan. File yang sudah tersimpan di folder Download/all_download tetap aman.',
         ),
         actions: [
           TextButton(

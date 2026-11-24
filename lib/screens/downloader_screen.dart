@@ -148,7 +148,7 @@ class _DownloaderScreenState extends State<DownloaderScreen> {
                 ),
               ),
               const SizedBox(width: 10),
-              const Text('LinkDrop'),
+              const Text('all_download'),
             ],
           ),
           actions: [
@@ -171,6 +171,25 @@ class _DownloaderScreenState extends State<DownloaderScreen> {
               const SizedBox(height: 14),
               SupportedPlatformsStrip(activePlatform: _detectedPlatform),
               const SizedBox(height: 16),
+
+              if (manager.permissionChecked && !manager.permissionStatus.granted) ...[
+                _PermissionBanner(
+                  permanentlyDenied: manager.permissionStatus.permanentlyDenied,
+                  onGrant: () async {
+                    if (manager.permissionStatus.permanentlyDenied) {
+                      await manager.openAppSettings();
+                    } else {
+                      final updated = await manager.requestStoragePermissions();
+                      if (!updated.granted && updated.permanentlyDenied) {
+                        _showSnack(
+                          'Buka Pengaturan Aplikasi untuk mengaktifkan izin penyimpanan & media.',
+                        );
+                      }
+                    }
+                  },
+                ),
+                const SizedBox(height: 14),
+              ],
 
               if (widget.clipboardUrl != null) ...[
                 ClipboardLinkBanner(
@@ -459,6 +478,72 @@ class _EnginePill extends StatelessWidget {
   }
 }
 
+class _PermissionBanner extends StatelessWidget {
+  final bool permanentlyDenied;
+  final VoidCallback onGrant;
+
+  const _PermissionBanner({
+    required this.permanentlyDenied,
+    required this.onGrant,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    const accent = Color(0xFFF59E0B);
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: accent.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: accent.withValues(alpha: 0.4)),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: [
+          const Icon(Icons.folder_shared_outlined, color: accent, size: 22),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Izin Penyimpanan & Media',
+                  style: theme.textTheme.labelLarge?.copyWith(
+                    color: accent,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  permanentlyDenied
+                      ? 'Izin ditolak permanen. Aktifkan di Pengaturan HP agar hasil unduhan mudah diakses.'
+                      : 'Izinkan akses media agar video, audio, dan foto tersimpan lancar ke perangkat.',
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: theme.colorScheme.onSurfaceVariant,
+                    height: 1.3,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 8),
+          FilledButton(
+            onPressed: onGrant,
+            style: FilledButton.styleFrom(
+              visualDensity: VisualDensity.compact,
+              backgroundColor: accent,
+              foregroundColor: Colors.black,
+              padding: const EdgeInsets.symmetric(horizontal: 12),
+            ),
+            child: Text(permanentlyDenied ? 'Pengaturan' : 'Izinkan'),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 class _ErrorBanner extends StatelessWidget {
   final String title;
   final String message;
@@ -552,13 +637,13 @@ class _TipsCard extends StatelessWidget {
             const _TipRow(
               number: '2',
               text:
-                  'Atau langsung tekan "Bagikan / Share" di aplikasi media sosial lalu pilih LinkDrop.',
+                  'Atau langsung tekan "Bagikan / Share" di aplikasi media sosial lalu pilih all_download.',
             ),
             const SizedBox(height: 8),
             const _TipRow(
               number: '3',
               text:
-                  'Semua file otomatis tersimpan ke folder Download/LinkDrop dan siap diputar di Galeri.',
+                  'Semua file otomatis tersimpan ke folder Download/all_download dan siap diputar di Galeri.',
             ),
           ],
         ),

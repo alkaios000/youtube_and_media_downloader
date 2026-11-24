@@ -10,6 +10,7 @@ import android.os.Environment
 import android.os.Handler
 import android.os.Looper
 import android.provider.MediaStore
+import android.util.Log
 import android.webkit.MimeTypeMap
 import androidx.core.content.FileProvider
 import com.yausername.aria2c.Aria2c
@@ -20,14 +21,22 @@ import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.util.Locale
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 
 class MediaEngineBridge(private val context: Context) {
+    companion object {
+        private const val TAG = "AllDownloadEngine"
+    }
+
     private val mainHandler = Handler(Looper.getMainLooper())
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val uncaughtHandler = CoroutineExceptionHandler { _, throwable ->
+        Log.e(TAG, "Unhandled engine coroutine error", throwable)
+    }
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO + uncaughtHandler)
 
     @Volatile
     private var isInitialized = false
@@ -62,8 +71,9 @@ class MediaEngineBridge(private val context: Context) {
                     "downloadFolder" to getPublicFolderLabel(),
                 )
                 postToMain { onSuccess(info) }
-            } catch (e: Exception) {
-                postToMain { onError("INIT_ERROR", e.message ?: "Gagal inisialisasi engine yt-dlp") }
+            } catch (t: Throwable) {
+                Log.e(TAG, "initEngine failed", t)
+                postToMain { onError("INIT_ERROR", t.message ?: "Gagal inisialisasi engine yt-dlp") }
             }
         }
     }
@@ -72,14 +82,20 @@ class MediaEngineBridge(private val context: Context) {
     private fun ensureInitialized() {
         if (isInitialized) return
         YoutubeDL.getInstance().init(context)
-        ffmpegReady = runCatching {
+        ffmpegReady = try {
             FFmpeg.getInstance().init(context)
             true
-        }.getOrDefault(false)
-        aria2cReady = runCatching {
+        } catch (t: Throwable) {
+            Log.w(TAG, "FFmpeg init warning", t)
+            false
+        }
+        aria2cReady = try {
             Aria2c.getInstance().init(context)
             true
-        }.getOrDefault(false)
+        } catch (t: Throwable) {
+            Log.w(TAG, "Aria2c init warning", t)
+            false
+        }
         isInitialized = true
     }
 
@@ -108,8 +124,9 @@ class MediaEngineBridge(private val context: Context) {
                         ),
                     )
                 }
-            } catch (e: Exception) {
-                postToMain { onError("UPDATE_ERROR", e.message ?: "Gagal memperbarui engine yt-dlp") }
+            } catch (t: Throwable) {
+                Log.e(TAG, "updateEngine failed", t)
+                postToMain { onError("UPDATE_ERROR", t.message ?: "Gagal memperbarui engine yt-dlp") }
             }
         }
     }
@@ -142,8 +159,9 @@ class MediaEngineBridge(private val context: Context) {
                     )
                 }
                 postToMain { onSuccess(rawOut) }
-            } catch (e: Exception) {
-                postToMain { onError("EXTRACT_ERROR", sanitizeError(e.message)) }
+            } catch (t: Throwable) {
+                Log.e(TAG, "extractInfo failed", t)
+                postToMain { onError("EXTRACT_ERROR", sanitizeError(t.message)) }
             }
         }
     }
@@ -234,8 +252,9 @@ class MediaEngineBridge(private val context: Context) {
                 val exported = exportFileToPublicDownloads(primaryFile, primaryFile.name, mimeType)
 
                 postToMain { onSuccess(exported) }
-            } catch (e: Exception) {
-                val msg = e.message.orEmpty()
+            } catch (t: Throwable) {
+                Log.e(TAG, "downloadWithYtDlp failed", t)
+                val msg = t.message.orEmpty()
                 if (msg.contains("destroyed", ignoreCase = true) || msg.contains("interrupt", ignoreCase = true)) {
                     postToMain { onError("CANCELLED", "Unduhan dibatalkan.") }
                 } else {
@@ -248,9 +267,11 @@ class MediaEngineBridge(private val context: Context) {
     }
 
     fun cancelDownload(taskId: String): Boolean {
-        return runCatching {
+        return try {
             YoutubeDL.getInstance().destroyProcessById(taskId)
-        }.getOrDefault(false)
+        } catch (_: Throwable) {
+            false
+        }
     }
 
     fun saveFileToDownloads(
@@ -271,8 +292,9 @@ class MediaEngineBridge(private val context: Context) {
                 val exported = exportFileToPublicDownloads(sourceFile, safeName, resolvedMime)
                 runCatching { sourceFile.delete() }
                 postToMain { onSuccess(exported) }
-            } catch (e: Exception) {
-                postToMain { onError("SAVE_ERROR", e.message ?: "Gagal menyimpan file ke folder Download") }
+            } catch (t: Throwable) {
+                Log.e(TAG, "saveFileToDownloads failed", t)
+                postToMain { onError("SAVE_ERROR", t.message ?: "Gagal menyimpan file ke folder Download") }
             }
         }
     }
@@ -290,7 +312,7 @@ class MediaEngineBridge(private val context: Context) {
             val values = ContentValues().apply {
                 put(MediaStore.Downloads.DISPLAY_NAME, cleanName)
                 put(MediaStore.Downloads.MIME_TYPE, mimeType)
-                put(MediaStore.Downloads.RELATIVE_PATH, "${Environment.DIRECTORY_DOWNLOADS}/LinkDrop")
+                put(MediaStore.Downloads.RELATIVE_PATH, "${Environment.DIRECTORY_DOWNLOADS}/all_download")
                 put(MediaStore.Downloads.IS_PENDING, 1)
             }
 
@@ -320,25 +342,25 @@ class MediaEngineBridge(private val context: Context) {
                 }
 
                 return mapOf(
-                    "savedPath" to "/storage/emulated/0/Download/LinkDrop/$finalDisplayName",
+                    "savedPath" to "/storage/emulated/0/Download/all_download/$finalDisplayName",
                     "contentUri" to uri.toString(),
                     "fileName" to finalDisplayName,
                     "fileSize" to fileSize,
                     "mimeType" to mimeType,
                 )
-            } catch (e: Exception) {
+            } catch (t: Throwable) {
                 runCatching { resolver.delete(uri, null, null) }
-                throw e
+                throw t
             }
         } else {
             @Suppress("DEPRECATION")
             val publicDownloads = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
-            val targetDir = File(publicDownloads, "LinkDrop")
+            val targetDir = File(publicDownloads, "all_download")
             val dirReady = (targetDir.exists() || targetDir.mkdirs()) && targetDir.canWrite()
             val finalDir = if (dirReady) {
                 targetDir
             } else {
-                File(context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), "LinkDrop").apply { mkdirs() }
+                File(context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), "all_download").apply { mkdirs() }
             }
 
             val destFile = resolveUniqueFile(finalDir, cleanName)
@@ -434,10 +456,15 @@ class MediaEngineBridge(private val context: Context) {
 
     fun getStorageInfo(): Map<String, Any?> {
         val cacheBytes = calculateDirSize(context.cacheDir)
+        val version = try {
+            if (isInitialized) YoutubeDL.getInstance().version(context) ?: "bundled" else "memuat..."
+        } catch (_: Throwable) {
+            "bundled"
+        }
         return mapOf(
             "downloadFolder" to getPublicFolderLabel(),
             "cacheBytes" to cacheBytes,
-            "version" to (runCatching { YoutubeDL.getInstance().version(context) }.getOrNull() ?: "bundled"),
+            "version" to version,
             "ffmpegReady" to ffmpegReady,
             "aria2cReady" to aria2cReady,
         )
@@ -471,7 +498,7 @@ class MediaEngineBridge(private val context: Context) {
         return null
     }
 
-    private fun getPublicFolderLabel(): String = "Download/LinkDrop"
+    private fun getPublicFolderLabel(): String = "Download/all_download"
 
     private fun resolveUniqueFile(dir: File, name: String): File {
         var candidate = File(dir, name)
@@ -492,7 +519,7 @@ class MediaEngineBridge(private val context: Context) {
             .replace(Regex("[\\\\/:*?\"<>|\\r\\n\\t]+"), "_")
             .trim()
             .trim('.')
-        return if (cleaned.isEmpty()) "linkdrop_media.mp4" else cleaned.take(120)
+        return if (cleaned.isEmpty()) "all_download_media.mp4" else cleaned.take(120)
     }
 
     private fun detectMimeType(name: String): String {

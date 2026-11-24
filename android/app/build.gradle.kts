@@ -20,7 +20,7 @@ android {
         applicationId = "com.linkdrop.linkdrop_downloader"
         // youtubedl-android requires minSdk >= 24
         minSdk = maxOf(flutter.minSdkVersion, 24)
-        targetSdk = flutter.targetSdkVersion
+        targetSdk = 35
         versionCode = flutter.versionCode
         versionName = flutter.versionName
     }
@@ -37,6 +37,15 @@ android {
     buildTypes {
         release {
             signingConfig = signingConfigs.getByName("debug")
+            // Disable R8 shrinking/obfuscation so reflection-heavy libraries
+            // (youtubedl-android, Apache Commons Compress, Jackson, JNI shared_preferences)
+            // never get stripped and crash on launch.
+            isMinifyEnabled = false
+            isShrinkResources = false
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro",
+            )
         }
     }
 }

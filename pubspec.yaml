@@ -1,7 +1,7 @@
 name: linkdrop_downloader
-description: "LinkDrop — All-in-One Media Downloader for YouTube, TikTok, Douyin, Instagram & X."
+description: "all_download — All-in-One Media Downloader for YouTube, TikTok, Douyin, Instagram & X."
 publish_to: 'none'
-version: 1.0.0+1
+version: 1.0.1+2
 
 environment:
   sdk: ^3.13.7

@@ -21,13 +21,17 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   int _tabIndex = 0;
   String? _detectedClipboardUrl;
   String? _lastDismissedClipboardUrl;
+  bool _didAutoRequestPermission = false;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     widget.manager.onIncomingSharedLink = _handleSharedLink;
-    WidgetsBinding.instance.addPostFrameCallback((_) => _checkClipboard());
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _checkClipboard();
+      _promptPermissionIfNeeded();
+    });
   }
 
   @override
@@ -41,6 +45,16 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
       _checkClipboard();
+      widget.manager.refreshPermissions();
+    }
+  }
+
+  Future<void> _promptPermissionIfNeeded() async {
+    if (_didAutoRequestPermission) return;
+    _didAutoRequestPermission = true;
+    final status = await widget.manager.refreshPermissions();
+    if (!status.granted && mounted) {
+      await widget.manager.requestStoragePermissions();
     }
   }
 

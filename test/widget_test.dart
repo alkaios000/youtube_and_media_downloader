@@ -5,7 +5,7 @@ import 'package:linkdrop_downloader/services/download_manager.dart';
 import 'package:linkdrop_downloader/theme/app_theme.dart';
 
 void main() {
-  testWidgets('LinkDrop home renders all 5 supported platforms and controls',
+  testWidgets('all_download home renders all 5 supported platforms and controls',
       (WidgetTester tester) async {
     final manager = DownloadManager();
 
@@ -17,7 +17,7 @@ void main() {
     );
     await tester.pump();
 
-    expect(find.text('LinkDrop'), findsOneWidget);
+    expect(find.text('all_download'), findsOneWidget);
     expect(find.text('YouTube'), findsOneWidget);
     expect(find.text('TikTok'), findsOneWidget);
     expect(find.text('Douyin'), findsOneWidget);

@@ -1,3 +1,5 @@
+import 'dart:ui';
+
 import 'package:flutter/material.dart';
 
 import 'screens/home_shell.dart';
@@ -6,6 +8,13 @@ import 'theme/app_theme.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
+  FlutterError.onError = (details) {
+    FlutterError.presentError(details);
+  };
+  PlatformDispatcher.instance.onError = (error, stack) {
+    debugPrint('Unhandled error: $error');
+    return true;
+  };
   runApp(const LinkDropApp());
 }
 
@@ -38,7 +47,7 @@ class _LinkDropAppState extends State<LinkDropApp> {
       listenable: _manager,
       builder: (context, _) {
         return MaterialApp(
-          title: 'LinkDrop — Media Downloader',
+          title: 'all_download',
           debugShowCheckedModeBanner: false,
           themeMode: _manager.settings.themeMode,
           theme: AppTheme.lightTheme(),

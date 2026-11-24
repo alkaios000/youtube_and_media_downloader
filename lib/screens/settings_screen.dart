@@ -123,6 +123,45 @@ class SettingsScreen extends StatelessWidget {
 
               const SizedBox(height: 16),
 
+              // Permissions Card
+              Card(
+                child: ListTile(
+                  leading: Icon(
+                    manager.permissionStatus.granted
+                        ? Icons.verified_user_outlined
+                        : Icons.shield_outlined,
+                    color: manager.permissionStatus.granted
+                        ? const Color(0xFF22C55E)
+                        : const Color(0xFFF59E0B),
+                  ),
+                  title: const Text('Izin Penyimpanan & Media'),
+                  subtitle: Text(
+                    manager.permissionStatus.granted
+                        ? 'Diizinkan — siap menyimpan & membuka hasil unduhan'
+                        : 'Belum diizinkan — ketuk untuk meminta izin sistem',
+                  ),
+                  trailing: FilledButton.tonal(
+                    onPressed: () async {
+                      if (manager.permissionStatus.granted ||
+                          manager.permissionStatus.permanentlyDenied) {
+                        await manager.openAppSettings();
+                      } else {
+                        await manager.requestStoragePermissions();
+                      }
+                    },
+                    child: Text(
+                      manager.permissionStatus.granted
+                          ? 'Atur'
+                          : (manager.permissionStatus.permanentlyDenied
+                              ? 'Pengaturan'
+                              : 'Izinkan'),
+                    ),
+                  ),
+                ),
+              ),
+
+              const SizedBox(height: 16),
+
               // Preferences Card
               Card(
                 child: Column(
