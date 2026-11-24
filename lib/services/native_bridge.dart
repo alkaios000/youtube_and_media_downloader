@@ -20,7 +20,7 @@ class EngineStatus {
         version: 'memuat...',
         ffmpegReady: false,
         aria2cReady: false,
-        downloadFolder: 'DCIM/all_download',
+        downloadFolder: 'Pictures/all_download',
       );
 
   factory EngineStatus.fromMap(Map<dynamic, dynamic> map) {
@@ -29,7 +29,7 @@ class EngineStatus {
       version: map['version']?.toString() ?? 'bundled',
       ffmpegReady: map['ffmpegReady'] as bool? ?? false,
       aria2cReady: map['aria2cReady'] as bool? ?? false,
-      downloadFolder: map['downloadFolder']?.toString() ?? 'DCIM/all_download',
+      downloadFolder: map['downloadFolder']?.toString() ?? 'Pictures/all_download',
     );
   }
 }
@@ -40,6 +40,7 @@ class SavedFileResult {
   final String fileName;
   final int fileSize;
   final String mimeType;
+  final String folderLabel;
 
   const SavedFileResult({
     required this.savedPath,
@@ -47,6 +48,7 @@ class SavedFileResult {
     required this.fileName,
     required this.fileSize,
     required this.mimeType,
+    required this.folderLabel,
   });
 
   factory SavedFileResult.fromMap(Map<dynamic, dynamic> map) {
@@ -56,6 +58,7 @@ class SavedFileResult {
       fileName: map['fileName']?.toString() ?? 'media.mp4',
       fileSize: (map['fileSize'] as num?)?.toInt() ?? 0,
       mimeType: map['mimeType']?.toString() ?? 'video/mp4',
+      folderLabel: map['folderLabel']?.toString() ?? 'Pictures/all_download',
     );
   }
 }

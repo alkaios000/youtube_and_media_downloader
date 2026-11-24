@@ -349,7 +349,7 @@ class MediaExtractorService {
         height: maxHeight,
         estimatedBytes: maxSize,
         ytDlpFormatSelector:
-            'bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best[ext=mp4]/best',
+            'bestvideo[vcodec^=avc1][ext=mp4]+bestaudio[ext=m4a]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best[ext=mp4]/best',
       ),
     );
 
@@ -383,7 +383,7 @@ class MediaExtractorService {
           height: tier,
           estimatedBytes: estBytes,
           ytDlpFormatSelector:
-              'bestvideo[height<=$tier][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=$tier]+bestaudio/best[height<=$tier]/best',
+              'bestvideo[vcodec^=avc1][height<=$tier][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=$tier][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=$tier]+bestaudio/best[height<=$tier]/best',
         ),
       );
     }

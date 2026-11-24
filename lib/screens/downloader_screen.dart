@@ -671,7 +671,7 @@ class _TipsCard extends StatelessWidget {
             const _TipRow(
               number: '3',
               text:
-                  'Semua video & foto otomatis masuk ke album/folder DCIM/all_download dengan waktu terbaru agar langsung muncul di Galeri & WhatsApp.',
+                  'Semua video & foto otomatis masuk ke album/folder Pictures/all_download dengan waktu terbaru agar langsung muncul paling atas di Galeri & WhatsApp.',
             ),
           ],
         ),

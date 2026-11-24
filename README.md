@@ -13,7 +13,7 @@ Aplikasi Android berbasis **Flutter + Native Kotlin (`youtubedl-android` / yt-dl
 - **Hanya dari Link**: Cukup tempel link (termasuk teks share acak dari Douyin/TikTok) atau kirim lewat menu **Bagikan / Share** Android langsung ke **all_download**.
 - **Deteksi Otomatis Clipboard**: Banner 1-klik saat membuka aplikasi dengan tautan media di clipboard.
 - **Pilih Kualitas atau Unduh Cepat**: Pilih resolusi spesifik (4K / 1080p / 720p / 480p / MP3 / M4A) atau tekan **Unduh Cepat** dengan kualitas default.
-- **Langsung Masuk Galeri, WhatsApp & Folder Tersendiri**: Video dan foto otomatis tersimpan di album/folder tersendiri **`DCIM/all_download`** (audio di **`Music/all_download`**) via Android `MediaStore` dengan timestamp terbaru sehingga langsung muncul paling atas di Galeri dan WhatsApp.
+- **Langsung Masuk Galeri, WhatsApp & Folder Tersendiri**: Video dan foto otomatis tersimpan di album/folder tersendiri **`Pictures/all_download`** (audio di **`Music/all_download`**) via Android `MediaStore`, dengan metadata `creation_time` MP4 diperbarui ke waktu saat ini lewat FFmpeg (`-c copy`) sehingga langsung muncul paling atas di Galeri dan WhatsApp.
 - **Update Engine yt-dlp di Dalam Aplikasi**: Perbarui binary `yt-dlp` (Stable / Nightly) langsung dari tab **Pengaturan** tanpa harus install ulang APK.
 
 ## Cara Menjalankan di Android Studio / CLI

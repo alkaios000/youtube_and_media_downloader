@@ -314,9 +314,7 @@ class DownloadManager extends ChangeNotifier {
         (item) => item.copyWith(
           status: DownloadStatus.completed,
           progress: 100,
-          statusText: option.isAudio
-              ? 'Tersimpan di Music/all_download'
-              : 'Tersimpan di Galeri (DCIM/all_download)',
+          statusText: 'Tersimpan di ${saved.folderLabel}',
           savedPath: saved.savedPath,
           contentUri: saved.contentUri,
           fileName: saved.fileName,
@@ -438,10 +436,8 @@ class DownloadManager extends ChangeNotifier {
           status: DownloadStatus.completed,
           progress: 100,
           statusText: urlsToDownload.length > 1
-              ? '${urlsToDownload.length} gambar tersimpan di Galeri (DCIM/all_download)'
-              : (option.isAudio
-                  ? 'Tersimpan di Music/all_download'
-                  : 'Tersimpan di Galeri (DCIM/all_download)'),
+              ? '${urlsToDownload.length} gambar tersimpan di ${finalSaved.folderLabel}'
+              : 'Tersimpan di ${finalSaved.folderLabel}',
           savedPath: finalSaved.savedPath,
           contentUri: finalSaved.contentUri,
           fileName: finalSaved.fileName,
@@ -495,7 +491,7 @@ class DownloadManager extends ChangeNotifier {
   }
 
   String _prettifyYtDlpLine(String rawLine, double progress, int etaSec) {
-    if (rawLine.startsWith('Mencoba ')) {
+    if (rawLine.startsWith('Mencoba ') || rawLine.startsWith('Memperbarui ')) {
       return rawLine;
     }
     final lower = rawLine.toLowerCase();
