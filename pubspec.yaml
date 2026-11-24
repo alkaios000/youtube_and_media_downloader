@@ -1,7 +1,7 @@
 name: linkdrop_downloader
 description: "all_download — All-in-One Media Downloader for YouTube, TikTok, Douyin, Instagram & X."
 publish_to: 'none'
-version: 1.0.2+3
+version: 1.0.3+4
 
 environment:
   sdk: ^3.13.7
@@ -24,3 +24,5 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
+  assets:
+    - assets/icon/app_icon.png

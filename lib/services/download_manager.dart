@@ -314,7 +314,9 @@ class DownloadManager extends ChangeNotifier {
         (item) => item.copyWith(
           status: DownloadStatus.completed,
           progress: 100,
-          statusText: 'Tersimpan di Download/all_download',
+          statusText: option.isAudio
+              ? 'Tersimpan di Music/all_download'
+              : 'Tersimpan di Galeri (DCIM/all_download)',
           savedPath: saved.savedPath,
           contentUri: saved.contentUri,
           fileName: saved.fileName,
@@ -436,8 +438,10 @@ class DownloadManager extends ChangeNotifier {
           status: DownloadStatus.completed,
           progress: 100,
           statusText: urlsToDownload.length > 1
-              ? '${urlsToDownload.length} gambar tersimpan di Download/all_download'
-              : 'Tersimpan di Download/all_download',
+              ? '${urlsToDownload.length} gambar tersimpan di Galeri (DCIM/all_download)'
+              : (option.isAudio
+                  ? 'Tersimpan di Music/all_download'
+                  : 'Tersimpan di Galeri (DCIM/all_download)'),
           savedPath: finalSaved.savedPath,
           contentUri: finalSaved.contentUri,
           fileName: finalSaved.fileName,

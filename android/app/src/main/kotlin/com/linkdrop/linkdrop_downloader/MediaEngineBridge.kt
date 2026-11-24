@@ -423,18 +423,92 @@ class MediaEngineBridge(private val context: Context) {
     ): Map<String, Any?> {
         val cleanName = sanitizeFileName(requestedName)
         val fileSize = sourceFile.length()
+        val nowMs = System.currentTimeMillis()
+        val nowSec = nowMs / 1000L
+        runCatching { sourceFile.setLastModified(nowMs) }
+
+        val isVideo = mimeType.startsWith("video/", ignoreCase = true)
+        val isImage = mimeType.startsWith("image/", ignoreCase = true)
+        val isAudio = mimeType.startsWith("audio/", ignoreCase = true)
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             val resolver = context.contentResolver
-            val values = ContentValues().apply {
-                put(MediaStore.Downloads.DISPLAY_NAME, cleanName)
-                put(MediaStore.Downloads.MIME_TYPE, mimeType)
-                put(MediaStore.Downloads.RELATIVE_PATH, "${Environment.DIRECTORY_DOWNLOADS}/all_download")
-                put(MediaStore.Downloads.IS_PENDING, 1)
+
+            // Put videos & photos into DCIM/all_download via MediaStore.Video/Images so they
+            // immediately appear in their own "all_download" album AND at the top of WhatsApp/Gallery.
+            // Put audio into Music/all_download via MediaStore.Audio.
+            val targets = when {
+                isVideo -> listOf(
+                    Triple(
+                        MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
+                        "${Environment.DIRECTORY_DCIM}/all_download",
+                        "/storage/emulated/0/DCIM/all_download",
+                    ),
+                    Triple(
+                        MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
+                        "${Environment.DIRECTORY_MOVIES}/all_download",
+                        "/storage/emulated/0/Movies/all_download",
+                    ),
+                )
+                isImage -> listOf(
+                    Triple(
+                        MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                        "${Environment.DIRECTORY_DCIM}/all_download",
+                        "/storage/emulated/0/DCIM/all_download",
+                    ),
+                    Triple(
+                        MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                        "${Environment.DIRECTORY_PICTURES}/all_download",
+                        "/storage/emulated/0/Pictures/all_download",
+                    ),
+                )
+                isAudio -> listOf(
+                    Triple(
+                        MediaStore.Audio.Media.EXTERNAL_CONTENT_URI,
+                        "${Environment.DIRECTORY_MUSIC}/all_download",
+                        "/storage/emulated/0/Music/all_download",
+                    ),
+                )
+                else -> listOf(
+                    Triple(
+                        MediaStore.Downloads.EXTERNAL_CONTENT_URI,
+                        "${Environment.DIRECTORY_DOWNLOADS}/all_download",
+                        "/storage/emulated/0/Download/all_download",
+                    ),
+                )
             }
 
-            val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
-                ?: throw IllegalStateException("Gagal membuat entri MediaStore di folder Downloads.")
+            var insertedUri: Uri? = null
+            var chosenPublicBase = "/storage/emulated/0/DCIM/all_download"
+            var lastInsertError: Throwable? = null
+
+            for ((collectionUri, relativePath, publicBase) in targets) {
+                val values = ContentValues().apply {
+                    put(MediaStore.MediaColumns.DISPLAY_NAME, cleanName)
+                    put(MediaStore.MediaColumns.MIME_TYPE, mimeType)
+                    put(MediaStore.MediaColumns.RELATIVE_PATH, relativePath)
+                    put(MediaStore.MediaColumns.DATE_ADDED, nowSec)
+                    put(MediaStore.MediaColumns.DATE_MODIFIED, nowSec)
+                    if (isVideo || isImage) {
+                        put(MediaStore.MediaColumns.DATE_TAKEN, nowMs)
+                    }
+                    put(MediaStore.MediaColumns.IS_PENDING, 1)
+                }
+                try {
+                    val uri = resolver.insert(collectionUri, values)
+                    if (uri != null) {
+                        insertedUri = uri
+                        chosenPublicBase = publicBase
+                        break
+                    }
+                } catch (t: Throwable) {
+                    lastInsertError = t
+                    Log.w(TAG, "MediaStore insert failed for $relativePath, trying fallback", t)
+                }
+            }
+
+            val uri = insertedUri
+                ?: throw (lastInsertError ?: IllegalStateException("Gagal membuat entri MediaStore di Galeri."))
 
             try {
                 resolver.openOutputStream(uri)?.use { out ->
@@ -443,23 +517,65 @@ class MediaEngineBridge(private val context: Context) {
                     }
                 } ?: throw IllegalStateException("Gagal membuka stream output MediaStore.")
 
+                val finishMs = System.currentTimeMillis()
+                val finishSec = finishMs / 1000L
+
                 val doneValues = ContentValues().apply {
-                    put(MediaStore.Downloads.IS_PENDING, 0)
+                    put(MediaStore.MediaColumns.IS_PENDING, 0)
+                    put(MediaStore.MediaColumns.DATE_ADDED, finishSec)
+                    put(MediaStore.MediaColumns.DATE_MODIFIED, finishSec)
+                    if (isVideo || isImage) {
+                        put(MediaStore.MediaColumns.DATE_TAKEN, finishMs)
+                    }
                 }
                 resolver.update(uri, doneValues, null, null)
 
+                // Query final display name & real file path, then stamp fresh timestamp AGAIN
+                // after IS_PENDING=0 so any old MP4 creation_time / EXIF date is overridden to NOW.
                 var finalDisplayName = cleanName
-                resolver.query(uri, arrayOf(MediaStore.Downloads.DISPLAY_NAME), null, null, null)?.use { cursor ->
-                    if (cursor.moveToFirst()) {
-                        val idx = cursor.getColumnIndex(MediaStore.Downloads.DISPLAY_NAME)
-                        if (idx >= 0) {
-                            finalDisplayName = cursor.getString(idx) ?: cleanName
+                var realFilePath: String? = null
+                @Suppress("DEPRECATION")
+                val projection = arrayOf(
+                    MediaStore.MediaColumns.DISPLAY_NAME,
+                    MediaStore.MediaColumns.DATA,
+                )
+                runCatching {
+                    resolver.query(uri, projection, null, null, null)?.use { cursor ->
+                        if (cursor.moveToFirst()) {
+                            val nameIdx = cursor.getColumnIndex(MediaStore.MediaColumns.DISPLAY_NAME)
+                            if (nameIdx >= 0) {
+                                finalDisplayName = cursor.getString(nameIdx) ?: cleanName
+                            }
+                            @Suppress("DEPRECATION")
+                            val dataIdx = cursor.getColumnIndex(MediaStore.MediaColumns.DATA)
+                            if (dataIdx >= 0) {
+                                realFilePath = cursor.getString(dataIdx)
+                            }
                         }
                     }
                 }
 
+                runCatching {
+                    if (!realFilePath.isNullOrBlank()) {
+                        val f = File(realFilePath!!)
+                        if (f.exists()) f.setLastModified(finishMs)
+                    }
+                }
+
+                runCatching {
+                    val refreshNowMs = System.currentTimeMillis()
+                    val refreshNowSec = refreshNowMs / 1000L
+                    val refreshValues = ContentValues().apply {
+                        put(MediaStore.MediaColumns.DATE_MODIFIED, refreshNowSec)
+                        if (isVideo || isImage) {
+                            put(MediaStore.MediaColumns.DATE_TAKEN, refreshNowMs)
+                        }
+                    }
+                    resolver.update(uri, refreshValues, null, null)
+                }
+
                 return mapOf(
-                    "savedPath" to "/storage/emulated/0/Download/all_download/$finalDisplayName",
+                    "savedPath" to (realFilePath ?: "$chosenPublicBase/$finalDisplayName"),
                     "contentUri" to uri.toString(),
                     "fileName" to finalDisplayName,
                     "fileSize" to fileSize,
@@ -471,13 +587,19 @@ class MediaEngineBridge(private val context: Context) {
             }
         } else {
             @Suppress("DEPRECATION")
-            val publicDownloads = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
-            val targetDir = File(publicDownloads, "all_download")
+            val rootType = when {
+                isVideo || isImage -> Environment.DIRECTORY_DCIM
+                isAudio -> Environment.DIRECTORY_MUSIC
+                else -> Environment.DIRECTORY_DOWNLOADS
+            }
+            @Suppress("DEPRECATION")
+            val publicBase = Environment.getExternalStoragePublicDirectory(rootType)
+            val targetDir = File(publicBase, "all_download")
             val dirReady = (targetDir.exists() || targetDir.mkdirs()) && targetDir.canWrite()
             val finalDir = if (dirReady) {
                 targetDir
             } else {
-                File(context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), "all_download").apply { mkdirs() }
+                File(context.getExternalFilesDir(rootType), "all_download").apply { mkdirs() }
             }
 
             val destFile = resolveUniqueFile(finalDir, cleanName)
@@ -486,13 +608,27 @@ class MediaEngineBridge(private val context: Context) {
                     input.copyTo(output, bufferSize = 64 * 1024)
                 }
             }
+            val finishMs = System.currentTimeMillis()
+            val finishSec = finishMs / 1000L
+            runCatching { destFile.setLastModified(finishMs) }
 
             MediaScannerConnection.scanFile(
                 context,
                 arrayOf(destFile.absolutePath),
                 arrayOf(mimeType),
-                null,
-            )
+            ) { _, scannedUri ->
+                if (scannedUri != null) {
+                    runCatching {
+                        val refreshValues = ContentValues().apply {
+                            put(MediaStore.MediaColumns.DATE_MODIFIED, finishSec)
+                            if (isVideo || isImage) {
+                                put(MediaStore.MediaColumns.DATE_TAKEN, finishMs)
+                            }
+                        }
+                        context.contentResolver.update(scannedUri, refreshValues, null, null)
+                    }
+                }
+            }
 
             return mapOf(
                 "savedPath" to destFile.absolutePath,
@@ -615,7 +751,7 @@ class MediaEngineBridge(private val context: Context) {
         return null
     }
 
-    private fun getPublicFolderLabel(): String = "Download/all_download"
+    private fun getPublicFolderLabel(): String = "DCIM/all_download (Video/Foto) & Music/all_download"
 
     private fun resolveUniqueFile(dir: File, name: String): File {
         var candidate = File(dir, name)

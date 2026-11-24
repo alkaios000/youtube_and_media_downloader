@@ -20,7 +20,7 @@ class EngineStatus {
         version: 'memuat...',
         ffmpegReady: false,
         aria2cReady: false,
-        downloadFolder: 'Download/all_download',
+        downloadFolder: 'DCIM/all_download',
       );
 
   factory EngineStatus.fromMap(Map<dynamic, dynamic> map) {
@@ -29,7 +29,7 @@ class EngineStatus {
       version: map['version']?.toString() ?? 'bundled',
       ffmpegReady: map['ffmpegReady'] as bool? ?? false,
       aria2cReady: map['aria2cReady'] as bool? ?? false,
-      downloadFolder: map['downloadFolder']?.toString() ?? 'Download/all_download',
+      downloadFolder: map['downloadFolder']?.toString() ?? 'DCIM/all_download',
     );
   }
 }
