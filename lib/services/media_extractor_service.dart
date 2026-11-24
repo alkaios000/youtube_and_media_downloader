@@ -20,51 +20,110 @@ class MediaExtractorService {
   }) async {
     final cleanUrl = UrlParser.extractUrl(rawInput);
     if (cleanUrl == null) {
-      throw Exception('Link tidak valid. Tempelkan URL dari YouTube, TikTok, Douyin, Instagram, atau X.');
+      throw Exception(
+        'Link tidak valid. Tempelkan URL dari YouTube, TikTok, Douyin, Instagram, atau X.',
+      );
     }
 
     final platform = UrlParser.detectPlatform(cleanUrl);
 
-    // Strategy 1: Douyin works best via direct mobile share extractor (no cookies needed),
-    // falling back to yt-dlp (e.g. if user supplied Douyin cookies).
+    // Strategy 1: Douyin (v.douyin.com / douyin.com / iesdouyin.com)
+    // 1) Fast direct HTML/API attempt -> 2) Native Android Chromium WebView Sniffer
+    // (solves v.douyin.com redirect + Argus JS challenge!) -> 3) yt-dlp fallback.
     if (platform == MediaPlatform.douyin) {
       final directDouyin = await _direct.extractDouyin(cleanUrl);
       if (directDouyin != null && directDouyin.options.isNotEmpty) {
         return directDouyin;
       }
+
+      try {
+        final sniffed = await bridge.sniffMedia(
+          url: cleanUrl,
+          platform: 'douyin',
+          timeoutMs: 16000,
+        );
+        final fromSniffer = _buildMediaInfoFromSniff(
+          originalUrl: cleanUrl,
+          platform: MediaPlatform.douyin,
+          sniffed: sniffed,
+          extractorLabel: 'Douyin Browser Engine',
+        );
+        if (fromSniffer != null) return fromSniffer;
+      } catch (_) {
+        // Fall through to yt-dlp fallback
+      }
+
       try {
         return await _extractWithYtDlp(cleanUrl, platform, cookiesPath);
       } catch (e) {
         throw Exception(
-          'Gagal mengambil video Douyin. Pastikan link video bersifat publik, atau tambahkan cookies Douyin di menu Pengaturan.\n(${_friendlyError(e)})',
+          'Gagal mengambil video Douyin ($cleanUrl). Coba login singkat lewat Pengaturan -> Login Browser Douyin, lalu coba lagi.\n(${_friendlyError(e)})',
         );
       }
     }
 
-    // Strategy 2: TikTok — try yt-dlp first, seamlessly fall back to TikWM (great for photo slideshows & rate-limits).
+    // Strategy 2: Instagram (Reels, Posts, Carousels, /share/ short links)
+    // 1) Canonicalize /share/... -> 2) yt-dlp (uses synced browser cookies too!)
+    // -> 3) Direct GraphQL/Embed -> 4) Native Android Chromium WebView Sniffer!
+    if (platform == MediaPlatform.instagram) {
+      final canonicalUrl = await _direct.resolveInstagramUrl(cleanUrl);
+
+      // Try yt-dlp first (fast & supports HD audio+video merge when cookies or public API allow)
+      try {
+        final ytInfo = await _extractWithYtDlp(canonicalUrl, platform, cookiesPath);
+        if (ytInfo.options.isNotEmpty) return ytInfo;
+      } catch (_) {
+        // Fall through to direct & WebView extractors
+      }
+
+      // Try direct anonymous GraphQL + Embed (handles photos & carousels too)
+      final directIg = await _direct.extractInstagramDirect(canonicalUrl);
+      if (directIg != null && directIg.options.isNotEmpty) {
+        return directIg;
+      }
+
+      // Fallback to native Android Chromium WebView Sniffer
+      try {
+        final sniffed = await bridge.sniffMedia(
+          url: canonicalUrl,
+          platform: 'instagram',
+          timeoutMs: 15000,
+        );
+        final fromSniffer = _buildMediaInfoFromSniff(
+          originalUrl: canonicalUrl,
+          platform: MediaPlatform.instagram,
+          sniffed: sniffed,
+          extractorLabel: 'Instagram Browser Engine',
+        );
+        if (fromSniffer != null) return fromSniffer;
+      } catch (_) {}
+
+      throw Exception(
+        'Instagram membatasi akses anonim untuk konten ini. Buka tab Pengaturan -> Login Browser (Instagram) sekali saja, lalu tempel ulang link ini.',
+      );
+    }
+
+    // Strategy 3: TikTok — try yt-dlp first, fall back to TikWM (slideshows & rate-limits).
     if (platform == MediaPlatform.tiktok) {
       try {
         final info = await _extractWithYtDlp(cleanUrl, platform, cookiesPath);
         if (info.options.isNotEmpty) return info;
-      } catch (_) {
-        // Fall through to TikWM fallback
-      }
+      } catch (_) {}
       final fallback = await _direct.extractTikTokFallback(cleanUrl);
       if (fallback != null && fallback.options.isNotEmpty) {
         return fallback;
       }
-      throw Exception('Gagal mengambil media TikTok. Pastikan tautan video publik dan coba lagi.');
+      throw Exception(
+        'Gagal mengambil media TikTok. Pastikan tautan video publik dan coba lagi.',
+      );
     }
 
-    // Strategy 3: X (Twitter) — try yt-dlp first, seamlessly fall back to vxtwitter/fxtwitter
-    // (automatically handles photo-only tweets, GIFs, and X rate-limits!).
+    // Strategy 4: X (Twitter) — yt-dlp first, seamless fallback to vxtwitter/fxtwitter (videos + photos!).
     if (platform == MediaPlatform.x) {
       try {
         final info = await _extractWithYtDlp(cleanUrl, platform, cookiesPath);
         if (info.options.isNotEmpty) return info;
-      } catch (_) {
-        // Fall through to X direct fallback
-      }
+      } catch (_) {}
       final fallback = await _direct.extractXFallback(cleanUrl);
       if (fallback != null && fallback.options.isNotEmpty) {
         return fallback;
@@ -74,21 +133,97 @@ class MediaExtractorService {
       );
     }
 
-    // Strategy 4: YouTube, Instagram, and any other supported URL via yt-dlp native engine.
+    // Strategy 5: YouTube and all other supported sites via native yt-dlp engine.
     try {
       return await _extractWithYtDlp(cleanUrl, platform, cookiesPath);
     } catch (e) {
-      final msg = _friendlyError(e);
-      if (platform == MediaPlatform.instagram &&
-          (msg.toLowerCase().contains('login') ||
-              msg.toLowerCase().contains('cookie') ||
-              msg.toLowerCase().contains('rate-limit'))) {
-        throw Exception(
-          'Instagram meminta autentikasi untuk konten ini. Anda bisa menempelkan cookies.txt di menu Pengaturan -> Cookies.',
-        );
-      }
-      throw Exception(msg);
+      throw Exception(_friendlyError(e));
     }
+  }
+
+  MediaInfo? _buildMediaInfoFromSniff({
+    required String originalUrl,
+    required MediaPlatform platform,
+    required SniffedMediaResult sniffed,
+    required String extractorLabel,
+  }) {
+    final headers = <String, String>{
+      if (sniffed.userAgent.isNotEmpty) 'User-Agent': sniffed.userAgent,
+      if (sniffed.cookies.isNotEmpty) 'Cookie': sniffed.cookies,
+      if (sniffed.finalUrl.startsWith('http')) 'Referer': sniffed.finalUrl,
+    };
+
+    final options = <MediaFormatOption>[];
+
+    for (int i = 0; i < sniffed.videos.length && i < 4; i++) {
+      final videoUrl = sniffed.videos[i];
+      options.add(
+        MediaFormatOption(
+          id: 'sniff_vid_$i',
+          label: sniffed.videos.length > 1
+              ? 'Video Stream #${i + 1} (MP4)'
+              : (platform == MediaPlatform.douyin
+                  ? 'Video HD • Tanpa Watermark'
+                  : 'Video HD MP4'),
+          subtitle: 'MP4 • $extractorLabel',
+          extension: 'mp4',
+          kind: MediaKind.video,
+          engine: DownloadEngine.directHttp,
+          directUrl: videoUrl,
+          headers: headers,
+        ),
+      );
+    }
+
+    if (sniffed.images.isNotEmpty) {
+      final uniqueImages = sniffed.images.take(15).toList();
+      options.add(
+        MediaFormatOption(
+          id: 'sniff_images',
+          label: uniqueImages.length > 1
+              ? 'Semua Foto (${uniqueImages.length} gambar)'
+              : 'Foto HD',
+          subtitle: 'JPG • $extractorLabel',
+          extension: _guessImageExt(uniqueImages.first),
+          kind: MediaKind.image,
+          engine: DownloadEngine.directHttp,
+          directUrl: uniqueImages.first,
+          galleryUrls: uniqueImages,
+          headers: headers,
+        ),
+      );
+    }
+
+    if (options.isEmpty) return null;
+
+    final rawTitle = sniffed.title.trim();
+    final title = rawTitle.isNotEmpty
+        ? rawTitle
+        : '${platform.label}_${DateTime.now().millisecondsSinceEpoch}';
+    final author = sniffed.author.trim().isNotEmpty
+        ? sniffed.author.trim()
+        : platform.label;
+    final thumb = sniffed.thumbnail.startsWith('http')
+        ? sniffed.thumbnail
+        : (sniffed.images.isNotEmpty ? sniffed.images.first : null);
+
+    return MediaInfo(
+      originalUrl: originalUrl,
+      platform: platform,
+      title: title,
+      author: author,
+      thumbnailUrl: thumb,
+      extractorLabel: extractorLabel,
+      options: options,
+      thumbnailHeaders: headers,
+    );
+  }
+
+  String _guessImageExt(String url) {
+    final lower = url.toLowerCase();
+    if (lower.contains('.png')) return 'png';
+    if (lower.contains('.webp')) return 'webp';
+    return 'jpg';
   }
 
   Future<MediaInfo> _extractWithYtDlp(
@@ -214,7 +349,7 @@ class MediaExtractorService {
         height: maxHeight,
         estimatedBytes: maxSize,
         ytDlpFormatSelector:
-            'bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best',
+            'bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best[ext=mp4]/best',
       ),
     );
 
@@ -329,6 +464,8 @@ class MediaExtractorService {
         return parts[1].trim();
       }
     }
-    return text.isEmpty ? 'Terjadi kesalahan jaringan atau tautan tidak didukung.' : text;
+    return text.isEmpty
+        ? 'Terjadi kesalahan jaringan atau tautan tidak didukung.'
+        : text;
   }
 }

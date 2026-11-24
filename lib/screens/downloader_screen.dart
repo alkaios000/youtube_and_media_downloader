@@ -333,6 +333,24 @@ class _DownloaderScreenState extends State<DownloaderScreen> {
                 _ErrorBanner(
                   title: 'Gagal Memproses Tautan',
                   message: manager.analyzeError!,
+                  actionLabel: _detectedPlatform == MediaPlatform.instagram
+                      ? 'Login Browser Instagram'
+                      : (_detectedPlatform == MediaPlatform.douyin
+                          ? 'Login Browser Douyin'
+                          : null),
+                  onAction: (_detectedPlatform == MediaPlatform.instagram ||
+                          _detectedPlatform == MediaPlatform.douyin)
+                      ? () async {
+                          final target = _detectedPlatform == MediaPlatform.douyin
+                              ? 'douyin'
+                              : 'instagram';
+                          final saved = await manager.openBrowserLogin(target);
+                          if (saved && mounted) {
+                            _showSnack('Sesi $target tersimpan! Mencoba ulang...');
+                            await _analyze();
+                          }
+                        }
+                      : null,
                 ),
               ],
 
@@ -547,8 +565,15 @@ class _PermissionBanner extends StatelessWidget {
 class _ErrorBanner extends StatelessWidget {
   final String title;
   final String message;
+  final String? actionLabel;
+  final VoidCallback? onAction;
 
-  const _ErrorBanner({required this.title, required this.message});
+  const _ErrorBanner({
+    required this.title,
+    required this.message,
+    this.actionLabel,
+    this.onAction,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -590,6 +615,17 @@ class _ErrorBanner extends StatelessWidget {
                     height: 1.35,
                   ),
                 ),
+                if (actionLabel != null && onAction != null) ...[
+                  const SizedBox(height: 10),
+                  FilledButton.tonalIcon(
+                    onPressed: onAction,
+                    style: FilledButton.styleFrom(
+                      visualDensity: VisualDensity.compact,
+                    ),
+                    icon: const Icon(Icons.login_rounded, size: 17),
+                    label: Text(actionLabel!),
+                  ),
+                ],
               ],
             ),
           ),

@@ -29,18 +29,29 @@ void main() {
       expect(UrlParser.detectPlatform(shareText), MediaPlatform.tiktok);
     });
 
-    test('extracts clean Douyin URL from Chinese share text', () {
+    test('extracts clean Douyin URL from Chinese share text including glued CJK', () {
       const douyinShare =
           '7.43 复制打开抖音，看看【摄影师的作品】太美了！ https://v.douyin.com/iRNB2xyz/ 复制此链接，打开Dou音搜索';
-      final extracted = UrlParser.extractUrl(douyinShare);
-      expect(extracted, 'https://v.douyin.com/iRNB2xyz/');
+      expect(UrlParser.extractUrl(douyinShare), 'https://v.douyin.com/iRNB2xyz/');
       expect(UrlParser.detectPlatform(douyinShare), MediaPlatform.douyin);
+
+      const gluedShare = '6.17 复制打开抖音 https://v.douyin.com/CeiJ8kL/复制此链接';
+      expect(UrlParser.extractUrl(gluedShare), 'https://v.douyin.com/CeiJ8kL/');
+      expect(UrlParser.detectPlatform(gluedShare), MediaPlatform.douyin);
+
+      const bareDouyin = 'v.douyin.com/AbCd123/';
+      expect(UrlParser.extractUrl(bareDouyin), 'https://v.douyin.com/AbCd123/');
+      expect(UrlParser.detectPlatform(bareDouyin), MediaPlatform.douyin);
     });
 
-    test('detects Instagram Reels and Posts', () {
+    test('detects Instagram Reels, Posts, and /share/ links', () {
       const reel = 'https://www.instagram.com/reel/C9xYz123AbC/?igsh=abcd==';
       expect(UrlParser.extractUrl(reel), reel);
       expect(UrlParser.detectPlatform(reel), MediaPlatform.instagram);
+
+      const shareLink = 'https://www.instagram.com/share/reel/BA123xyz456/';
+      expect(UrlParser.extractUrl(shareLink), shareLink);
+      expect(UrlParser.detectPlatform(shareLink), MediaPlatform.instagram);
     });
 
     test('detects X and legacy Twitter links', () {

@@ -128,6 +128,49 @@ class PermissionStatusInfo {
   }
 }
 
+class SniffedMediaResult {
+  final String finalUrl;
+  final String title;
+  final String author;
+  final String thumbnail;
+  final List<String> videos;
+  final List<String> images;
+  final String cookies;
+  final String userAgent;
+
+  const SniffedMediaResult({
+    required this.finalUrl,
+    required this.title,
+    required this.author,
+    required this.thumbnail,
+    required this.videos,
+    required this.images,
+    required this.cookies,
+    required this.userAgent,
+  });
+
+  factory SniffedMediaResult.fromMap(Map<dynamic, dynamic> map) {
+    return SniffedMediaResult(
+      finalUrl: map['finalUrl']?.toString() ?? '',
+      title: map['title']?.toString() ?? '',
+      author: map['author']?.toString() ?? '',
+      thumbnail: map['thumbnail']?.toString() ?? '',
+      videos: (map['videos'] as List?)
+              ?.map((e) => e.toString())
+              .where((u) => u.startsWith('http'))
+              .toList(growable: false) ??
+          const [],
+      images: (map['images'] as List?)
+              ?.map((e) => e.toString())
+              .where((u) => u.startsWith('http'))
+              .toList(growable: false) ??
+          const [],
+      cookies: map['cookies']?.toString() ?? '',
+      userAgent: map['userAgent']?.toString() ?? '',
+    );
+  }
+}
+
 class NativeBridge {
   static const MethodChannel _channel =
       MethodChannel('com.linkdrop.downloader/engine');
@@ -177,6 +220,47 @@ class NativeBridge {
 
   Future<bool> openAppSettings() async {
     final ok = await _channel.invokeMethod<bool>('openAppSettings');
+    return ok ?? false;
+  }
+
+  Future<SniffedMediaResult> sniffMedia({
+    required String url,
+    required String platform,
+    int timeoutMs = 15000,
+  }) async {
+    final result = await _channel.invokeMethod<Map<dynamic, dynamic>>(
+      'sniffMedia',
+      {
+        'url': url,
+        'platform': platform,
+        'timeoutMs': timeoutMs,
+      },
+    );
+    if (result == null) {
+      throw Exception('Browser extractor tidak mengembalikan hasil.');
+    }
+    return SniffedMediaResult.fromMap(result);
+  }
+
+  Future<bool> openBrowserLogin(String platform) async {
+    final result = await _channel.invokeMethod<Map<dynamic, dynamic>>(
+      'openBrowserLogin',
+      {'platform': platform},
+    );
+    return result?['saved'] as bool? ?? false;
+  }
+
+  Future<Map<String, bool>> getBrowserSessionStatus() async {
+    final result = await _channel
+        .invokeMethod<Map<dynamic, dynamic>>('getBrowserSessionStatus');
+    return {
+      'instagram': result?['instagram'] as bool? ?? false,
+      'douyin': result?['douyin'] as bool? ?? false,
+    };
+  }
+
+  Future<bool> clearBrowserSessions() async {
+    final ok = await _channel.invokeMethod<bool>('clearBrowserSessions');
     return ok ?? false;
   }
 

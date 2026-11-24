@@ -10,6 +10,10 @@ class DirectExtractors {
       'AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.6 '
       'Mobile/15E148 Safari/604.1';
 
+  static const String _desktopChromeUa =
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+      '(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
+
   final Dio _dio;
 
   DirectExtractors({Dio? dio})
@@ -567,6 +571,330 @@ class DirectExtractors {
     } catch (_) {
       return null;
     }
+  }
+
+  /// Resolves Instagram `/share/...` or `instagr.am` short links to canonical `/reel/{code}/` or `/p/{code}/`.
+  Future<String> resolveInstagramUrl(String url) async {
+    final lower = url.toLowerCase();
+    if (!lower.contains('/share/') &&
+        !lower.contains('instagr.am') &&
+        !lower.contains('ig.me')) {
+      return url;
+    }
+    try {
+      return await _resolveRedirects(url, userAgent: _desktopChromeUa);
+    } catch (_) {
+      return url;
+    }
+  }
+
+  /// Fast anonymous Instagram extractor (Embed Captioned + GraphQL API).
+  /// Supports public Reels (MP4), Photo Posts, and Multi-slide Carousels.
+  Future<MediaInfo?> extractInstagramDirect(String url) async {
+    try {
+      final canonical = await resolveInstagramUrl(url);
+      final codeMatch = RegExp(
+        r'/(?:reel|reels|p|tv)/([A-Za-z0-9_-]{5,30})',
+        caseSensitive: false,
+      ).firstMatch(canonical);
+      if (codeMatch == null) return null;
+      final shortcode = codeMatch.group(1)!;
+
+      // 1. Try public GraphQL API with freshly extracted LSD token
+      final gqlInfo = await _tryInstagramGraphQl(canonical, shortcode);
+      if (gqlInfo != null && gqlInfo.options.isNotEmpty) {
+        return gqlInfo;
+      }
+
+      // 2. Try /embed/captioned/ public HTML extraction
+      final embedInfo = await _tryInstagramEmbed(canonical, shortcode);
+      if (embedInfo != null && embedInfo.options.isNotEmpty) {
+        return embedInfo;
+      }
+      return null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<MediaInfo?> _tryInstagramGraphQl(
+    String canonicalUrl,
+    String shortcode,
+  ) async {
+    try {
+      final pageRes = await _dio.get<String>(
+        'https://www.instagram.com/p/$shortcode/',
+        options: Options(
+          responseType: ResponseType.plain,
+          headers: {
+            'User-Agent': _desktopChromeUa,
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9',
+          },
+        ),
+      );
+
+      final html = pageRes.data ?? '';
+      final lsdMatch = RegExp(r'"LSD",\[\],\{"token":"([^"]+)"').firstMatch(html);
+      final lsd = lsdMatch?.group(1) ?? 'AVqbxe3J_YA';
+
+      final rawSetCookies = pageRes.headers['set-cookie'] ?? const <String>[];
+      final cookiePairs = <String>[];
+      String csrf = '';
+      for (final sc in rawSetCookies) {
+        final pair = sc.split(';').first.trim();
+        if (pair.contains('=')) {
+          cookiePairs.add(pair);
+          if (pair.startsWith('csrftoken=')) {
+            csrf = pair.substring('csrftoken='.length);
+          }
+        }
+      }
+
+      const docIds = ['10015901848480474', '8845758582119845'];
+      for (final docId in docIds) {
+        final variables = jsonEncode({
+          'shortcode': shortcode,
+          'fetch_comment_count': 0,
+          'fetch_related_profile_media_count': 0,
+          'parent_comment_count': 0,
+          'child_comment_count': 0,
+          'fetch_like_count': 0,
+          'fetch_tagged_user_count': null,
+          'fetch_preview_comment_count': 0,
+          'has_threaded_comments': false,
+          'hoisted_comment_id': null,
+          'hoisted_reply_id': null,
+        });
+
+        final res = await _dio.post<dynamic>(
+          'https://www.instagram.com/api/graphql',
+          data: {
+            'av': '0',
+            '__d': 'www',
+            '__user': '0',
+            '__a': '1',
+            'lsd': lsd,
+            'fb_api_caller_class': 'RelayModern',
+            'fb_api_req_friendly_name': 'PolarisPostActionLoadPostQueryQuery',
+            'variables': variables,
+            'server_timestamps': 'true',
+            'doc_id': docId,
+          },
+          options: Options(
+            contentType: Headers.formUrlEncodedContentType,
+            headers: {
+              'User-Agent': _desktopChromeUa,
+              'X-FB-LSD': lsd,
+              'X-IG-App-ID': '936619743392459',
+              'X-ASBD-ID': '129477',
+              if (csrf.isNotEmpty) 'X-CSRFToken': csrf,
+              if (cookiePairs.isNotEmpty) 'Cookie': cookiePairs.join('; '),
+              'Origin': 'https://www.instagram.com',
+              'Referer': 'https://www.instagram.com/p/$shortcode/',
+              'Sec-Fetch-Site': 'same-origin',
+            },
+          ),
+        );
+
+        final body = res.data is String ? jsonDecode(res.data as String) : res.data;
+        if (body is! Map) continue;
+        final media = body['data']?['xdt_shortcode_media'];
+        if (media is! Map) continue;
+
+        final parsed = _parseInstagramMediaNode(canonicalUrl, shortcode, media);
+        if (parsed != null) return parsed;
+      }
+      return null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<MediaInfo?> _tryInstagramEmbed(
+    String canonicalUrl,
+    String shortcode,
+  ) async {
+    try {
+      final res = await _dio.get<String>(
+        'https://www.instagram.com/p/$shortcode/embed/captioned/',
+        options: Options(
+          responseType: ResponseType.plain,
+          headers: {
+            'User-Agent': _desktopChromeUa,
+            'Accept-Language': 'en-US,en;q=0.9',
+          },
+        ),
+      );
+
+      final html = res.data ?? '';
+      if (html.isEmpty) return null;
+
+      final options = <MediaFormatOption>[];
+      final videoMatch = RegExp(r'"video_url"\s*:\s*("(?:\\.|[^"\\])*")').firstMatch(html);
+      String? thumb;
+      final displayMatch = RegExp(r'"display_url"\s*:\s*("(?:\\.|[^"\\])*")').firstMatch(html);
+      if (displayMatch != null) {
+        thumb = jsonDecode(displayMatch.group(1)!).toString();
+      }
+
+      if (videoMatch != null) {
+        final videoUrl = jsonDecode(videoMatch.group(1)!).toString();
+        if (videoUrl.startsWith('http')) {
+          options.add(
+            MediaFormatOption(
+              id: 'ig_embed_vid',
+              label: 'Video HD MP4',
+              subtitle: 'Instagram Direct',
+              extension: 'mp4',
+              kind: MediaKind.video,
+              engine: DownloadEngine.directHttp,
+              directUrl: videoUrl,
+              headers: const {'User-Agent': _desktopChromeUa},
+            ),
+          );
+        }
+      } else if (thumb != null && thumb.startsWith('http')) {
+        options.add(
+          MediaFormatOption(
+            id: 'ig_embed_img',
+            label: 'Foto HD',
+            subtitle: 'JPG Resolusi Asli',
+            extension: 'jpg',
+            kind: MediaKind.image,
+            engine: DownloadEngine.directHttp,
+            directUrl: thumb,
+            galleryUrls: [thumb],
+            headers: const {'User-Agent': _desktopChromeUa},
+          ),
+        );
+      }
+
+      if (options.isEmpty) return null;
+
+      return MediaInfo(
+        originalUrl: canonicalUrl,
+        platform: MediaPlatform.instagram,
+        title: 'Instagram_$shortcode',
+        author: 'Instagram',
+        thumbnailUrl: thumb,
+        extractorLabel: 'Instagram Direct Engine',
+        options: options,
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+
+  MediaInfo? _parseInstagramMediaNode(
+    String canonicalUrl,
+    String shortcode,
+    Map media,
+  ) {
+    final owner = media['owner'] as Map?;
+    final author = (owner?['username']?.toString() ??
+            owner?['full_name']?.toString() ??
+            'Instagram')
+        .trim();
+
+    String title = 'Instagram_$shortcode';
+    final captionEdges = media['edge_media_to_caption']?['edges'] as List?;
+    if (captionEdges != null && captionEdges.isNotEmpty) {
+      final captionText = captionEdges.first?['node']?['text']?.toString().trim();
+      if (captionText != null && captionText.isNotEmpty) {
+        title = captionText;
+      }
+    }
+
+    final thumb = media['display_url']?.toString();
+    final options = <MediaFormatOption>[];
+    final photoUrls = <String>[];
+    int vidIndex = 1;
+
+    final sidecar = media['edge_sidecar_to_children']?['edges'] as List?;
+    if (sidecar != null && sidecar.isNotEmpty) {
+      for (final edge in sidecar) {
+        final node = edge?['node'];
+        if (node is! Map) continue;
+        final isVid = node['is_video'] == true;
+        if (isVid && node['video_url'] != null) {
+          options.add(
+            MediaFormatOption(
+              id: 'ig_sc_vid_$vidIndex',
+              label: 'Video Slide #$vidIndex HD',
+              subtitle: 'MP4 • Instagram Carousel',
+              extension: 'mp4',
+              kind: MediaKind.video,
+              engine: DownloadEngine.directHttp,
+              directUrl: node['video_url'].toString(),
+              headers: const {'User-Agent': _desktopChromeUa},
+            ),
+          );
+          vidIndex++;
+        } else if (node['display_url'] != null) {
+          photoUrls.add(node['display_url'].toString());
+        }
+      }
+    } else {
+      final isVid = media['is_video'] == true;
+      if (isVid && media['video_url'] != null) {
+        final durSec = (media['video_duration'] as num?)?.round();
+        options.add(
+          MediaFormatOption(
+            id: 'ig_vid',
+            label: 'Video HD MP4',
+            subtitle: 'MP4 • Instagram Direct',
+            extension: 'mp4',
+            kind: MediaKind.video,
+            engine: DownloadEngine.directHttp,
+            directUrl: media['video_url'].toString(),
+            headers: const {'User-Agent': _desktopChromeUa},
+          ),
+        );
+        return MediaInfo(
+          originalUrl: canonicalUrl,
+          platform: MediaPlatform.instagram,
+          title: title,
+          author: '@$author',
+          thumbnailUrl: thumb,
+          duration: durSec != null && durSec > 0 ? Duration(seconds: durSec) : null,
+          extractorLabel: 'Instagram GraphQL',
+          options: options,
+        );
+      } else if (thumb != null && thumb.startsWith('http')) {
+        photoUrls.add(thumb);
+      }
+    }
+
+    if (photoUrls.isNotEmpty) {
+      options.add(
+        MediaFormatOption(
+          id: 'ig_photos',
+          label: photoUrls.length > 1
+              ? 'Semua Foto (${photoUrls.length} slide)'
+              : 'Foto HD',
+          subtitle: 'JPG Resolusi Asli',
+          extension: 'jpg',
+          kind: MediaKind.image,
+          engine: DownloadEngine.directHttp,
+          directUrl: photoUrls.first,
+          galleryUrls: photoUrls,
+          headers: const {'User-Agent': _desktopChromeUa},
+        ),
+      );
+    }
+
+    if (options.isEmpty) return null;
+
+    return MediaInfo(
+      originalUrl: canonicalUrl,
+      platform: MediaPlatform.instagram,
+      title: title,
+      author: '@$author',
+      thumbnailUrl: thumb ?? (photoUrls.isNotEmpty ? photoUrls.first : null),
+      extractorLabel: 'Instagram GraphQL',
+      options: options,
+    );
   }
 
   Future<String> _resolveRedirects(String url, {required String userAgent}) async {

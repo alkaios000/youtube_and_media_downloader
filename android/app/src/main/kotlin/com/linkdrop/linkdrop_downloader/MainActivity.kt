@@ -23,6 +23,7 @@ class MainActivity : FlutterActivity() {
     }
 
     private lateinit var bridge: MediaEngineBridge
+    private lateinit var sniffer: WebViewMediaSniffer
     private var initialSharedText: String? = null
     private var shareEventSink: EventChannel.EventSink? = null
     private var pendingPermissionResult: MethodChannel.Result? = null
@@ -104,6 +105,7 @@ class MainActivity : FlutterActivity() {
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
         bridge = MediaEngineBridge(applicationContext)
+        sniffer = WebViewMediaSniffer(applicationContext)
 
         EventChannel(flutterEngine.dartExecutor.binaryMessenger, PROGRESS_CHANNEL)
             .setStreamHandler(
@@ -170,6 +172,48 @@ class MainActivity : FlutterActivity() {
                             true
                         }.getOrDefault(false)
                         result.success(opened)
+                    }
+
+                    "sniffMedia" -> {
+                        val url = call.argument<String>("url")
+                        val platform = call.argument<String>("platform") ?: "other"
+                        val timeoutMs = (call.argument<Int>("timeoutMs") ?: 15000).toLong()
+                        if (url.isNullOrBlank()) {
+                            result.error("INVALID_ARGS", "URL kosong", null)
+                            return@setMethodCallHandler
+                        }
+                        sniffer.sniffMedia(
+                            activity = this,
+                            url = url,
+                            platform = platform,
+                            timeoutMs = timeoutMs,
+                            onResult = { payload -> result.success(payload) },
+                            onError = { code, message -> result.error(code, message, null) },
+                        )
+                    }
+
+                    "openBrowserLogin" -> {
+                        val platform = call.argument<String>("platform") ?: "instagram"
+                        sniffer.openLoginDialog(
+                            activity = this,
+                            platform = platform,
+                            onDone = { info -> result.success(info) },
+                        )
+                    }
+
+                    "getBrowserSessionStatus" -> {
+                        result.success(
+                            mapOf(
+                                "instagram" to sniffer.hasPlatformCookies("instagram"),
+                                "douyin" to sniffer.hasPlatformCookies("douyin"),
+                            ),
+                        )
+                    }
+
+                    "clearBrowserSessions" -> {
+                        sniffer.clearWebViewCookies {
+                            result.success(true)
+                        }
                     }
 
                     "initEngine" -> {

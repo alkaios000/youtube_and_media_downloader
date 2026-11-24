@@ -84,6 +84,7 @@ class MediaEngineBridge(private val context: Context) {
         YoutubeDL.getInstance().init(context)
         ffmpegReady = try {
             FFmpeg.getInstance().init(context)
+            ensureCppSharedLibCopied()
             true
         } catch (t: Throwable) {
             Log.w(TAG, "FFmpeg init warning", t)
@@ -91,12 +92,52 @@ class MediaEngineBridge(private val context: Context) {
         }
         aria2cReady = try {
             Aria2c.getInstance().init(context)
+            ensureCppSharedLibCopied()
             true
         } catch (t: Throwable) {
             Log.w(TAG, "Aria2c init warning", t)
             false
         }
         isInitialized = true
+    }
+
+    /**
+     * Workaround for upstream youtubedl-android 0.18.1 regression where libc++_shared.so
+     * was omitted from the FFmpeg AAR while librubberband.so & libaria2c.so depend on it.
+     * Copies our bundled NDK libc++_shared.so into extracted package usr/lib folders too.
+     */
+    private fun ensureCppSharedLibCopied() {
+        runCatching {
+            val nativeLibDir = File(context.applicationInfo.nativeLibraryDir)
+            val source = File(nativeLibDir, "libc++_shared.so")
+            if (!source.exists()) return
+
+            val baseDir = File(context.noBackupFilesDir, "youtubedl-android/packages")
+            val targetLibDirs = listOf(
+                File(baseDir, "ffmpeg/usr/lib"),
+                File(baseDir, "aria2c/usr/lib"),
+                File(baseDir, "python/usr/lib"),
+            )
+            for (libDir in targetLibDirs) {
+                if (libDir.exists() && libDir.isDirectory) {
+                    val dest = File(libDir, "libc++_shared.so")
+                    if (!dest.exists() || dest.length() != source.length()) {
+                        source.copyTo(dest, overwrite = true)
+                    }
+                }
+            }
+        }.onFailure { Log.w(TAG, "ensureCppSharedLibCopied warning", it) }
+    }
+
+    private fun resolveEffectiveCookiesPath(cookiesPath: String?): String? {
+        if (!cookiesPath.isNullOrBlank() && File(cookiesPath).exists()) {
+            return cookiesPath
+        }
+        val webViewCookies = File(context.filesDir, "webview_cookies.txt")
+        if (webViewCookies.exists() && webViewCookies.length() > 30) {
+            return webViewCookies.absolutePath
+        }
+        return null
     }
 
     fun updateEngine(
@@ -140,14 +181,15 @@ class MediaEngineBridge(private val context: Context) {
         scope.launch {
             try {
                 ensureInitialized()
+                val effectiveCookies = resolveEffectiveCookiesPath(cookiesPath)
                 val request = YoutubeDLRequest(url)
                 request.addOption("--dump-single-json")
                 request.addOption("--no-playlist")
                 request.addOption("--no-warnings")
                 request.addOption("--skip-download")
                 request.addOption("--socket-timeout", "25")
-                if (!cookiesPath.isNullOrBlank() && File(cookiesPath).exists()) {
-                    request.addOption("--cookies", cookiesPath)
+                if (effectiveCookies != null) {
+                    request.addOption("--cookies", effectiveCookies)
                 }
 
                 val response = YoutubeDL.getInstance().execute(request)
@@ -181,73 +223,131 @@ class MediaEngineBridge(private val context: Context) {
             val workDir = File(context.cacheDir, "ytdl_task_$taskId")
             try {
                 ensureInitialized()
-                if (workDir.exists()) workDir.deleteRecursively()
-                workDir.mkdirs()
-
-                val request = YoutubeDLRequest(url)
-                request.addOption("-o", "${workDir.absolutePath}/%(title).80s [%(id)s].%(ext)s")
-                request.addOption("--no-playlist")
-                request.addOption("--no-mtime")
-                request.addOption("--windows-filenames")
-                request.addOption("--socket-timeout", "30")
-                request.addOption("--retries", "3")
-                request.addOption("--fragment-retries", "3")
-
-                if (!cookiesPath.isNullOrBlank() && File(cookiesPath).exists()) {
-                    request.addOption("--cookies", cookiesPath)
+                ensureCppSharedLibCopied()
+                val effectiveCookies = resolveEffectiveCookiesPath(cookiesPath)
+                val isYouTube = url.lowercase(Locale.US).let {
+                    it.contains("youtube.com") || it.contains("youtu.be")
                 }
 
-                if (audioOnly) {
-                    val targetAudio = audioFormat.lowercase(Locale.US).ifBlank { "mp3" }
-                    request.addOption("-x")
-                    request.addOption("--audio-format", targetAudio)
-                    request.addOption("--audio-quality", "0")
-                    request.addOption("--add-metadata")
-                } else {
-                    val selector = formatSelector?.takeIf { it.isNotBlank() }
-                        ?: "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best"
-                    request.addOption("-f", selector)
-                    if (ffmpegReady) {
-                        request.addOption("--merge-output-format", "mp4")
-                    }
-                }
-
-                if (useAria2c && aria2cReady && !audioOnly) {
-                    request.addOption("--downloader", "libaria2c.so")
-                    request.addOption("--external-downloader-args", "aria2c:\"--summary-interval=1 -x 4 -s 4 -k 1M\"")
-                }
-
-                var lastEmitTime = 0L
-                YoutubeDL.getInstance().execute(request, taskId) { progress, etaInSeconds, line ->
-                    val now = System.currentTimeMillis()
-                    if (now - lastEmitTime >= 180L || progress >= 99.5f || progress < 0f) {
-                        lastEmitTime = now
-                        val payload = mapOf(
-                            "taskId" to taskId,
-                            "progress" to progress.toDouble(),
-                            "etaSeconds" to etaInSeconds,
-                            "line" to (line ?: ""),
+                // Build ordered fallback attempts for YouTube resilience (SABR/403/merge issues)
+                val attempts = mutableListOf<DownloadAttempt>()
+                val primarySelector = formatSelector?.takeIf { it.isNotBlank() }
+                    ?: "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best[ext=mp4]/best"
+                attempts.add(
+                    DownloadAttempt(
+                        label = null,
+                        formatSelector = primarySelector,
+                        extraExtractorArgs = null,
+                        forceMerge = ffmpegReady && !audioOnly,
+                    ),
+                )
+                if (isYouTube) {
+                    attempts.add(
+                        DownloadAttempt(
+                            label = "Mencoba klien alternatif YouTube...",
+                            formatSelector = primarySelector,
+                            extraExtractorArgs = "youtube:player_client=android,web_safari",
+                            forceMerge = ffmpegReady && !audioOnly,
+                        ),
+                    )
+                    if (!audioOnly) {
+                        attempts.add(
+                            DownloadAttempt(
+                                label = "Mencoba mode kompatibel (MP4 langsung)...",
+                                formatSelector = "best[ext=mp4]/18/best",
+                                extraExtractorArgs = "youtube:player_client=android,tv_embedded,web",
+                                forceMerge = false,
+                            ),
                         )
-                        postToMain { progressEmitter?.invoke(payload) }
                     }
                 }
 
-                val producedFiles = workDir.listFiles()
-                    ?.filter { file ->
-                        file.isFile &&
-                            file.length() > 0 &&
-                            !file.name.endsWith(".part", ignoreCase = true) &&
-                            !file.name.endsWith(".ytdl", ignoreCase = true) &&
-                            !file.name.endsWith(".temp", ignoreCase = true)
-                    }
-                    ?.sortedByDescending { it.length() }
-                    .orEmpty()
+                var lastError: Throwable? = null
+                var producedPrimary: File? = null
 
-                if (producedFiles.isEmpty()) {
-                    throw IllegalStateException("File hasil unduhan tidak ditemukan.")
+                for (attempt in attempts) {
+                    if (workDir.exists()) workDir.deleteRecursively()
+                    workDir.mkdirs()
+
+                    if (attempt.label != null) {
+                        emitProgress(taskId, -1.0, -1, attempt.label)
+                    }
+
+                    val request = YoutubeDLRequest(url)
+                    request.addOption("-o", "${workDir.absolutePath}/%(title).80s [%(id)s].%(ext)s")
+                    request.addOption("--no-playlist")
+                    request.addOption("--no-mtime")
+                    request.addOption("--windows-filenames")
+                    request.addOption("--socket-timeout", "30")
+                    request.addOption("--retries", "3")
+                    request.addOption("--fragment-retries", "3")
+
+                    if (effectiveCookies != null) {
+                        request.addOption("--cookies", effectiveCookies)
+                    }
+
+                    if (attempt.extraExtractorArgs != null) {
+                        request.addOption("--extractor-args", attempt.extraExtractorArgs)
+                    }
+
+                    if (audioOnly) {
+                        val targetAudio = audioFormat.lowercase(Locale.US).ifBlank { "mp3" }
+                        request.addOption("-x")
+                        request.addOption("--audio-format", targetAudio)
+                        request.addOption("--audio-quality", "0")
+                        request.addOption("--add-metadata")
+                    } else {
+                        request.addOption("-f", attempt.formatSelector)
+                        if (attempt.forceMerge) {
+                            request.addOption("--merge-output-format", "mp4")
+                        }
+                    }
+
+                    if (useAria2c && aria2cReady && !audioOnly && attempt.extraExtractorArgs == null) {
+                        request.addOption("--downloader", "libaria2c.so")
+                        request.addOption("--external-downloader-args", "aria2c:\"--summary-interval=1 -x 4 -s 4 -k 1M\"")
+                    }
+
+                    try {
+                        var lastEmitTime = 0L
+                        YoutubeDL.getInstance().execute(request, taskId) { progress, etaInSeconds, line ->
+                            val now = System.currentTimeMillis()
+                            if (now - lastEmitTime >= 180L || progress >= 99.5f || progress < 0f) {
+                                lastEmitTime = now
+                                emitProgress(taskId, progress.toDouble(), etaInSeconds, line ?: "")
+                            }
+                        }
+
+                        val producedFiles = workDir.listFiles()
+                            ?.filter { file ->
+                                file.isFile &&
+                                    file.length() > 0 &&
+                                    !file.name.endsWith(".part", ignoreCase = true) &&
+                                    !file.name.endsWith(".ytdl", ignoreCase = true) &&
+                                    !file.name.endsWith(".temp", ignoreCase = true)
+                            }
+                            ?.sortedByDescending { it.length() }
+                            .orEmpty()
+
+                        if (producedFiles.isNotEmpty()) {
+                            producedPrimary = producedFiles.first()
+                            break
+                        } else {
+                            lastError = IllegalStateException("File hasil unduhan tidak ditemukan.")
+                        }
+                    } catch (t: Throwable) {
+                        val msg = t.message.orEmpty()
+                        if (msg.contains("destroyed", ignoreCase = true) || msg.contains("interrupt", ignoreCase = true)) {
+                            throw t
+                        }
+                        Log.w(TAG, "Download attempt failed (${attempt.extraExtractorArgs ?: "default"}): $msg")
+                        lastError = t
+                    }
                 }
 
-                val primaryFile = producedFiles.first()
+                val primaryFile = producedPrimary
+                    ?: throw (lastError ?: IllegalStateException("File hasil unduhan tidak ditemukan."))
+
                 val mimeType = detectMimeType(primaryFile.name)
                 val exported = exportFileToPublicDownloads(primaryFile, primaryFile.name, mimeType)
 
@@ -265,6 +365,23 @@ class MediaEngineBridge(private val context: Context) {
             }
         }
     }
+
+    private fun emitProgress(taskId: String, progress: Double, etaSeconds: Long, line: String) {
+        val payload = mapOf(
+            "taskId" to taskId,
+            "progress" to progress,
+            "etaSeconds" to etaSeconds,
+            "line" to line,
+        )
+        postToMain { progressEmitter?.invoke(payload) }
+    }
+
+    private data class DownloadAttempt(
+        val label: String?,
+        val formatSelector: String,
+        val extraExtractorArgs: String?,
+        val forceMerge: Boolean,
+    )
 
     fun cancelDownload(taskId: String): Boolean {
         return try {

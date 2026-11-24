@@ -104,13 +104,16 @@ extension MediaPlatformMeta on MediaPlatform {
 }
 
 class UrlParser {
+  // Match strict ASCII URL characters so attached Chinese text / emojis from
+  // Douyin or TikTok share captions (e.g., "https://v.douyin.com/abc/复制此链接")
+  // never get glued onto the extracted URL.
   static final RegExp _httpUrlRegex = RegExp(
-    r'https?://[^\s\u3000<>"{}|\\^`\[\]（）【】《》，。！？；：]+',
+    r"https?://[A-Za-z0-9\-._~:/?#\[\]@!$&'()*+,;=%]+",
     caseSensitive: false,
   );
 
   static final RegExp _bareHostRegex = RegExp(
-    r'(?:^|\s)((?:www\.|m\.|v\.|vt\.|vm\.|mobile\.)?(?:youtube\.com|youtu\.be|tiktok\.com|douyin\.com|iesdouyin\.com|instagram\.com|instagr\.am|x\.com|twitter\.com)/[^\s]+)',
+    r"(?:^|[\s\u3000])((?:www\.|m\.|v\.|vt\.|vm\.|mobile\.)?(?:youtube\.com|youtu\.be|tiktok\.com|douyin\.com|iesdouyin\.com|instagram\.com|instagr\.am|ig\.me|x\.com|twitter\.com)/[A-Za-z0-9\-._~:/?#\[\]@!$&'()*+,;=%]+)",
     caseSensitive: false,
   );
 
@@ -163,6 +166,7 @@ class UrlParser {
     if (_hostMatches(host, const [
       'instagram.com',
       'instagr.am',
+      'ig.me',
       'ddinstagram.com',
     ])) {
       return MediaPlatform.instagram;

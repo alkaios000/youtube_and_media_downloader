@@ -29,6 +29,8 @@ class DownloadManager extends ChangeNotifier {
   bool _isAnalyzing = false;
   bool _isUpdatingEngine = false;
   bool _permissionChecked = false;
+  bool _instagramLoggedIn = false;
+  bool _douyinLoggedIn = false;
   String? _engineError;
   String? _analyzeError;
   MediaInfo? _currentPreview;
@@ -68,6 +70,8 @@ class DownloadManager extends ChangeNotifier {
   bool get isInitializing => _isInitializing;
   bool get isAnalyzing => _isAnalyzing;
   bool get isUpdatingEngine => _isUpdatingEngine;
+  bool get instagramLoggedIn => _instagramLoggedIn;
+  bool get douyinLoggedIn => _douyinLoggedIn;
   String? get engineError => _engineError;
   String? get analyzeError => _analyzeError;
   MediaInfo? get currentPreview => _currentPreview;
@@ -100,6 +104,7 @@ class DownloadManager extends ChangeNotifier {
     } catch (_) {}
 
     await refreshPermissions();
+    await refreshBrowserSessions();
 
     try {
       _engineStatus = await _bridge.initEngine();
@@ -145,6 +150,34 @@ class DownloadManager extends ChangeNotifier {
     } catch (_) {
       return false;
     }
+  }
+
+  Future<void> refreshBrowserSessions() async {
+    try {
+      final status = await _bridge.getBrowserSessionStatus();
+      _instagramLoggedIn = status['instagram'] ?? false;
+      _douyinLoggedIn = status['douyin'] ?? false;
+      notifyListeners();
+    } catch (_) {}
+  }
+
+  Future<bool> openBrowserLogin(String platform) async {
+    try {
+      final saved = await _bridge.openBrowserLogin(platform);
+      await refreshBrowserSessions();
+      return saved;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Future<void> clearBrowserSessions() async {
+    try {
+      await _bridge.clearBrowserSessions();
+      _instagramLoggedIn = false;
+      _douyinLoggedIn = false;
+      notifyListeners();
+    } catch (_) {}
   }
 
   void clearPreview() {
@@ -458,6 +491,9 @@ class DownloadManager extends ChangeNotifier {
   }
 
   String _prettifyYtDlpLine(String rawLine, double progress, int etaSec) {
+    if (rawLine.startsWith('Mencoba ')) {
+      return rawLine;
+    }
     final lower = rawLine.toLowerCase();
     if (lower.contains('[merger]') || lower.contains('merging formats')) {
       return 'Menggabungkan video & audio (FFmpeg)...';

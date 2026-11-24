@@ -203,6 +203,104 @@ class SettingsScreen extends StatelessWidget {
 
               const SizedBox(height: 16),
 
+              // Browser Session Login Card (1-Tap for Instagram & Douyin)
+              Card(
+                child: Column(
+                  children: [
+                    ListTile(
+                      leading: const Icon(Icons.public_rounded),
+                      title: const Text('Login Browser (Instagram & Douyin)'),
+                      subtitle: const Text(
+                        'Opsional: login sekali langsung di aplikasi agar Reels/Post Instagram & video Douyin yang dibatasi terbuka penuh',
+                      ),
+                    ),
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+                      child: Row(
+                        children: [
+                          Expanded(
+                            child: FilledButton.tonalIcon(
+                              onPressed: () async {
+                                final ok = await manager.openBrowserLogin('instagram');
+                                if (!context.mounted) return;
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  SnackBar(
+                                    content: Text(
+                                      ok
+                                          ? 'Sesi Instagram tersimpan!'
+                                          : 'Sesi Instagram ditutup.',
+                                    ),
+                                  ),
+                                );
+                              },
+                              icon: Icon(
+                                manager.instagramLoggedIn
+                                    ? Icons.check_circle_rounded
+                                    : Icons.login_rounded,
+                                size: 18,
+                              ),
+                              label: Text(
+                                manager.instagramLoggedIn
+                                    ? 'IG Aktif'
+                                    : 'Login IG',
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: FilledButton.tonalIcon(
+                              onPressed: () async {
+                                final ok = await manager.openBrowserLogin('douyin');
+                                if (!context.mounted) return;
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  SnackBar(
+                                    content: Text(
+                                      ok
+                                          ? 'Sesi Douyin tersimpan!'
+                                          : 'Sesi Douyin ditutup.',
+                                    ),
+                                  ),
+                                );
+                              },
+                              icon: Icon(
+                                manager.douyinLoggedIn
+                                    ? Icons.check_circle_rounded
+                                    : Icons.login_rounded,
+                                size: 18,
+                              ),
+                              label: Text(
+                                manager.douyinLoggedIn
+                                    ? 'Douyin Aktif'
+                                    : 'Login Douyin',
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    if (manager.instagramLoggedIn || manager.douyinLoggedIn) ...[
+                      const Divider(height: 1),
+                      ListTile(
+                        dense: true,
+                        leading: const Icon(Icons.logout_rounded, size: 20),
+                        title: const Text('Hapus Sesi Browser'),
+                        onTap: () async {
+                          await manager.clearBrowserSessions();
+                          if (!context.mounted) return;
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(
+                              content: Text('Semua sesi login browser dihapus.'),
+                            ),
+                          );
+                        },
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+
+              const SizedBox(height: 16),
+
               // Cookies (Optional) Card
               Card(
                 child: ListTile(
