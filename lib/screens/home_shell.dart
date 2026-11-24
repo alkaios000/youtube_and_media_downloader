@@ -1,0 +1,152 @@
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+
+import '../models/media_platform.dart';
+import '../services/download_manager.dart';
+import 'downloader_screen.dart';
+import 'downloads_screen.dart';
+import 'settings_screen.dart';
+
+class HomeShell extends StatefulWidget {
+  final DownloadManager manager;
+
+  const HomeShell({super.key, required this.manager});
+
+  @override
+  State<HomeShell> createState() => _HomeShellState();
+}
+
+class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
+  final TextEditingController _urlController = TextEditingController();
+  int _tabIndex = 0;
+  String? _detectedClipboardUrl;
+  String? _lastDismissedClipboardUrl;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    widget.manager.onIncomingSharedLink = _handleSharedLink;
+    WidgetsBinding.instance.addPostFrameCallback((_) => _checkClipboard());
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _urlController.dispose();
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      _checkClipboard();
+    }
+  }
+
+  void _handleSharedLink(String rawText) {
+    final clean = UrlParser.extractUrl(rawText);
+    if (clean == null) return;
+    setState(() {
+      _tabIndex = 0;
+      _detectedClipboardUrl = null;
+      _urlController.text = clean;
+    });
+    widget.manager.analyzeLink(clean);
+  }
+
+  Future<void> _checkClipboard() async {
+    if (!widget.manager.settings.clipboardAutoDetect) return;
+    try {
+      final data = await Clipboard.getData(Clipboard.kTextPlain);
+      final raw = data?.text?.trim() ?? '';
+      if (raw.isEmpty) return;
+      final clean = UrlParser.extractUrl(raw);
+      if (clean == null) return;
+      if (!UrlParser.isCorePlatformUrl(clean)) return;
+      if (clean == _lastDismissedClipboardUrl || clean == _urlController.text.trim()) {
+        return;
+      }
+      if (mounted) {
+        setState(() => _detectedClipboardUrl = clean);
+      }
+    } catch (_) {}
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return ListenableBuilder(
+      listenable: widget.manager,
+      builder: (context, _) {
+        final activeCount = widget.manager.activeDownloads.length;
+
+        return Scaffold(
+          body: SafeArea(
+            child: IndexedStack(
+              index: _tabIndex,
+              children: [
+                DownloaderScreen(
+                  manager: widget.manager,
+                  urlController: _urlController,
+                  clipboardUrl: _detectedClipboardUrl,
+                  onUseClipboard: () {
+                    final url = _detectedClipboardUrl;
+                    if (url == null) return;
+                    setState(() {
+                      _urlController.text = url;
+                      _detectedClipboardUrl = null;
+                    });
+                    widget.manager.analyzeLink(url);
+                  },
+                  onDismissClipboard: () {
+                    setState(() {
+                      _lastDismissedClipboardUrl = _detectedClipboardUrl;
+                      _detectedClipboardUrl = null;
+                    });
+                  },
+                  onOpenDownloadsTab: () => setState(() => _tabIndex = 1),
+                ),
+                DownloadsScreen(manager: widget.manager),
+                SettingsScreen(manager: widget.manager),
+              ],
+            ),
+          ),
+          bottomNavigationBar: NavigationBar(
+            selectedIndex: _tabIndex,
+            onDestinationSelected: (index) {
+              setState(() => _tabIndex = index);
+              if (index == 2) {
+                widget.manager.refreshStorageInfo();
+              }
+            },
+            destinations: [
+              const NavigationDestination(
+                icon: Icon(Icons.download_outlined),
+                selectedIcon: Icon(Icons.download_rounded),
+                label: 'Unduh',
+              ),
+              NavigationDestination(
+                icon: Badge(
+                  isLabelVisible: activeCount > 0,
+                  label: Text('$activeCount'),
+                  child: const Icon(Icons.video_library_outlined),
+                ),
+                selectedIcon: Badge(
+                  isLabelVisible: activeCount > 0,
+                  label: Text('$activeCount'),
+                  child: const Icon(Icons.video_library_rounded),
+                ),
+                label: 'Riwayat',
+              ),
+              const NavigationDestination(
+                icon: Icon(Icons.tune_outlined),
+                selectedIcon: Icon(Icons.tune_rounded),
+                label: 'Pengaturan',
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+}
