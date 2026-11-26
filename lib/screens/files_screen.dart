@@ -373,12 +373,27 @@ class _FilesScreenState extends State<FilesScreen> {
     });
   }
 
+  void _scrollToTop({bool animate = true}) {
+    if (!_scrollController.hasClients) return;
+    if (_scrollController.offset <= 0) return;
+    if (animate) {
+      _scrollController.animateTo(
+        0,
+        duration: const Duration(milliseconds: 240),
+        curve: Curves.easeOutCubic,
+      );
+    } else {
+      _scrollController.jumpTo(0);
+    }
+  }
+
   void _reshuffle() {
     HapticFeedback.selectionClick();
     setState(() {
       _shuffleEnabled = true;
       _shuffleSeed = DateTime.now().microsecondsSinceEpoch;
     });
+    _scrollToTop(animate: true);
   }
 
   @override
@@ -419,30 +434,16 @@ class _FilesScreenState extends State<FilesScreen> {
 
     final isPixivArtist = inCreatorFolder && _isPixivPlatform;
     final isPixivAlbumView = isPixivArtist && !_pixivShowAllPhotos;
-    final trimmedQuery = _searchQuery.trim().toLowerCase();
 
     final allPixivAlbums = isPixivArtist
         ? _groupIntoPixivAlbums(folderFiles)
         : const <_PixivAlbumGroup>[];
-    final filteredPixivAlbums = (isPixivAlbumView && trimmedQuery.isNotEmpty)
-        ? allPixivAlbums
-            .where((a) => a.albumName.toLowerCase().contains(trimmedQuery))
-            .toList(growable: false)
-        : allPixivAlbums;
     final pixivAlbums = isPixivAlbumView
-        ? _applyShuffle(filteredPixivAlbums)
+        ? _applyShuffle(allPixivAlbums)
         : const <_PixivAlbumGroup>[];
 
-    final filteredFolderFiles = (!isPixivAlbumView && trimmedQuery.isNotEmpty)
-        ? folderFiles
-            .where((f) =>
-                f.fileName.toLowerCase().contains(trimmedQuery) ||
-                f.effectiveAlbumName.toLowerCase().contains(trimmedQuery))
-            .toList(growable: false)
-        : folderFiles;
-    final visibleFolderFiles = !isPixivAlbumView
-        ? _applyShuffle(filteredFolderFiles)
-        : folderFiles;
+    final visibleFolderFiles =
+        !isPixivAlbumView ? _applyShuffle(folderFiles) : folderFiles;
 
     _activeSelectableKeys = isPixivAlbumView
         ? pixivAlbums.map((a) => a.albumName).toList(growable: false)
@@ -517,84 +518,74 @@ class _FilesScreenState extends State<FilesScreen> {
                     hasItems: _activeSelectableKeys.isNotEmpty,
                   ),
 
-                  // Interactive Breadcrumb + View Mode Switcher Bar
+                  // Interactive Breadcrumb + Artist-Only Search Bar
                   if (!_isSelectionMode)
                     SliverToBoxAdapter(
                       child: Padding(
-                        padding: const EdgeInsets.fromLTRB(16, 0, 16, 10),
+                        padding: EdgeInsets.fromLTRB(
+                          16,
+                          0,
+                          16,
+                          inCreatorFolder ? 4 : 10,
+                        ),
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            Row(
-                              children: [
-                                Expanded(
-                                  child: SingleChildScrollView(
-                                    scrollDirection: Axis.horizontal,
-                                    child: Row(
-                                      children: [
-                                        _BreadcrumbChip(
-                                          label: 'File',
-                                          active: _selectedPlatformFolder == null,
-                                          onTap: () {
-                                            FocusManager.instance.primaryFocus
-                                                ?.unfocus();
-                                            setState(() {
-                                              _selectedPlatformFolder = null;
-                                              _selectedCreatorFolder = null;
-                                              _pixivShowAllPhotos = false;
-                                              _shuffleEnabled = false;
-                                              _clearSearch();
-                                              _isSelectionMode = false;
-                                              _selectedKeys.clear();
-                                            });
-                                          },
-                                        ),
-                                        if (_selectedPlatformFolder != null) ...[
-                                          const Icon(Icons.chevron_right_rounded,
-                                              size: 18),
-                                          _BreadcrumbChip(
-                                            label: _selectedPlatformFolder!,
-                                            active:
-                                                _selectedCreatorFolder == null,
-                                            onTap: () {
-                                              FocusManager.instance.primaryFocus
-                                                  ?.unfocus();
-                                              setState(() {
-                                                _selectedCreatorFolder = null;
-                                                _pixivShowAllPhotos = false;
-                                                _shuffleEnabled = false;
-                                                _clearSearch();
-                                                _isSelectionMode = false;
-                                                _selectedKeys.clear();
-                                              });
-                                            },
-                                          ),
-                                        ],
-                                        if (_selectedCreatorFolder != null) ...[
-                                          const Icon(Icons.chevron_right_rounded,
-                                              size: 18),
-                                          _BreadcrumbChip(
-                                            label: _selectedCreatorFolder!,
-                                            active: true,
-                                            onTap: () {},
-                                          ),
-                                        ],
-                                      ],
+                            SingleChildScrollView(
+                              scrollDirection: Axis.horizontal,
+                              child: Row(
+                                children: [
+                                  _BreadcrumbChip(
+                                    label: 'File',
+                                    active: _selectedPlatformFolder == null,
+                                    onTap: () {
+                                      FocusManager.instance.primaryFocus
+                                          ?.unfocus();
+                                      setState(() {
+                                        _selectedPlatformFolder = null;
+                                        _selectedCreatorFolder = null;
+                                        _pixivShowAllPhotos = false;
+                                        _shuffleEnabled = false;
+                                        _clearSearch();
+                                        _isSelectionMode = false;
+                                        _selectedKeys.clear();
+                                      });
+                                    },
+                                  ),
+                                  if (_selectedPlatformFolder != null) ...[
+                                    const Icon(Icons.chevron_right_rounded,
+                                        size: 18),
+                                    _BreadcrumbChip(
+                                      label: _selectedPlatformFolder!,
+                                      active: _selectedCreatorFolder == null,
+                                      onTap: () {
+                                        FocusManager.instance.primaryFocus
+                                            ?.unfocus();
+                                        setState(() {
+                                          _selectedCreatorFolder = null;
+                                          _pixivShowAllPhotos = false;
+                                          _shuffleEnabled = false;
+                                          _clearSearch();
+                                          _isSelectionMode = false;
+                                          _selectedKeys.clear();
+                                        });
+                                      },
                                     ),
-                                  ),
-                                ),
-                                if (inCreatorFolder &&
-                                    _activeSelectableKeys.isNotEmpty) ...[
-                                  const SizedBox(width: 8),
-                                  _ViewModeToggle(
-                                    mode: _viewMode,
-                                    onChanged: (m) =>
-                                        setState(() => _viewMode = m),
-                                  ),
+                                  ],
+                                  if (_selectedCreatorFolder != null) ...[
+                                    const Icon(Icons.chevron_right_rounded,
+                                        size: 18),
+                                    _BreadcrumbChip(
+                                      label: _selectedCreatorFolder!,
+                                      active: true,
+                                      onTap: () {},
+                                    ),
+                                  ],
                                 ],
-                              ],
+                              ),
                             ),
-                            if (_selectedPlatformFolder != null) ...[
+                            if (_selectedPlatformFolder != null &&
+                                _selectedCreatorFolder == null) ...[
                               const SizedBox(height: 10),
                               TextField(
                                 controller: _searchController,
@@ -602,16 +593,11 @@ class _FilesScreenState extends State<FilesScreen> {
                                     setState(() => _searchQuery = v),
                                 decoration: InputDecoration(
                                   isDense: true,
-                                  hintText: _selectedCreatorFolder == null
-                                      ? (_isPixivPlatform
-                                          ? 'Cari artist Pixiv...'
-                                          : 'Cari kreator $_selectedPlatformFolder...')
-                                      : (isPixivAlbumView
-                                          ? 'Cari album / karya $_selectedCreatorFolder...'
-                                          : (isPixivArtist
-                                              ? 'Cari semua foto $_selectedCreatorFolder...'
-                                              : 'Cari file $_selectedCreatorFolder...')),
-                                  prefixIcon: const Icon(Icons.search_rounded, size: 20),
+                                  hintText: _isPixivPlatform
+                                      ? 'Cari artist Pixiv...'
+                                      : 'Cari kreator $_selectedPlatformFolder...',
+                                  prefixIcon:
+                                      const Icon(Icons.search_rounded, size: 20),
                                   suffixIcon: _searchQuery.isNotEmpty
                                       ? IconButton(
                                           onPressed: () =>
@@ -624,129 +610,57 @@ class _FilesScreenState extends State<FilesScreen> {
                                 ),
                               ),
                             ],
-                            if (inCreatorFolder) ...[
-                              const SizedBox(height: 10),
-                              _CreatorSyncBar(
-                                platform: MediaPlatformMeta.fromKey(
-                                  _selectedPlatformFolder,
-                                ),
-                                creatorName: _selectedCreatorFolder!,
-                                savedProfile: widget.manager.getCreatorProfile(
-                                  _selectedPlatformFolder!,
-                                  _selectedCreatorFolder!,
-                                ),
-                                onContinueDownload: (url) =>
-                                    widget.onOpenProfileUrl?.call(url),
-                                onEditLink: () => _openEditCreatorLinkDialog(
-                                  MediaPlatformMeta.fromKey(
-                                    _selectedPlatformFolder,
-                                  ),
-                                  _selectedCreatorFolder!,
-                                  widget.manager.getCreatorProfile(
-                                    _selectedPlatformFolder!,
-                                    _selectedCreatorFolder!,
-                                  ),
-                                ),
-                              ),
-                              if (folderFiles.isNotEmpty) ...[
-                                const SizedBox(height: 8),
-                                SingleChildScrollView(
-                                  scrollDirection: Axis.horizontal,
-                                  child: Row(
-                                    children: [
-                                      if (isPixivArtist) ...[
-                                        ChoiceChip(
-                                          avatar: const Icon(
-                                            Icons.collections_bookmark_outlined,
-                                            size: 16,
-                                          ),
-                                          label: Text(
-                                            'Album (${allPixivAlbums.length})',
-                                          ),
-                                          selected: !_pixivShowAllPhotos,
-                                          showCheckmark: false,
-                                          visualDensity: VisualDensity.compact,
-                                          onSelected: (_) {
-                                            if (!_pixivShowAllPhotos) return;
-                                            setState(() {
-                                              _pixivShowAllPhotos = false;
-                                              _isSelectionMode = false;
-                                              _selectedKeys.clear();
-                                            });
-                                          },
-                                        ),
-                                        const SizedBox(width: 8),
-                                        ChoiceChip(
-                                          avatar: const Icon(
-                                            Icons.photo_library_outlined,
-                                            size: 16,
-                                          ),
-                                          label: Text(
-                                            'Semua Foto (${folderFiles.length})',
-                                          ),
-                                          selected: _pixivShowAllPhotos,
-                                          showCheckmark: false,
-                                          visualDensity: VisualDensity.compact,
-                                          onSelected: (_) {
-                                            if (_pixivShowAllPhotos) return;
-                                            setState(() {
-                                              _pixivShowAllPhotos = true;
-                                              _isSelectionMode = false;
-                                              _selectedKeys.clear();
-                                            });
-                                          },
-                                        ),
-                                        const SizedBox(width: 8),
-                                      ],
-                                      FilterChip(
-                                        avatar: Icon(
-                                          Icons.shuffle_rounded,
-                                          size: 16,
-                                          color: _shuffleEnabled
-                                              ? theme.colorScheme.primary
-                                              : null,
-                                        ),
-                                        label: Text(
-                                          _shuffleEnabled ? 'Acak Aktif' : 'Acak',
-                                        ),
-                                        selected: _shuffleEnabled,
-                                        showCheckmark: false,
-                                        visualDensity: VisualDensity.compact,
-                                        onSelected: (_) => _toggleShuffle(),
-                                      ),
-                                      if (_shuffleEnabled) ...[
-                                        const SizedBox(width: 6),
-                                        ActionChip(
-                                          avatar: const Icon(
-                                            Icons.refresh_rounded,
-                                            size: 16,
-                                          ),
-                                          label: const Text('Acak Lagi'),
-                                          visualDensity: VisualDensity.compact,
-                                          onPressed: _reshuffle,
-                                        ),
-                                      ],
-                                    ],
-                                  ),
-                                ),
-                              ],
-                            ],
-                            if (inCreatorFolder &&
-                                _activeSelectableKeys.isNotEmpty) ...[
-                              const SizedBox(height: 6),
-                              Text(
-                                isPixivAlbumView
-                                    ? '${pixivAlbums.length} album (${folderFiles.length} foto) • Ketuk album lalu geser kiri/kanan antar album'
-                                    : (isPixivArtist
-                                        ? '${visibleFolderFiles.length} foto (${allPixivAlbums.length} album) • Tahan & geser untuk pilih banyak'
-                                        : '${visibleFolderFiles.length} item • Tahan & geser jari untuk pilih banyak'),
-                                style: theme.textTheme.labelSmall?.copyWith(
-                                  color: theme.colorScheme.onSurfaceVariant,
-                                ),
-                              ),
-                            ],
                           ],
                         ),
+                      ),
+                    ),
+
+                  // Sticky Album / Photo Toolbar (pinned at top while scrolling)
+                  if (!_isSelectionMode &&
+                      inCreatorFolder &&
+                      folderFiles.isNotEmpty)
+                    SliverPersistentHeader(
+                      pinned: true,
+                      delegate: _StickyAlbumToolbarDelegate(
+                        backgroundColor: theme.scaffoldBackgroundColor,
+                        isPixivArtist: isPixivArtist,
+                        albumCount: allPixivAlbums.length,
+                        photoCount: folderFiles.length,
+                        showAllPhotos: _pixivShowAllPhotos,
+                        shuffleEnabled: _shuffleEnabled,
+                        viewMode: _viewMode,
+                        onSelectAlbums: () {
+                          if (!_pixivShowAllPhotos) {
+                            _scrollToTop(animate: true);
+                            return;
+                          }
+                          setState(() {
+                            _pixivShowAllPhotos = false;
+                            _isSelectionMode = false;
+                            _selectedKeys.clear();
+                          });
+                          WidgetsBinding.instance.addPostFrameCallback((_) {
+                            if (mounted) _scrollToTop(animate: false);
+                          });
+                        },
+                        onSelectAllPhotos: () {
+                          if (_pixivShowAllPhotos) {
+                            _scrollToTop(animate: true);
+                            return;
+                          }
+                          setState(() {
+                            _pixivShowAllPhotos = true;
+                            _isSelectionMode = false;
+                            _selectedKeys.clear();
+                          });
+                          WidgetsBinding.instance.addPostFrameCallback((_) {
+                            if (mounted) _scrollToTop(animate: false);
+                          });
+                        },
+                        onToggleShuffle: _toggleShuffle,
+                        onReshuffle: _reshuffle,
+                        onViewModeChanged: (m) =>
+                            setState(() => _viewMode = m),
                       ),
                     ),
 
@@ -2872,134 +2786,152 @@ class _BreadcrumbChip extends StatelessWidget {
   }
 }
 
-class _CreatorSyncBar extends StatelessWidget {
-  final MediaPlatform platform;
-  final String creatorName;
-  final CreatorProfileRecord? savedProfile;
-  final ValueChanged<String> onContinueDownload;
-  final VoidCallback onEditLink;
+class _StickyAlbumToolbarDelegate extends SliverPersistentHeaderDelegate {
+  final Color backgroundColor;
+  final bool isPixivArtist;
+  final int albumCount;
+  final int photoCount;
+  final bool showAllPhotos;
+  final bool shuffleEnabled;
+  final _FileViewMode viewMode;
+  final VoidCallback onSelectAlbums;
+  final VoidCallback onSelectAllPhotos;
+  final VoidCallback onToggleShuffle;
+  final VoidCallback onReshuffle;
+  final ValueChanged<_FileViewMode> onViewModeChanged;
 
-  const _CreatorSyncBar({
-    required this.platform,
-    required this.creatorName,
-    required this.savedProfile,
-    required this.onContinueDownload,
-    required this.onEditLink,
+  const _StickyAlbumToolbarDelegate({
+    required this.backgroundColor,
+    required this.isPixivArtist,
+    required this.albumCount,
+    required this.photoCount,
+    required this.showAllPhotos,
+    required this.shuffleEnabled,
+    required this.viewMode,
+    required this.onSelectAlbums,
+    required this.onSelectAllPhotos,
+    required this.onToggleShuffle,
+    required this.onReshuffle,
+    required this.onViewModeChanged,
   });
 
   @override
-  Widget build(BuildContext context) {
+  double get minExtent => 54;
+
+  @override
+  double get maxExtent => 54;
+
+  @override
+  Widget build(
+    BuildContext context,
+    double shrinkOffset,
+    bool overlapsContent,
+  ) {
     final theme = Theme.of(context);
-    final profile = savedProfile;
-
-    if (profile == null) {
-      return InkWell(
-        onTap: onEditLink,
-        borderRadius: BorderRadius.circular(12),
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
-          decoration: BoxDecoration(
-            color: theme.colorScheme.surfaceContainerHighest
-                .withValues(alpha: 0.45),
-            borderRadius: BorderRadius.circular(12),
-            border: Border.all(
-              color: theme.colorScheme.outlineVariant.withValues(alpha: 0.7),
-            ),
-          ),
-          child: Row(
-            children: [
-              Icon(
-                Icons.add_link_rounded,
-                size: 18,
-                color: theme.colorScheme.primary,
-              ),
-              const SizedBox(width: 8),
-              Expanded(
-                child: Text(
-                  'Simpan link profil $creatorName untuk fitur Lanjut Unduh',
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: theme.textTheme.bodySmall?.copyWith(
-                    fontWeight: FontWeight.w600,
-                    color: theme.colorScheme.onSurfaceVariant,
+    return Material(
+      color: backgroundColor,
+      elevation: overlapsContent ? 2 : 0,
+      shadowColor: Colors.black.withValues(alpha: 0.25),
+      child: Container(
+        alignment: Alignment.center,
+        padding: const EdgeInsets.fromLTRB(16, 4, 16, 6),
+        decoration: overlapsContent
+            ? BoxDecoration(
+                border: Border(
+                  bottom: BorderSide(
+                    color: theme.colorScheme.outlineVariant
+                        .withValues(alpha: 0.35),
                   ),
                 ),
+              )
+            : null,
+        child: Row(
+          children: [
+            Expanded(
+              child: SingleChildScrollView(
+                scrollDirection: Axis.horizontal,
+                child: Row(
+                  children: [
+                    if (isPixivArtist) ...[
+                      ChoiceChip(
+                        avatar: const Icon(
+                          Icons.collections_bookmark_outlined,
+                          size: 16,
+                        ),
+                        label: Text('Album ($albumCount)'),
+                        selected: !showAllPhotos,
+                        showCheckmark: false,
+                        materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                        visualDensity: VisualDensity.compact,
+                        onSelected: (_) => onSelectAlbums(),
+                      ),
+                      const SizedBox(width: 8),
+                      ChoiceChip(
+                        avatar: const Icon(
+                          Icons.photo_library_outlined,
+                          size: 16,
+                        ),
+                        label: Text('Semua Foto ($photoCount)'),
+                        selected: showAllPhotos,
+                        showCheckmark: false,
+                        materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                        visualDensity: VisualDensity.compact,
+                        onSelected: (_) => onSelectAllPhotos(),
+                      ),
+                      const SizedBox(width: 8),
+                    ],
+                    FilterChip(
+                      avatar: Icon(
+                        Icons.shuffle_rounded,
+                        size: 16,
+                        color: shuffleEnabled
+                            ? theme.colorScheme.primary
+                            : null,
+                      ),
+                      label: Text(shuffleEnabled ? 'Acak Aktif' : 'Acak'),
+                      selected: shuffleEnabled,
+                      showCheckmark: false,
+                      materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                      visualDensity: VisualDensity.compact,
+                      onSelected: (_) => onToggleShuffle(),
+                    ),
+                    if (shuffleEnabled) ...[
+                      const SizedBox(width: 6),
+                      ActionChip(
+                        avatar: const Icon(
+                          Icons.refresh_rounded,
+                          size: 16,
+                        ),
+                        label: const Text('Acak Lagi'),
+                        materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                        visualDensity: VisualDensity.compact,
+                        onPressed: onReshuffle,
+                      ),
+                    ],
+                  ],
+                ),
               ),
-              Icon(
-                Icons.chevron_right_rounded,
-                size: 18,
-                color: theme.colorScheme.onSurfaceVariant,
-              ),
-            ],
-          ),
+            ),
+            const SizedBox(width: 8),
+            _ViewModeToggle(
+              mode: viewMode,
+              onChanged: onViewModeChanged,
+            ),
+          ],
         ),
-      );
-    }
-
-    return Container(
-      padding: const EdgeInsets.fromLTRB(12, 8, 8, 8),
-      decoration: BoxDecoration(
-        color: platform.brandColor.withValues(alpha: 0.10),
-        borderRadius: BorderRadius.circular(13),
-        border: Border.all(
-          color: platform.brandColor.withValues(alpha: 0.35),
-        ),
-      ),
-      child: Row(
-        children: [
-          Icon(
-            Icons.link_rounded,
-            size: 18,
-            color: platform.brandColor,
-          ),
-          const SizedBox(width: 8),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  'Profil Tersimpan',
-                  style: theme.textTheme.labelSmall?.copyWith(
-                    color: platform.brandColor,
-                    fontWeight: FontWeight.w800,
-                  ),
-                ),
-                Text(
-                  profile.profileUrl,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: theme.textTheme.bodySmall?.copyWith(
-                    color: theme.colorScheme.onSurfaceVariant,
-                    fontSize: 11.5,
-                  ),
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(width: 6),
-          FilledButton.tonalIcon(
-            onPressed: () => onContinueDownload(profile.profileUrl),
-            style: FilledButton.styleFrom(
-              visualDensity: VisualDensity.compact,
-              padding: const EdgeInsets.symmetric(horizontal: 10),
-            ),
-            icon: const Icon(Icons.cloud_download_outlined, size: 16),
-            label: const Text(
-              'Lanjut Unduh',
-              style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700),
-            ),
-          ),
-          IconButton(
-            onPressed: onEditLink,
-            visualDensity: VisualDensity.compact,
-            constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
-            padding: EdgeInsets.zero,
-            icon: const Icon(Icons.edit_outlined, size: 17),
-            tooltip: 'Edit link profil',
-          ),
-        ],
       ),
     );
+  }
+
+  @override
+  bool shouldRebuild(covariant _StickyAlbumToolbarDelegate oldDelegate) {
+    return backgroundColor != oldDelegate.backgroundColor ||
+        isPixivArtist != oldDelegate.isPixivArtist ||
+        albumCount != oldDelegate.albumCount ||
+        photoCount != oldDelegate.photoCount ||
+        showAllPhotos != oldDelegate.showAllPhotos ||
+        shuffleEnabled != oldDelegate.shuffleEnabled ||
+        viewMode != oldDelegate.viewMode;
   }
 }
 

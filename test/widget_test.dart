@@ -1,13 +1,34 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:linkdrop_downloader/models/creator_profile.dart';
 import 'package:linkdrop_downloader/models/download_item.dart';
+import 'package:linkdrop_downloader/models/managed_file.dart';
 import 'package:linkdrop_downloader/models/media_info.dart';
 import 'package:linkdrop_downloader/models/media_platform.dart';
 import 'package:linkdrop_downloader/screens/downloads_screen.dart';
+import 'package:linkdrop_downloader/screens/files_screen.dart';
 import 'package:linkdrop_downloader/screens/home_shell.dart';
 import 'package:linkdrop_downloader/services/download_manager.dart';
 import 'package:linkdrop_downloader/theme/app_theme.dart';
 import 'package:linkdrop_downloader/widgets/media_preview_card.dart';
+
+class _FakeFilesManager extends DownloadManager {
+  final List<ManagedFile> _fakeFiles;
+  final Map<String, CreatorProfileRecord> _fakeProfiles;
+
+  _FakeFilesManager(this._fakeFiles, this._fakeProfiles);
+
+  @override
+  List<ManagedFile> get managedFiles => _fakeFiles;
+
+  @override
+  CreatorProfileRecord? getCreatorProfile(
+    String platformFolder,
+    String creatorFolder,
+  ) =>
+      _fakeProfiles[
+          CreatorProfileRecord.buildLookupKey(platformFolder, creatorFolder)];
+}
 
 void main() {
   testWidgets('all_download simplified UI has 4 tabs and live link detection',
@@ -275,5 +296,86 @@ void main() {
       sorted.map((e) => e.id).toList(),
       ['s1', 'd1', 'd2', 'q1', 'q2', 'p1', 'f1'],
     );
+  });
+
+  testWidgets(
+      'FilesScreen Pixiv album view hides saved profile bar, album search & hint text, and keeps album toolbar sticky',
+      (WidgetTester tester) async {
+    final files = List<ManagedFile>.generate(
+      14,
+      (i) => ManagedFile(
+        fileName: 'art_${i}_p0.jpg',
+        mimeType: 'image/jpeg',
+        mediaKind: MediaKind.image,
+        fileSize: 1024 * (i + 1),
+        modifiedAt: DateTime(2026, 11, 26, 12, i),
+        relativePath: 'Pixiv/ArtistAlpha/Album_$i',
+        savedPath: '',
+        contentUri: 'content://test/pixiv/$i',
+        platformFolder: 'Pixiv',
+        creatorFolder: 'ArtistAlpha',
+        albumFolder: 'Album_$i',
+        isPrivate: true,
+      ),
+    );
+
+    final profile = CreatorProfileRecord(
+      platform: MediaPlatform.pixiv,
+      creatorFolder: 'ArtistAlpha',
+      displayName: 'ArtistAlpha',
+      profileUrl: 'https://www.pixiv.net/users/12345',
+      lastSyncedAt: DateTime(2026, 11, 26),
+    );
+    final manager = _FakeFilesManager(
+      files,
+      {profile.lookupKey: profile},
+    );
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: AppTheme.darkTheme(),
+        home: Scaffold(
+          body: SafeArea(
+            child: FilesScreen(manager: manager),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    // Level 0 -> open Pixiv folder
+    await tester.tap(find.text('Pixiv'));
+    await tester.pumpAndSettle();
+
+    // Level 1 (Artist list): search artist & saved profile indicator MUST be present
+    expect(find.byType(TextField), findsOneWidget);
+    expect(find.text('Cari artist Pixiv...'), findsOneWidget);
+    expect(find.textContaining('Link tersimpan'), findsOneWidget);
+
+    // Open ArtistAlpha -> Level 2 (Album list)
+    await tester.tap(find.text('ArtistAlpha'));
+    await tester.pumpAndSettle();
+
+    // No saved profile bar, no album search box, no hint line!
+    expect(find.text('Profil Tersimpan'), findsNothing);
+    expect(find.text('Lanjut Unduh'), findsNothing);
+    expect(find.byType(TextField), findsNothing);
+    expect(find.textContaining('Ketuk album lalu geser'), findsNothing);
+    expect(find.textContaining('Tahan & geser'), findsNothing);
+
+    // Sticky album toolbar is present with Album, Semua Foto, Acak, and Grid/List toggle
+    expect(find.text('Album (14)'), findsOneWidget);
+    expect(find.text('Semua Foto (14)'), findsOneWidget);
+    expect(find.text('Acak'), findsOneWidget);
+
+    // Scroll far down — sticky toolbar MUST stay pinned near top of viewport!
+    await tester.drag(find.byType(CustomScrollView), const Offset(0, -800));
+    await tester.pumpAndSettle();
+
+    final albumChipRect = tester.getRect(find.text('Album (14)'));
+    expect(albumChipRect.top, greaterThanOrEqualTo(0));
+    expect(albumChipRect.bottom, lessThan(80));
+
+    manager.dispose();
   });
 }
