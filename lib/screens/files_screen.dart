@@ -14,6 +14,7 @@ import '../services/download_manager.dart';
 import '../widgets/file_gallery_viewer.dart';
 import '../widgets/pixiv_album_viewer.dart';
 import '../widgets/wallpaper_sheet.dart';
+import 'platform_all_photos_screen.dart';
 
 enum _FileViewMode { gallery, list }
 
@@ -706,11 +707,17 @@ class _FilesScreenState extends State<FilesScreen> {
                     )
                   else if (_selectedPlatformFolder == null)
                     _buildPlatformFoldersSliver(byPlatform)
-                  else if (_selectedCreatorFolder == null)
+                  else if (_selectedCreatorFolder == null) ...[
+                    _buildAllPlatformPhotosMenuSliver(
+                      context,
+                      _selectedPlatformFolder!,
+                      byPlatform[_selectedPlatformFolder!] ?? const {},
+                    ),
                     _buildCreatorFoldersSliver(
                       _selectedPlatformFolder!,
                       byPlatform[_selectedPlatformFolder!] ?? const {},
-                    )
+                    ),
+                  ]
                   else if (isPixivAlbumView)
                     (pixivAlbums.isEmpty
                         ? _buildEmptySearchSliver(context, 'Album tidak ditemukan')
@@ -965,6 +972,134 @@ class _FilesScreenState extends State<FilesScreen> {
   }
 
   // ===========================================================================
+  // LEVEL 1 TOP MENU: "Semua Foto" (All photos across all artists, shuffled & slideable!)
+  // ===========================================================================
+  Widget _buildAllPlatformPhotosMenuSliver(
+    BuildContext context,
+    String platformFolder,
+    Map<String, List<ManagedFile>> byCreator,
+  ) {
+    final allPhotos = <ManagedFile>[];
+    for (final list in byCreator.values) {
+      for (final f in list) {
+        if (f.mediaKind == MediaKind.image && f.savedPath.isNotEmpty) {
+          allPhotos.add(f);
+        }
+      }
+    }
+    if (allPhotos.isEmpty) {
+      return const SliverToBoxAdapter(child: SizedBox.shrink());
+    }
+
+    final theme = Theme.of(context);
+    final platform = MediaPlatformMeta.fromKey(platformFolder);
+    final isPixiv = platform == MediaPlatform.pixiv;
+    final sample = allPhotos.first;
+
+    return SliverToBoxAdapter(
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 0, 16, 10),
+        child: Card(
+          clipBehavior: Clip.antiAlias,
+          color: platform.brandColor.withValues(alpha: 0.10),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(16),
+            side: BorderSide(
+              color: platform.brandColor.withValues(alpha: 0.32),
+            ),
+          ),
+          child: InkWell(
+            onTap: () {
+              FocusManager.instance.primaryFocus?.unfocus();
+              Navigator.of(context).push<void>(
+                MaterialPageRoute<void>(
+                  builder: (_) => PlatformAllPhotosScreen(
+                    manager: widget.manager,
+                    platformFolder: platformFolder,
+                  ),
+                ),
+              );
+            },
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(12, 10, 10, 10),
+              child: Row(
+                children: [
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(12),
+                    child: SizedBox(
+                      width: 48,
+                      height: 48,
+                      child: Stack(
+                        fit: StackFit.expand,
+                        children: [
+                          Image.file(
+                            File(sample.savedPath),
+                            cacheWidth: 160,
+                            filterQuality: FilterQuality.low,
+                            fit: BoxFit.cover,
+                            errorBuilder: (_, _, _) => Container(
+                              decoration: BoxDecoration(
+                                gradient: LinearGradient(
+                                  colors: platform.gradientColors,
+                                ),
+                              ),
+                              child: const Icon(
+                                Icons.photo_library_rounded,
+                                color: Colors.white,
+                                size: 22,
+                              ),
+                            ),
+                          ),
+                          Container(
+                            color: Colors.black.withValues(alpha: 0.28),
+                            alignment: Alignment.center,
+                            child: const Icon(
+                              Icons.shuffle_rounded,
+                              color: Colors.white,
+                              size: 20,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'Semua Foto',
+                          style: theme.textTheme.titleSmall?.copyWith(
+                            fontWeight: FontWeight.w800,
+                          ),
+                        ),
+                        const SizedBox(height: 2),
+                        Text(
+                          '${allPhotos.length} foto • ${byCreator.length} ${isPixiv ? 'artist' : 'kreator'} • Acak & slide',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: theme.textTheme.bodySmall?.copyWith(
+                            color: theme.colorScheme.onSurfaceVariant,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  Icon(
+                    Icons.chevron_right_rounded,
+                    color: platform.brandColor,
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  // ===========================================================================
   // LEVEL 1: Folders by Username / Creator inside Platform
   // ===========================================================================
   Widget _buildCreatorFoldersSliver(
@@ -1114,10 +1249,210 @@ class _FilesScreenState extends State<FilesScreen> {
                   _selectedCreatorFolder = creator;
                 });
               },
+              onLongPress: () {
+                FocusManager.instance.primaryFocus?.unfocus();
+                HapticFeedback.mediumImpact();
+                _showCreatorInfoSheet(
+                  platform: platform,
+                  creatorName: creator,
+                  files: files,
+                  savedProfile: savedProfile,
+                  sampleImage: sampleImage,
+                );
+              },
             ),
           );
         },
       ),
+    );
+  }
+
+  /// Read-only bottom sheet displaying detailed stats for an artist/creator
+  /// (total size in MB/GB, photo/video/audio/album counts, privacy breakdown,
+  /// last updated date, and saved profile link). Intentionally has NO delete action.
+  void _showCreatorInfoSheet({
+    required MediaPlatform platform,
+    required String creatorName,
+    required List<ManagedFile> files,
+    required CreatorProfileRecord? savedProfile,
+    required ManagedFile? sampleImage,
+  }) {
+    final isPixiv = platform == MediaPlatform.pixiv;
+    final totalBytes = files.fold<int>(0, (s, f) => s + f.fileSize);
+    final photoCount = files.where((f) => f.mediaKind == MediaKind.image).length;
+    final videoCount = files.where((f) => f.mediaKind == MediaKind.video).length;
+    final audioCount = files.where((f) => f.mediaKind == MediaKind.audio).length;
+    final privateCount = files.where((f) => f.isPrivate).length;
+    final publicCount = files.length - privateCount;
+    final albumCount =
+        isPixiv ? files.map((f) => f.effectiveAlbumName).toSet().length : 0;
+    final latestMod = files.isNotEmpty
+        ? files
+            .map((e) => e.modifiedAt)
+            .reduce((a, b) => a.isAfter(b) ? a : b)
+        : null;
+
+    final sizeLabel = totalBytes > 0 ? formatBytes(totalBytes) : '0 B';
+    final mediaBreakdown = <String>[
+      if (photoCount > 0) '$photoCount foto',
+      if (videoCount > 0)
+        isPixiv ? '$videoCount video/Ugoira' : '$videoCount video',
+      if (audioCount > 0) '$audioCount audio',
+    ].join(' • ');
+
+    String formatDateTime(DateTime dt) {
+      final d = dt.day.toString().padLeft(2, '0');
+      final m = dt.month.toString().padLeft(2, '0');
+      final hh = dt.hour.toString().padLeft(2, '0');
+      final mm = dt.minute.toString().padLeft(2, '0');
+      return '$d/$m/${dt.year} $hh:$mm';
+    }
+
+    showModalBottomSheet<void>(
+      context: context,
+      showDragHandle: true,
+      isScrollControlled: true,
+      builder: (ctx) {
+        final theme = Theme.of(ctx);
+        return SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(20, 4, 20, 20),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                // Header: Avatar + Artist Name + Platform
+                Row(
+                  children: [
+                    ClipRRect(
+                      borderRadius: BorderRadius.circular(14),
+                      child: SizedBox(
+                        width: 52,
+                        height: 52,
+                        child: sampleImage != null
+                            ? Image.file(
+                                File(sampleImage.savedPath),
+                                cacheWidth: 160,
+                                filterQuality: FilterQuality.low,
+                                fit: BoxFit.cover,
+                                errorBuilder: (_, _, _) =>
+                                    _creatorIconBox(platform),
+                              )
+                            : _creatorIconBox(platform),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            creatorName,
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
+                            style: theme.textTheme.titleMedium?.copyWith(
+                              fontWeight: FontWeight.w800,
+                            ),
+                          ),
+                          const SizedBox(height: 2),
+                          Text(
+                            'Informasi ${isPixiv ? 'Artist' : 'Kreator'} • ${platform.label}',
+                            style: theme.textTheme.bodySmall?.copyWith(
+                              color: platform.brandColor,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 16),
+
+                // Quick Stat Cards (Total Size, Photo/Media Count, Album/File Count)
+                Row(
+                  children: [
+                    Expanded(
+                      child: _CreatorStatCard(
+                        icon: Icons.sd_storage_outlined,
+                        color: platform.brandColor,
+                        value: sizeLabel,
+                        label: 'Total Ukuran',
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: _CreatorStatCard(
+                        icon: Icons.photo_outlined,
+                        color: const Color(0xFF38BDF8),
+                        value: '$photoCount',
+                        label: 'Foto',
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: _CreatorStatCard(
+                        icon: isPixiv
+                            ? Icons.collections_bookmark_outlined
+                            : Icons.insert_drive_file_outlined,
+                        color: const Color(0xFFA855F7),
+                        value: isPixiv ? '$albumCount' : '${files.length}',
+                        label: isPixiv ? 'Album' : 'Total File',
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 14),
+
+                // Detailed Read-Only Info Rows
+                _InfoRow(label: 'Platform', value: platform.label),
+                _InfoRow(label: 'Total File', value: '${files.length} file'),
+                if (mediaBreakdown.isNotEmpty)
+                  _InfoRow(label: 'Media', value: mediaBreakdown),
+                if (isPixiv) _InfoRow(label: 'Album', value: '$albumCount album'),
+                if (privateCount > 0 || isPixiv)
+                  _InfoRow(
+                    label: 'Privasi',
+                    value: '$privateCount privat • $publicCount galeri',
+                  ),
+                if (latestMod != null)
+                  _InfoRow(label: 'Terakhir', value: formatDateTime(latestMod)),
+                if (savedProfile != null)
+                  _InfoRow(label: 'Link', value: savedProfile.profileUrl),
+
+                const SizedBox(height: 14),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.end,
+                  children: [
+                    if (savedProfile != null) ...[
+                      TextButton.icon(
+                        onPressed: () {
+                          Clipboard.setData(
+                            ClipboardData(text: savedProfile.profileUrl),
+                          );
+                          Navigator.pop(ctx);
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(
+                              content: Text('Link profil disalin.'),
+                            ),
+                          );
+                        },
+                        icon: const Icon(Icons.copy_rounded, size: 17),
+                        label: const Text('Salin Link'),
+                      ),
+                      const SizedBox(width: 8),
+                    ],
+                    FilledButton.tonal(
+                      onPressed: () => Navigator.pop(ctx),
+                      child: const Text('Tutup'),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        );
+      },
     );
   }
 
@@ -2932,6 +3267,58 @@ class _StickyAlbumToolbarDelegate extends SliverPersistentHeaderDelegate {
         showAllPhotos != oldDelegate.showAllPhotos ||
         shuffleEnabled != oldDelegate.shuffleEnabled ||
         viewMode != oldDelegate.viewMode;
+  }
+}
+
+class _CreatorStatCard extends StatelessWidget {
+  final IconData icon;
+  final Color color;
+  final String value;
+  final String label;
+
+  const _CreatorStatCard({
+    required this.icon,
+    required this.color,
+    required this.value,
+    required this.label,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.10),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: color.withValues(alpha: 0.25)),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 18, color: color),
+          const SizedBox(height: 5),
+          Text(
+            value,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: theme.textTheme.titleSmall?.copyWith(
+              fontWeight: FontWeight.w800,
+            ),
+          ),
+          const SizedBox(height: 1),
+          Text(
+            label,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: theme.textTheme.labelSmall?.copyWith(
+              color: theme.colorScheme.onSurfaceVariant,
+              fontSize: 10.5,
+            ),
+          ),
+        ],
+      ),
+    );
   }
 }
 

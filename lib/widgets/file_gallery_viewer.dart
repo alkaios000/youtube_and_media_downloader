@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -14,12 +15,18 @@ class FileGalleryViewer extends StatefulWidget {
   final DownloadManager manager;
   final List<ManagedFile> images;
   final int initialIndex;
+  final bool enableShuffleRefresh;
+  final bool showCreatorInSubtitle;
+  final VoidCallback? onShuffleRefresh;
 
   const FileGalleryViewer({
     super.key,
     required this.manager,
     required this.images,
     required this.initialIndex,
+    this.enableShuffleRefresh = false,
+    this.showCreatorInSubtitle = false,
+    this.onShuffleRefresh,
   });
 
   @override
@@ -49,6 +56,22 @@ class _FileGalleryViewerState extends State<FileGalleryViewer> {
   }
 
   ManagedFile get _current => _images[_currentIndex];
+
+  void _shuffleInViewer() {
+    if (_images.length <= 1) return;
+    HapticFeedback.selectionClick();
+    final shuffled = List<ManagedFile>.from(_images)
+      ..shuffle(math.Random(DateTime.now().microsecondsSinceEpoch));
+    setState(() {
+      _images = shuffled;
+      _currentIndex = 0;
+      _isZoomed = false;
+    });
+    if (_pageController.hasClients) {
+      _pageController.jumpToPage(0);
+    }
+    widget.onShuffleRefresh?.call();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -131,7 +154,11 @@ class _FileGalleryViewerState extends State<FileGalleryViewer> {
                               ),
                             ),
                             Text(
-                              '${_currentIndex + 1} / ${_images.length} • ${formatBytes(_current.fileSize)}',
+                              widget.showCreatorInSubtitle
+                                  ? '${_currentIndex + 1} / ${_images.length} • ${_current.creatorFolder}'
+                                  : '${_currentIndex + 1} / ${_images.length} • ${formatBytes(_current.fileSize)}',
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
                               style: const TextStyle(
                                 color: Colors.white70,
                                 fontSize: 11.5,
@@ -140,6 +167,15 @@ class _FileGalleryViewerState extends State<FileGalleryViewer> {
                           ],
                         ),
                       ),
+                      if (widget.enableShuffleRefresh && _images.length > 1)
+                        IconButton(
+                          onPressed: _shuffleInViewer,
+                          icon: const Icon(
+                            Icons.shuffle_rounded,
+                            color: Colors.white,
+                          ),
+                          tooltip: 'Acak ulang & segarkan',
+                        ),
                       IconButton(
                         onPressed: () => widget.manager.openManagedFile(_current),
                         icon: const Icon(Icons.open_in_new_rounded, color: Colors.white),

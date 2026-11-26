@@ -563,4 +563,100 @@ void main() {
 
     manager.dispose();
   });
+
+  testWidgets(
+      'Artist list displays top Semua Foto menu with shuffled photos, refresh & slide viewer',
+      (WidgetTester tester) async {
+    final files = <ManagedFile>[
+      for (int i = 0; i < 4; i++)
+        ManagedFile(
+          fileName: 'alpha_$i.jpg',
+          mimeType: 'image/jpeg',
+          mediaKind: MediaKind.image,
+          fileSize: 2048,
+          modifiedAt: DateTime(2026, 11, 26, 10, i),
+          relativePath: 'Pixiv/ArtistAlpha/AlbumA',
+          savedPath: '/nonexistent/alpha_$i.jpg',
+          contentUri: 'content://test/pixiv/alpha/$i',
+          platformFolder: 'Pixiv',
+          creatorFolder: 'ArtistAlpha',
+          albumFolder: 'AlbumA',
+          isPrivate: true,
+        ),
+      for (int i = 0; i < 3; i++)
+        ManagedFile(
+          fileName: 'beta_$i.jpg',
+          mimeType: 'image/jpeg',
+          mediaKind: MediaKind.image,
+          fileSize: 2048,
+          modifiedAt: DateTime(2026, 11, 26, 11, i),
+          relativePath: 'Pixiv/ArtistBeta/AlbumB',
+          savedPath: '/nonexistent/beta_$i.jpg',
+          contentUri: 'content://test/pixiv/beta/$i',
+          platformFolder: 'Pixiv',
+          creatorFolder: 'ArtistBeta',
+          albumFolder: 'AlbumB',
+          isPrivate: true,
+        ),
+    ];
+
+    final manager = _FakeFilesManager(files, const {});
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: AppTheme.darkTheme(),
+        home: Scaffold(
+          body: SafeArea(
+            child: FilesScreen(manager: manager),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    // Open Pixiv -> Artist list (Level 1)
+    await tester.tap(find.text('Pixiv'));
+    await tester.pumpAndSettle();
+
+    // Top menu card "Semua Foto" MUST appear above artists
+    expect(find.text('Semua Foto'), findsOneWidget);
+    expect(find.text('7 foto • 2 artist • Acak & slide'), findsOneWidget);
+    expect(find.text('ArtistAlpha'), findsOneWidget);
+    expect(find.text('ArtistBeta'), findsOneWidget);
+
+    // Long-press an artist -> opens read-only Info Artist sheet (size, photos, albums; NO delete!)
+    await tester.longPress(find.text('ArtistAlpha'));
+    await tester.pumpAndSettle();
+    expect(find.text('Informasi Artist • Pixiv'), findsOneWidget);
+    expect(find.text('Total Ukuran'), findsOneWidget);
+    expect(find.text('8.0 KB'), findsOneWidget);
+    expect(find.text('4 foto'), findsOneWidget);
+    expect(find.text('4 privat • 0 galeri'), findsOneWidget);
+    expect(find.textContaining('Hapus'), findsNothing);
+    await tester.tap(find.text('Tutup'));
+    await tester.pumpAndSettle();
+
+    // Tap "Semua Foto" -> opens PlatformAllPhotosScreen (shuffled by default)
+    await tester.tap(find.text('Semua Foto'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Semua Foto • Pixiv'), findsOneWidget);
+    expect(find.text('Acak Aktif'), findsOneWidget);
+    expect(find.text('Acak Lagi'), findsOneWidget);
+    expect(find.text('Slide'), findsOneWidget);
+    expect(find.text('7 foto'), findsOneWidget);
+
+    // Tap "Acak Lagi" to reshuffle cleanly
+    await tester.tap(find.text('Acak Lagi'));
+    await tester.pumpAndSettle();
+    expect(find.text('Acak Aktif'), findsOneWidget);
+
+    // Tap "Slide" -> opens full-screen swipeable FileGalleryViewer with in-viewer shuffle button
+    await tester.tap(find.text('Slide'));
+    await tester.pumpAndSettle();
+    expect(find.byType(PageView), findsOneWidget);
+    expect(find.byTooltip('Acak ulang & segarkan'), findsOneWidget);
+
+    manager.dispose();
+  });
 }
