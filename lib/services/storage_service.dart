@@ -29,10 +29,9 @@ class StorageService {
 
   Future<void> saveHistory(List<DownloadItem> items) async {
     final prefs = await SharedPreferences.getInstance();
-    // Only persist terminal states (completed/failed/cancelled), cap at 200 items.
+    // Persist all completed/terminal history items without artificial cap.
     final toSave = items
         .where((item) => !item.isActive)
-        .take(200)
         .map((e) => e.toJson())
         .toList();
     await prefs.setString(_historyKey, jsonEncode(toSave));

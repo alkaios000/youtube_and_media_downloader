@@ -205,12 +205,11 @@ class MediaExtractorService {
     final cleanUrl = detection.cleanUrl;
     final platform = detection.platform;
 
-    // 1. Try yt-dlp --flat-playlist (works on YouTube channels/playlists, TikTok, IG, X, FB, Douyin)
+    // 1. Try yt-dlp --flat-playlist without any artificial cap (loads ALL items!)
     try {
       final rawJson = await bridge.extractProfileItems(
         url: cleanUrl,
         cookiesPath: cookiesPath,
-        limit: 30,
       );
       final parsed = parseYtDlpFlatPlaylistJson(
         rawJson,
@@ -341,7 +340,7 @@ class MediaExtractorService {
         ? sniffed.author.trim()
         : platform.label;
 
-    for (int i = 0; i < sniffed.videos.length && i < 4; i++) {
+    for (int i = 0; i < sniffed.videos.length; i++) {
       final videoUrl = sniffed.videos[i];
       options.add(
         MediaFormatOption(
@@ -362,7 +361,7 @@ class MediaExtractorService {
     }
 
     if (!strictVideoOnly && sniffed.images.isNotEmpty) {
-      final uniqueImages = sniffed.images.take(15).toList();
+      final uniqueImages = sniffed.images.toList();
       for (int i = 0; i < uniqueImages.length; i++) {
         final ext = _guessImageExt(uniqueImages[i]);
         selectableItems.add(

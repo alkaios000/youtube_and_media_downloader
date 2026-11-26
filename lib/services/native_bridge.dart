@@ -312,12 +312,12 @@ class NativeBridge {
   Future<String> extractProfileItems({
     required String url,
     String? cookiesPath,
-    int limit = 30,
+    int? limit,
   }) async {
     final result = await _channel.invokeMethod<String>('extractProfileItems', {
       'url': url,
       'cookiesPath': cookiesPath,
-      'limit': limit,
+      if (limit != null && limit > 0) 'limit': limit,
     });
     if (result == null || result.trim().isEmpty) {
       throw Exception('Tidak ada daftar media ditemukan pada profil ini.');

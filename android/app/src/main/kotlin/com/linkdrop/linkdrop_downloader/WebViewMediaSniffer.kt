@@ -639,7 +639,7 @@ class WebViewMediaSniffer(private val context: Context) {
             function walkJson(node, depth) {
               if (!node || depth > 14) return;
               if (Array.isArray(node)) {
-                for (var idx = 0; idx < node.length && idx < 40; idx++) {
+                for (var idx = 0; idx < node.length; idx++) {
                   walkJson(node[idx], depth + 1);
                 }
                 return;

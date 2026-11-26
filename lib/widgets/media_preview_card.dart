@@ -172,34 +172,11 @@ class _MediaPreviewCardState extends State<MediaPreviewCard> {
 
             const SizedBox(height: 12),
 
-            // Selectable visual grid
-            GridView.builder(
-              shrinkWrap: true,
-              physics: const NeverScrollableScrollPhysics(),
-              gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                crossAxisCount: 3,
-                crossAxisSpacing: 8,
-                mainAxisSpacing: 8,
-                childAspectRatio: 0.82,
-              ),
-              itemCount: items.length,
-              itemBuilder: (context, index) {
-                final item = items[index];
-                final isSelected = _selectedIds.contains(item.id);
-                return _SelectableGridTile(
-                  item: item,
-                  selected: isSelected,
-                  onTap: () {
-                    setState(() {
-                      if (isSelected) {
-                        _selectedIds.remove(item.id);
-                      } else {
-                        _selectedIds.add(item.id);
-                      }
-                    });
-                  },
-                );
-              },
+            // Lazy-scrolled grid when > 12 items so hundreds/thousands of artworks stay 60fps smooth!
+            _buildAdaptiveSelectableGrid(
+              context,
+              items: items,
+              aspectRatio: 0.82,
             ),
 
             const SizedBox(height: 14),
@@ -317,33 +294,10 @@ class _MediaPreviewCardState extends State<MediaPreviewCard> {
             ),
             const SizedBox(height: 8),
 
-            GridView.builder(
-              shrinkWrap: true,
-              physics: const NeverScrollableScrollPhysics(),
-              gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-                crossAxisCount: 3,
-                crossAxisSpacing: 8,
-                mainAxisSpacing: 8,
-                childAspectRatio: 0.9,
-              ),
-              itemCount: items.length,
-              itemBuilder: (context, index) {
-                final item = items[index];
-                final isSelected = _selectedIds.contains(item.id);
-                return _SelectableGridTile(
-                  item: item,
-                  selected: isSelected,
-                  onTap: () {
-                    setState(() {
-                      if (isSelected) {
-                        _selectedIds.remove(item.id);
-                      } else {
-                        _selectedIds.add(item.id);
-                      }
-                    });
-                  },
-                );
-              },
+            _buildAdaptiveSelectableGrid(
+              context,
+              items: items,
+              aspectRatio: 0.9,
             ),
 
             const SizedBox(height: 14),
@@ -639,6 +593,69 @@ class _MediaPreviewCardState extends State<MediaPreviewCard> {
           ),
         ],
       ),
+    );
+  }
+
+  Widget _buildAdaptiveSelectableGrid(
+    BuildContext context, {
+    required List<SelectableMediaItem> items,
+    required double aspectRatio,
+  }) {
+    final isLarge = items.length > 12;
+    final maxHeight = MediaQuery.sizeOf(context).height * 0.52;
+
+    final grid = GridView.builder(
+      shrinkWrap: !isLarge,
+      physics: isLarge
+          ? const AlwaysScrollableScrollPhysics()
+          : const NeverScrollableScrollPhysics(),
+      gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+        crossAxisCount: 3,
+        crossAxisSpacing: 8,
+        mainAxisSpacing: 8,
+        childAspectRatio: aspectRatio,
+      ),
+      itemCount: items.length,
+      itemBuilder: (context, index) {
+        final item = items[index];
+        final isSelected = _selectedIds.contains(item.id);
+        return _SelectableGridTile(
+          item: item,
+          selected: isSelected,
+          onTap: () {
+            setState(() {
+              if (isSelected) {
+                _selectedIds.remove(item.id);
+              } else {
+                _selectedIds.add(item.id);
+              }
+            });
+          },
+        );
+      },
+    );
+
+    if (!isLarge) return grid;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        SizedBox(
+          height: maxHeight.clamp(280.0, 460.0),
+          child: Scrollbar(
+            thumbVisibility: true,
+            child: grid,
+          ),
+        ),
+        const SizedBox(height: 6),
+        Text(
+          'Geser kotak di atas untuk melihat seluruh ${items.length} media',
+          textAlign: TextAlign.center,
+          style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                color: Theme.of(context).colorScheme.onSurfaceVariant,
+              ),
+        ),
+      ],
     );
   }
 

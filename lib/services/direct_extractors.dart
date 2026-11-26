@@ -255,29 +255,64 @@ class DirectExtractors {
         ids.addAll((body['manga'] as Map).keys.map((e) => e.toString()));
       }
 
-      // Sort newest artwork ID first, take up to 48 for crisp fast browsing
+      // Sort newest artwork ID first — NO cap, load ALL works in parallel chunks of 48!
       ids.sort((a, b) => (int.tryParse(b) ?? 0).compareTo(int.tryParse(a) ?? 0));
-      final batchIds = ids.take(48).toList();
-      if (batchIds.isEmpty) return null;
+      if (ids.isEmpty) return null;
 
-      final queryIds = batchIds.map((id) => 'ids[]=$id').join('&');
-      final worksRes = await _dio.get<dynamic>(
-        'https://www.pixiv.net/ajax/user/$userId/profile/illusts?$queryIds&work_category=illustManga&is_first_page=1',
-        options: Options(headers: headers),
-      );
-      final worksBody = worksRes.data is String
-          ? jsonDecode(worksRes.data as String)
-          : worksRes.data;
-      if (worksBody is! Map || worksBody['error'] == true) return null;
-      final worksMap = worksBody['body']?['works'] as Map?;
-      if (worksMap == null || worksMap.isEmpty) return null;
+      const chunkSize = 48;
+      final chunks = <List<String>>[];
+      for (int start = 0; start < ids.length; start += chunkSize) {
+        final end = (start + chunkSize > ids.length) ? ids.length : start + chunkSize;
+        chunks.add(ids.sublist(start, end));
+      }
+
+      // Fetch up to 4 chunks concurrently so even hundreds/thousands of artworks load quickly.
+      final allWorksMap = <String, Map>{};
+      const concurrency = 4;
+      for (int i = 0; i < chunks.length; i += concurrency) {
+        final group = chunks.sublist(
+          i,
+          (i + concurrency > chunks.length) ? chunks.length : i + concurrency,
+        );
+        final groupResults = await Future.wait(
+          group.map((chunk) async {
+            try {
+              final queryIds = chunk.map((id) => 'ids[]=$id').join('&');
+              final worksRes = await _dio.get<dynamic>(
+                'https://www.pixiv.net/ajax/user/$userId/profile/illusts?$queryIds&work_category=illustManga&is_first_page=0',
+                options: Options(headers: headers),
+              );
+              final worksBody = worksRes.data is String
+                  ? jsonDecode(worksRes.data as String)
+                  : worksRes.data;
+              if (worksBody is Map && worksBody['error'] != true) {
+                final works = worksBody['body']?['works'];
+                if (works is Map) {
+                  return works;
+                }
+              }
+            } catch (_) {}
+            return null;
+          }),
+        );
+        for (final wMap in groupResults) {
+          if (wMap == null) continue;
+          wMap.forEach((key, value) {
+            if (value is Map) {
+              allWorksMap[key.toString()] = value;
+            }
+          });
+        }
+      }
+
+      if (allWorksMap.isEmpty) return null;
 
       String creatorName = 'Pixiv_$userId';
       final items = <SelectableMediaItem>[];
 
-      for (final id in batchIds) {
-        final work = worksMap[id];
-        if (work is! Map) continue;
+      for (final id in ids) {
+        final work = allWorksMap[id];
+        if (work == null) continue;
         final uName = work['userName']?.toString().trim() ?? '';
         if (uName.isNotEmpty) creatorName = uName;
 
@@ -307,7 +342,7 @@ class DirectExtractors {
       return MediaInfo(
         originalUrl: 'https://www.pixiv.net/users/$userId',
         platform: MediaPlatform.pixiv,
-        title: 'Karya $creatorName (${items.length} terbaru dari ${ids.length})',
+        title: 'Karya $creatorName (${items.length} karya)',
         author: creatorName,
         thumbnailUrl: items.first.thumbnailUrl,
         thumbnailHeaders: headers,
@@ -734,39 +769,69 @@ class DirectExtractors {
     try {
       final cleanUser = username.replaceFirst('@', '').trim();
       if (cleanUser.isEmpty) return null;
-      final res = await _dio.get<dynamic>(
-        'https://www.tikwm.com/api/user/posts',
-        queryParameters: {'unique_id': cleanUser, 'count': 30},
-        options: Options(headers: {'User-Agent': _mobileSafariUa}),
-      );
-      final body = res.data is String ? jsonDecode(res.data as String) : res.data;
-      if (body is! Map || body['code'] != 0) return null;
-      final videos = body['data']?['videos'] as List?;
-      if (videos == null || videos.isEmpty) return null;
 
       final items = <SelectableMediaItem>[];
-      for (final v in videos) {
-        if (v is! Map) continue;
-        final vidId = v['video_id']?.toString() ?? '';
-        final playUrl = v['play']?.toString() ?? '';
-        if (!playUrl.startsWith('http')) continue;
-        final title = (v['title']?.toString() ?? 'TikTok_$vidId').trim();
-        final cover = v['cover']?.toString();
-        final dur = (v['duration'] as num?)?.toInt() ?? 0;
-        items.add(
-          SelectableMediaItem(
-            id: 'ttp_$vidId',
-            title: title.isNotEmpty ? title : 'TikTok_$vidId',
-            thumbnailUrl: cover,
-            directUrl: playUrl,
-            sourcePostUrl: 'https://www.tiktok.com/@$cleanUser/video/$vidId',
-            extension: 'mp4',
-            kind: MediaKind.video,
-            engine: DownloadEngine.directHttp,
-            badgeLabel: dur > 0 ? '${dur}s' : 'MP4',
-            author: cleanUser,
-          ),
+      final seenIds = <String>{};
+      String cursor = '0';
+      bool hasMore = true;
+
+      // Paginate through ALL pages of the TikTok profile until hasMore is false.
+      while (hasMore) {
+        final res = await _dio.get<dynamic>(
+          'https://www.tikwm.com/api/user/posts',
+          queryParameters: {
+            'unique_id': cleanUser,
+            'count': 33,
+            'cursor': cursor,
+          },
+          options: Options(headers: {'User-Agent': _mobileSafariUa}),
         );
+        final body = res.data is String ? jsonDecode(res.data as String) : res.data;
+        if (body is! Map || body['code'] != 0) break;
+        final data = body['data'] as Map?;
+        if (data == null) break;
+
+        final videos = data['videos'] as List?;
+        if (videos == null || videos.isEmpty) break;
+
+        int addedThisPage = 0;
+        for (final v in videos) {
+          if (v is! Map) continue;
+          final vidId = v['video_id']?.toString() ?? '';
+          final playUrl = v['play']?.toString() ?? '';
+          if (!playUrl.startsWith('http')) continue;
+          if (vidId.isNotEmpty && !seenIds.add(vidId)) continue;
+          final title = (v['title']?.toString() ?? 'TikTok_$vidId').trim();
+          final cover = v['cover']?.toString();
+          final dur = (v['duration'] as num?)?.toInt() ?? 0;
+          items.add(
+            SelectableMediaItem(
+              id: 'ttp_${vidId.isNotEmpty ? vidId : items.length}',
+              title: title.isNotEmpty ? title : 'TikTok_$vidId',
+              thumbnailUrl: cover,
+              directUrl: playUrl,
+              sourcePostUrl: 'https://www.tiktok.com/@$cleanUser/video/$vidId',
+              extension: 'mp4',
+              kind: MediaKind.video,
+              engine: DownloadEngine.directHttp,
+              badgeLabel: dur > 0 ? '${dur}s' : 'MP4',
+              author: cleanUser,
+            ),
+          );
+          addedThisPage++;
+        }
+
+        final nextHasMore = data['hasMore'] == true;
+        final nextCursor = data['cursor']?.toString() ?? '';
+        if (!nextHasMore ||
+            nextCursor.isEmpty ||
+            nextCursor == cursor ||
+            addedThisPage == 0) {
+          hasMore = false;
+        } else {
+          cursor = nextCursor;
+          await Future<void>.delayed(const Duration(milliseconds: 220));
+        }
       }
 
       if (items.isEmpty) return null;

@@ -211,7 +211,7 @@ class MediaEngineBridge(private val context: Context) {
     fun extractProfileItems(
         url: String,
         cookiesPath: String?,
-        limit: Int = 30,
+        limit: Int? = null,
         onSuccess: (String) -> Unit,
         onError: (String, String) -> Unit,
     ) {
@@ -222,10 +222,12 @@ class MediaEngineBridge(private val context: Context) {
                 val request = YoutubeDLRequest(url)
                 request.addOption("--flat-playlist")
                 request.addOption("--dump-single-json")
-                request.addOption("--playlist-end", limit.coerceIn(5, 60).toString())
+                if (limit != null && limit > 0) {
+                    request.addOption("--playlist-end", limit.toString())
+                }
                 request.addOption("--no-warnings")
                 request.addOption("--skip-download")
-                request.addOption("--socket-timeout", "30")
+                request.addOption("--socket-timeout", "45")
                 if (effectiveCookies != null) {
                     request.addOption("--cookies", effectiveCookies)
                 }
