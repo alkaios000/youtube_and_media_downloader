@@ -867,23 +867,23 @@ void main() {
     await tester.pump();
     expect(find.text('Album Satu'), findsOneWidget);
 
-    // Quick tiny flick of ONLY 10% of screen width ("slide dikit lalu lepas / lempar")
+    // Quick flick switches smoothly to Album Dua
     final width = tester.getSize(find.byType(PageView)).width;
     await tester.fling(
       find.byType(PageView),
-      Offset(-width * 0.10, 0),
-      260,
+      Offset(-width * 0.16, 0),
+      350,
     );
     await tester.pumpAndSettle();
 
     // Must immediately land on Album Dua!
     expect(find.text('Album Dua'), findsOneWidget);
 
-    // And a slow tiny 10% drag back right also switches cleanly back to Album Satu!
+    // Deliberate 1/4-screen (28%) slow drag back right switches cleanly to Album Satu!
     await tester.timedDrag(
       find.byType(PageView),
-      Offset(width * 0.11, 0),
-      const Duration(milliseconds: 350),
+      Offset(width * 0.28, 0),
+      const Duration(milliseconds: 420),
     );
     await tester.pumpAndSettle();
     expect(find.text('Album Satu'), findsOneWidget);

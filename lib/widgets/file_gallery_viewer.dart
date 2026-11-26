@@ -1,7 +1,6 @@
 import 'dart:io';
 import 'dart:math' as math;
 
-import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -100,7 +99,6 @@ class _FileGalleryViewerState extends State<FileGalleryViewer> {
             },
             child: PageView.builder(
               controller: _pageController,
-              dragStartBehavior: DragStartBehavior.down,
               // Do not eagerly decode offscreen neighbors so every swipe stays light & smooth
               allowImplicitScrolling: false,
               physics: _isZoomed
@@ -628,8 +626,8 @@ class _SnappyPhotoPagePhysics extends PageScrollPhysics {
 
   @override
   SpringDescription get spring => SpringDescription.withDampingRatio(
-        mass: 0.50,
-        stiffness: 680.0,
+        mass: 0.72,
+        stiffness: 440.0,
         ratio: 1.0,
       );
 
@@ -638,15 +636,15 @@ class _SnappyPhotoPagePhysics extends PageScrollPhysics {
     return const Tolerance(
       distance: 1.0,
       time: 0.01,
-      velocity: 20.0,
+      velocity: 25.0,
     );
   }
 
   @override
-  double get minFlingDistance => 4.0;
+  double get minFlingDistance => 10.0;
 
   @override
-  double get minFlingVelocity => 45.0;
+  double get minFlingVelocity => 140.0;
 
   double _resolveTargetPixels(ScrollMetrics position, double velocity) {
     final viewport = position.viewportDimension;
@@ -661,8 +659,8 @@ class _SnappyPhotoPagePhysics extends PageScrollPhysics {
         ? (position.pixels - startPx) / viewport
         : (page - basePage);
 
-    const double switchThreshold = 0.08;
-    const double flickVelocity = 45.0;
+    const double switchThreshold = 0.25;
+    const double flickVelocity = 200.0;
 
     double targetPage;
     if (dragDelta.abs() >= 0.85) {

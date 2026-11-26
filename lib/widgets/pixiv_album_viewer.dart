@@ -2,7 +2,6 @@ import 'dart:async';
 import 'dart:io';
 import 'dart:math' as math;
 
-import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
@@ -22,13 +21,10 @@ class _PageHitMeta {
   const _PageHitMeta(this.index);
 }
 
-/// Effortless, buttery-smooth, critically-damped page physics (~120ms settle):
-/// - Uses the exact drag-start pixel offset so touching mid-glide NEVER bounces
-///   back accidentally.
-/// - Requires only a tiny horizontal slide (~14% of screen width) or gentle flick
-///   to switch to the adjacent album (instead of Flutter's default 50% drag).
-/// - Critically-damped spring settles cleanly with zero sluggish tail so vertical
-///   scrolling responds immediately after switching albums.
+/// Silky-smooth, critically-damped page physics matching [FileGalleryViewer]:
+/// - Deliberate ~25% (1/4 screen) horizontal slide OR a gentle thumb flick
+///   glides smoothly to the adjacent album.
+/// - Cleanly settles without sluggish tail so vertical scrolling responds right away.
 class _SnappyAlbumPagePhysics extends PageScrollPhysics {
   final double? Function()? dragStartPixelsProvider;
 
@@ -47,8 +43,8 @@ class _SnappyAlbumPagePhysics extends PageScrollPhysics {
 
   @override
   SpringDescription get spring => SpringDescription.withDampingRatio(
-        mass: 0.50,
-        stiffness: 680.0,
+        mass: 0.72,
+        stiffness: 440.0,
         ratio: 1.0,
       );
 
@@ -57,15 +53,15 @@ class _SnappyAlbumPagePhysics extends PageScrollPhysics {
     return const Tolerance(
       distance: 1.0,
       time: 0.01,
-      velocity: 20.0,
+      velocity: 25.0,
     );
   }
 
   @override
-  double get minFlingDistance => 4.0;
+  double get minFlingDistance => 10.0;
 
   @override
-  double get minFlingVelocity => 45.0;
+  double get minFlingVelocity => 140.0;
 
   double _resolveTargetPixels(ScrollMetrics position, double velocity) {
     final viewport = position.viewportDimension;
@@ -80,10 +76,9 @@ class _SnappyAlbumPagePhysics extends PageScrollPhysics {
         ? (position.pixels - startPx) / viewport
         : (page - basePage);
 
-    // Super responsive: a gentle thumb flick (45 px/s) OR just ~8% drag (~30px)
-    // immediately glides to the next/previous album!
-    const double switchThreshold = 0.08;
-    const double flickVelocity = 45.0;
+    // 1/4 screen (25%) deliberate slide OR gentle flick (200 px/s) switches cleanly!
+    const double switchThreshold = 0.25;
+    const double flickVelocity = 200.0;
 
     double targetPage;
     if (dragDelta.abs() >= 0.85) {
@@ -206,10 +201,21 @@ class _PixivAlbumViewerState extends State<PixivAlbumViewer> {
     _currentAlbumIndex = idx;
     _currentAlbumIndexNotifier = ValueNotifier<int>(idx);
     _pageController = PageController(initialPage: _currentAlbumIndex);
+    widget.manager.addListener(_onManagerUpdated);
+  }
+
+  /// Only rebuilds when [DownloadManager.managedFiles] actually changes —
+  /// ignoring background download progress ticks so sliding stays 100% jank-free!
+  void _onManagerUpdated() {
+    if (!mounted) return;
+    if (!identical(_cachedFilesRef, widget.manager.managedFiles)) {
+      setState(() {});
+    }
   }
 
   @override
   void dispose() {
+    widget.manager.removeListener(_onManagerUpdated);
     _stopAutoScroll();
     _currentAlbumIndexNotifier.dispose();
     _pageController.dispose();
@@ -400,211 +406,203 @@ class _PixivAlbumViewerState extends State<PixivAlbumViewer> {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final albumsMap = _resolveAllAlbumsMap();
+    final activeAlbums = _cachedActiveAlbums;
 
-    return ListenableBuilder(
-      listenable: widget.manager,
-      builder: (context, _) {
-        final albumsMap = _resolveAllAlbumsMap();
-        final activeAlbums = _cachedActiveAlbums;
-
-        if (activeAlbums.isNotEmpty &&
-            _currentAlbumIndex >= activeAlbums.length) {
-          _currentAlbumIndex = activeAlbums.length - 1;
-          _currentAlbumIndexNotifier.value = _currentAlbumIndex;
-          WidgetsBinding.instance.addPostFrameCallback((_) {
-            if (mounted && _pageController.hasClients) {
-              _pageController.jumpToPage(_currentAlbumIndex);
-            }
-          });
+    if (activeAlbums.isNotEmpty &&
+        _currentAlbumIndex >= activeAlbums.length) {
+      _currentAlbumIndex = activeAlbums.length - 1;
+      _currentAlbumIndexNotifier.value = _currentAlbumIndex;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && _pageController.hasClients) {
+          _pageController.jumpToPage(_currentAlbumIndex);
         }
+      });
+    }
 
-        final currentAlbumName = activeAlbums.isNotEmpty
-            ? activeAlbums[_currentAlbumIndex]
-            : widget.albumName;
-        final pages = activeAlbums.isNotEmpty
-            ? (albumsMap[currentAlbumName] ?? const <ManagedFile>[])
-            : const <ManagedFile>[];
-        _currentPages = pages;
+    final currentAlbumName = activeAlbums.isNotEmpty
+        ? activeAlbums[_currentAlbumIndex]
+        : widget.albumName;
+    final pages = activeAlbums.isNotEmpty
+        ? (albumsMap[currentAlbumName] ?? const <ManagedFile>[])
+        : const <ManagedFile>[];
+    _currentPages = pages;
 
-        if (_selectedKeys.isNotEmpty) {
-          final valid = pages.map((e) => e.uniqueKey).toSet();
-          _selectedKeys.removeWhere((k) => !valid.contains(k));
-          if (_selectedKeys.isEmpty && _isSelectionMode) {
-            _isSelectionMode = false;
-          }
+    if (_selectedKeys.isNotEmpty) {
+      final valid = pages.map((e) => e.uniqueKey).toSet();
+      _selectedKeys.removeWhere((k) => !valid.contains(k));
+      if (_selectedKeys.isEmpty && _isSelectionMode) {
+        _isSelectionMode = false;
+      }
+    }
+
+    final selectedPages = _isSelectionMode
+        ? pages.where((p) => _selectedKeys.contains(p.uniqueKey)).toList()
+        : const <ManagedFile>[];
+    final allSelected =
+        pages.isNotEmpty && selectedPages.length == pages.length;
+
+    final hasMultipleAlbums = activeAlbums.length > 1;
+
+    return PopScope(
+      canPop: !_isSelectionMode,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop && _isSelectionMode) {
+          _exitSelection();
         }
-
-        final selectedPages = _isSelectionMode
-            ? pages.where((p) => _selectedKeys.contains(p.uniqueKey)).toList()
-            : const <ManagedFile>[];
-        final allSelected =
-            pages.isNotEmpty && selectedPages.length == pages.length;
-
-        final hasMultipleAlbums = activeAlbums.length > 1;
-
-        return PopScope(
-          canPop: !_isSelectionMode,
-          onPopInvokedWithResult: (didPop, _) {
-            if (!didPop && _isSelectionMode) {
-              _exitSelection();
-            }
-          },
-          child: Scaffold(
-            appBar: _isSelectionMode
-                ? AppBar(
-                    leading: IconButton(
-                      onPressed: _exitSelection,
-                      icon: const Icon(Icons.close_rounded),
+      },
+      child: Scaffold(
+        appBar: _isSelectionMode
+            ? AppBar(
+                leading: IconButton(
+                  onPressed: _exitSelection,
+                  icon: const Icon(Icons.close_rounded),
+                ),
+                title: Text(
+                  '${selectedPages.length} dipilih',
+                  style: const TextStyle(fontWeight: FontWeight.w800),
+                ),
+                actions: [
+                  TextButton.icon(
+                    onPressed: () {
+                      HapticFeedback.selectionClick();
+                      setState(() {
+                        if (allSelected) {
+                          _selectedKeys.clear();
+                          _isSelectionMode = false;
+                        } else {
+                          _selectedKeys
+                            ..clear()
+                            ..addAll(pages.map((e) => e.uniqueKey));
+                        }
+                      });
+                    },
+                    icon: Icon(
+                      allSelected
+                          ? Icons.deselect_rounded
+                          : Icons.select_all_rounded,
+                      size: 18,
                     ),
-                    title: Text(
-                      '${selectedPages.length} dipilih',
-                      style: const TextStyle(fontWeight: FontWeight.w800),
-                    ),
-                    actions: [
-                      TextButton.icon(
-                        onPressed: () {
-                          HapticFeedback.selectionClick();
-                          setState(() {
-                            if (allSelected) {
-                              _selectedKeys.clear();
-                              _isSelectionMode = false;
-                            } else {
-                              _selectedKeys
-                                ..clear()
-                                ..addAll(pages.map((e) => e.uniqueKey));
-                            }
-                          });
-                        },
-                        icon: Icon(
-                          allSelected
-                              ? Icons.deselect_rounded
-                              : Icons.select_all_rounded,
-                          size: 18,
-                        ),
-                        label: Text(allSelected ? 'Batal' : 'Semua'),
-                      ),
-                    ],
-                  )
-                : AppBar(
-                    title: ValueListenableBuilder<int>(
-                      valueListenable: _currentAlbumIndexNotifier,
-                      builder: (context, idx, _) {
-                        final safeIdx = activeAlbums.isEmpty
-                            ? 0
-                            : idx.clamp(0, activeAlbums.length - 1);
-                        final title = activeAlbums.isNotEmpty
-                            ? activeAlbums[safeIdx]
-                            : widget.albumName;
-                        final albumPageCount = activeAlbums.isNotEmpty
-                            ? (albumsMap[title]?.length ?? 0)
-                            : 0;
-                        final sub = hasMultipleAlbums
-                            ? '${widget.creatorFolder} • ${safeIdx + 1}/${activeAlbums.length} • $albumPageCount hal'
-                            : '${widget.creatorFolder} • $albumPageCount halaman';
-                        return Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              title,
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: const TextStyle(
-                                fontSize: 15.5,
-                                fontWeight: FontWeight.w800,
-                              ),
-                            ),
-                            Text(
-                              sub,
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: theme.textTheme.labelSmall?.copyWith(
-                                color: theme.colorScheme.onSurfaceVariant,
-                              ),
-                            ),
-                          ],
-                        );
-                      },
-                    ),
-                    actions: [
-                      if (activeAlbums.isNotEmpty)
-                        IconButton(
-                          onPressed: () {
-                            HapticFeedback.selectionClick();
-                            setState(() => _isSelectionMode = true);
-                          },
-                          icon: const Icon(Icons.checklist_rounded),
-                          tooltip: 'Pilih banyak',
-                        ),
-                    ],
+                    label: Text(allSelected ? 'Batal' : 'Semua'),
                   ),
-            body: activeAlbums.isEmpty
-                ? const Center(child: Text('Album kosong atau sudah dihapus.'))
-                : Stack(
-                    children: [
-                      NotificationListener<ScrollNotification>(
-                        onNotification: (notification) {
-                          if (notification.depth == 0) {
-                            if (notification is ScrollStartNotification &&
-                                notification.dragDetails != null) {
-                              _dragStartPixels = notification.metrics.pixels;
-                            } else if (notification is ScrollEndNotification) {
-                              _dragStartPixels = null;
-                            }
-                          }
-                          return false;
-                        },
-                        child: PageView.builder(
-                          controller: _pageController,
-                          // Respond from touchdown so quick thumb flicks have zero dead-zone lag!
-                          dragStartBehavior: DragStartBehavior.down,
-                          // Strictly do NOT pre-render offscreen neighbor albums so
-                          // sliding stays buttery-smooth with minimal RAM & GPU load.
-                          allowImplicitScrolling: false,
-                          itemCount: activeAlbums.length,
-                          physics: _isSelectionMode
-                              ? const NeverScrollableScrollPhysics()
-                              : _SnappyAlbumPagePhysics(
-                                  dragStartPixelsProvider: () =>
-                                      _dragStartPixels,
-                                ),
-                          onPageChanged: (newIndex) {
-                            _stopAutoScroll();
-                            _currentAlbumIndex = newIndex;
-                            _dragStartIndex = null;
-                            _dragLastIndex = null;
-                            if (newIndex >= 0 && newIndex < activeAlbums.length) {
-                              _currentPages =
-                                  albumsMap[activeAlbums[newIndex]] ??
-                                      const <ManagedFile>[];
-                            }
-                            // Update ONLY the AppBar title via ValueNotifier —
-                            // ZERO setState rebuild of PageView mid-slide!
-                            _currentAlbumIndexNotifier.value = newIndex;
-                          },
-                          itemBuilder: (context, albumIdx) {
-                            final albumTitle = activeAlbums[albumIdx];
-                            final albumPages =
-                                albumsMap[albumTitle] ?? const <ManagedFile>[];
-                            final privateCount =
-                                albumPages.where((p) => p.isPrivate).length;
-                            final publicCount =
-                                albumPages.length - privateCount;
+                ],
+              )
+            : AppBar(
+                title: ValueListenableBuilder<int>(
+                  valueListenable: _currentAlbumIndexNotifier,
+                  builder: (context, idx, _) {
+                    final safeIdx = activeAlbums.isEmpty
+                        ? 0
+                        : idx.clamp(0, activeAlbums.length - 1);
+                    final title = activeAlbums.isNotEmpty
+                        ? activeAlbums[safeIdx]
+                        : widget.albumName;
+                    final albumPageCount = activeAlbums.isNotEmpty
+                        ? (albumsMap[title]?.length ?? 0)
+                        : 0;
+                    final sub = hasMultipleAlbums
+                        ? '${widget.creatorFolder} • ${safeIdx + 1}/${activeAlbums.length} • $albumPageCount hal'
+                        : '${widget.creatorFolder} • $albumPageCount halaman';
+                    return Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          title,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            fontSize: 15.5,
+                            fontWeight: FontWeight.w800,
+                          ),
+                        ),
+                        Text(
+                          sub,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: theme.textTheme.labelSmall?.copyWith(
+                            color: theme.colorScheme.onSurfaceVariant,
+                          ),
+                        ),
+                      ],
+                    );
+                  },
+                ),
+                actions: [
+                  if (activeAlbums.isNotEmpty)
+                    IconButton(
+                      onPressed: () {
+                        HapticFeedback.selectionClick();
+                        setState(() => _isSelectionMode = true);
+                      },
+                      icon: const Icon(Icons.checklist_rounded),
+                      tooltip: 'Pilih banyak',
+                    ),
+                ],
+              ),
+        body: activeAlbums.isEmpty
+            ? const Center(child: Text('Album kosong atau sudah dihapus.'))
+            : Stack(
+                children: [
+                  NotificationListener<ScrollNotification>(
+                    onNotification: (notification) {
+                      if (notification.depth == 0) {
+                        if (notification is ScrollStartNotification &&
+                            notification.dragDetails != null) {
+                          _dragStartPixels = notification.metrics.pixels;
+                        } else if (notification is ScrollEndNotification) {
+                          _dragStartPixels = null;
+                        }
+                      }
+                      return false;
+                    },
+                    child: PageView.builder(
+                      controller: _pageController,
+                      // Strictly do NOT pre-render offscreen neighbor albums so
+                      // sliding stays buttery-smooth with minimal RAM & GPU load.
+                      allowImplicitScrolling: false,
+                      itemCount: activeAlbums.length,
+                      physics: _isSelectionMode
+                          ? const NeverScrollableScrollPhysics()
+                          : _SnappyAlbumPagePhysics(
+                              dragStartPixelsProvider: () => _dragStartPixels,
+                            ),
+                      onPageChanged: (newIndex) {
+                        _stopAutoScroll();
+                        _currentAlbumIndex = newIndex;
+                        _dragStartIndex = null;
+                        _dragLastIndex = null;
+                        if (newIndex >= 0 && newIndex < activeAlbums.length) {
+                          _currentPages =
+                              albumsMap[activeAlbums[newIndex]] ??
+                                  const <ManagedFile>[];
+                        }
+                        // Update ONLY the AppBar title via ValueNotifier —
+                        // ZERO setState rebuild of PageView mid-slide!
+                        _currentAlbumIndexNotifier.value = newIndex;
+                      },
+                      itemBuilder: (context, albumIdx) {
+                        final albumTitle = activeAlbums[albumIdx];
+                        final albumPages =
+                            albumsMap[albumTitle] ?? const <ManagedFile>[];
+                        final privateCount =
+                            albumPages.where((p) => p.isPrivate).length;
+                        final publicCount = albumPages.length - privateCount;
 
-                            return RepaintBoundary(
-                              key: ValueKey<String>(albumTitle),
-                              child: GestureDetector(
-                                key: _viewportKeyFor(albumIdx),
-                                behavior: HitTestBehavior.translucent,
-                                onLongPressStart: _onDragStart,
-                                onLongPressMoveUpdate: _onDragMove,
-                                onLongPressEnd: _onDragEnd,
-                                child: CustomScrollView(
-                                  controller: _controllerFor(albumIdx),
-                                  // Strict zero off-screen pre-render: photos not yet
-                                  // visible on screen are NOT rendered or decoded!
-                                  scrollCacheExtent:
-                                      const ScrollCacheExtent.pixels(0),
-                                  slivers: [
+                        return RepaintBoundary(
+                          key: ValueKey<String>(albumTitle),
+                          child: GestureDetector(
+                            key: _viewportKeyFor(albumIdx),
+                            behavior: HitTestBehavior.translucent,
+                            onLongPressStart: _onDragStart,
+                            onLongPressMoveUpdate: _onDragMove,
+                            onLongPressEnd: _onDragEnd,
+                            child: CustomScrollView(
+                              controller: _controllerFor(albumIdx),
+                              // Strict zero off-screen pre-render: photos not yet
+                              // visible on screen are NOT rendered or decoded!
+                              scrollCacheExtent:
+                                  const ScrollCacheExtent.pixels(0),
+                              slivers: [
                                 // Privacy Status + 3-Mode Reader Switcher Banner
                                 if (!_isSelectionMode)
                                   SliverToBoxAdapter(
@@ -678,41 +676,39 @@ class _PixivAlbumViewerState extends State<PixivAlbumViewer> {
                                   _buildGalleryGridSliver(albumPages)
                                 else
                                   _buildRowListSliver(albumPages),
-                                ],
-                              ),
+                              ],
                             ),
-                          );
-                        },
-                      ),
+                          ),
+                        );
+                      },
                     ),
-
-                      // Floating Multi-Select Batch Bar (Unlock, Lock, Share, Delete)
-                      AnimatedPositioned(
-                        duration: const Duration(milliseconds: 200),
-                        curve: Curves.easeOutCubic,
-                        left: 12,
-                        right: 12,
-                        bottom:
-                            _isSelectionMode && selectedPages.isNotEmpty ? 14 : -110,
-                        child: _AlbumBatchActionBar(
-                          selectedPages: selectedPages,
-                          busy: _isBusy,
-                          onUnlock: () => _unlockPages(
-                            selectedPages.where((p) => p.isPrivate).toList(),
-                          ),
-                          onLock: () => _lockPages(
-                            selectedPages.where((p) => !p.isPrivate).toList(),
-                          ),
-                          onShare: () =>
-                              widget.manager.shareMultipleManagedFiles(selectedPages),
-                          onDelete: () => _confirmDeleteMany(selectedPages),
-                        ),
-                      ),
-                    ],
                   ),
-          ),
-        );
-      },
+
+                  // Floating Multi-Select Batch Bar (Unlock, Lock, Share, Delete)
+                  AnimatedPositioned(
+                    duration: const Duration(milliseconds: 200),
+                    curve: Curves.easeOutCubic,
+                    left: 12,
+                    right: 12,
+                    bottom:
+                        _isSelectionMode && selectedPages.isNotEmpty ? 14 : -110,
+                    child: _AlbumBatchActionBar(
+                      selectedPages: selectedPages,
+                      busy: _isBusy,
+                      onUnlock: () => _unlockPages(
+                        selectedPages.where((p) => p.isPrivate).toList(),
+                      ),
+                      onLock: () => _lockPages(
+                        selectedPages.where((p) => !p.isPrivate).toList(),
+                      ),
+                      onShare: () =>
+                          widget.manager.shareMultipleManagedFiles(selectedPages),
+                      onDelete: () => _confirmDeleteMany(selectedPages),
+                    ),
+                  ),
+                ],
+              ),
+      ),
     );
   }
 
@@ -722,10 +718,14 @@ class _PixivAlbumViewerState extends State<PixivAlbumViewer> {
   Widget _buildPixivVerticalScrollSliver(List<ManagedFile> pages) {
     final theme = Theme.of(context);
     final bottomPad = _isSelectionMode ? 104.0 : 32.0;
+    final mediaSize = MediaQuery.sizeOf(context);
     final screenPxWidth =
-        (MediaQuery.sizeOf(context).width * MediaQuery.devicePixelRatioOf(context))
+        (mediaSize.width * MediaQuery.devicePixelRatioOf(context))
             .round()
             .clamp(540, 900);
+    // Reserve ~65% of screen height before Photo #1 finishes decoding so
+    // Flutter mounts STRICTLY 1 photo (not 4-5 undecoded 180px stubs!) on slide!
+    final loadingPlaceholderHeight = (mediaSize.height * 0.65).clamp(380.0, 580.0);
 
     return SliverPadding(
       padding: EdgeInsets.fromLTRB(0, 2, 0, bottomPad),
@@ -808,25 +808,41 @@ class _PixivAlbumViewerState extends State<PixivAlbumViewer> {
                                   ],
                                 ),
                               )
-                            : ConstrainedBox(
-                                constraints:
-                                    const BoxConstraints(minHeight: 180),
-                                child: Image.file(
-                                  File(page.savedPath),
-                                  width: double.infinity,
-                                  cacheWidth: screenPxWidth,
-                                  filterQuality: FilterQuality.low,
-                                  gaplessPlayback: true,
-                                  fit: BoxFit.fitWidth,
-                                  errorBuilder: (_, _, _) => Container(
-                                    height: 220,
+                            : Image.file(
+                                File(page.savedPath),
+                                width: double.infinity,
+                                cacheWidth: screenPxWidth,
+                                filterQuality: FilterQuality.low,
+                                gaplessPlayback: true,
+                                fit: BoxFit.fitWidth,
+                                frameBuilder: (context, child, frame, wasSync) {
+                                  if (wasSync || frame != null) {
+                                    return child;
+                                  }
+                                  return Container(
+                                    height: loadingPlaceholderHeight,
+                                    width: double.infinity,
                                     color: theme
-                                        .colorScheme.surfaceContainerHighest,
+                                        .colorScheme.surfaceContainerHighest
+                                        .withValues(alpha: 0.35),
                                     alignment: Alignment.center,
-                                    child: const Icon(
-                                      Icons.broken_image_outlined,
-                                      size: 42,
+                                    child: Icon(
+                                      Icons.image_outlined,
+                                      size: 32,
+                                      color: theme
+                                          .colorScheme.onSurfaceVariant
+                                          .withValues(alpha: 0.35),
                                     ),
+                                  );
+                                },
+                                errorBuilder: (_, _, _) => Container(
+                                  height: 220,
+                                  color: theme
+                                      .colorScheme.surfaceContainerHighest,
+                                  alignment: Alignment.center,
+                                  child: const Icon(
+                                    Icons.broken_image_outlined,
+                                    size: 42,
                                   ),
                                 ),
                               ),
