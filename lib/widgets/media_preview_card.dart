@@ -320,14 +320,22 @@ class _MediaPreviewCardState extends State<MediaPreviewCard> {
             .where((e) =>
                 e.title.toLowerCase().contains(query) ||
                 e.badgeLabel.toLowerCase().contains(query) ||
-                (e.pixivIllustId?.contains(query) ?? false))
+                (e.pixivIllustId?.contains(query) ?? false) ||
+                e.tags.any((t) => t.toLowerCase().contains(query)))
             .toList(growable: false);
     final hasVideoItems = allItems.any((i) => i.kind == MediaKind.video);
+    final isPixivBulk =
+        info.platform == MediaPlatform.pixiv && info.isBulkProfile;
 
     final downloadedItems = allItems.where(_isItemMarked).toList();
     final downloadedCount = downloadedItems.length;
+    final allEligibleItems = allItems.where((e) => !_isItemLocked(e)).toList();
     final eligibleItems = items.where((e) => !_isItemLocked(e)).toList();
     final undownloadedItems = items.where((e) => !_isItemMarked(e)).toList();
+    final chosenEligibleCount =
+        allEligibleItems.where((e) => _selectedIds.contains(e.id)).length;
+    final uncheckedEligibleCount =
+        isPixivBulk ? (allEligibleItems.length - chosenEligibleCount) : 0;
 
     final allEligibleSelected = eligibleItems.isNotEmpty &&
         eligibleItems.every((e) => _selectedIds.contains(e.id));
@@ -477,6 +485,42 @@ class _MediaPreviewCardState extends State<MediaPreviewCard> {
                   ),
                 ],
               ),
+              if (isPixivBulk && uncheckedEligibleCount > 0) ...[
+                const SizedBox(height: 8),
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 10,
+                    vertical: 7,
+                  ),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFF59E0B).withValues(alpha: 0.12),
+                    borderRadius: BorderRadius.circular(10),
+                    border: Border.all(
+                      color: const Color(0xFFF59E0B).withValues(alpha: 0.35),
+                    ),
+                  ),
+                  child: Row(
+                    children: [
+                      const Icon(
+                        Icons.fast_forward_rounded,
+                        size: 16,
+                        color: Color(0xFFF59E0B),
+                      ),
+                      const SizedBox(width: 7),
+                      Expanded(
+                        child: Text(
+                          '$uncheckedEligibleCount album tidak dicentang → tidak diunduh, tapi tetap ditandai selesai (ter-skip ke depannya).',
+                          style: theme.textTheme.labelSmall?.copyWith(
+                            color: const Color(0xFFF59E0B),
+                            fontWeight: FontWeight.w700,
+                            height: 1.3,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
 
               if (hasVideoItems && info.platform != MediaPlatform.pixiv) ...[
                 const SizedBox(height: 10),
@@ -593,7 +637,7 @@ class _MediaPreviewCardState extends State<MediaPreviewCard> {
               SizedBox(
                 height: 50,
                 child: FilledButton.icon(
-                  onPressed: _selectedIds.isEmpty
+                  onPressed: (_selectedIds.isEmpty && uncheckedEligibleCount == 0)
                       ? null
                       : () {
                           final chosen = allItems
@@ -601,7 +645,7 @@ class _MediaPreviewCardState extends State<MediaPreviewCard> {
                                   _selectedIds.contains(e.id) &&
                                   !_isItemLocked(e))
                               .toList();
-                          if (chosen.isEmpty) {
+                          if (chosen.isEmpty && uncheckedEligibleCount == 0) {
                             _showLockedHint(context);
                             return;
                           }
@@ -612,11 +656,20 @@ class _MediaPreviewCardState extends State<MediaPreviewCard> {
                       borderRadius: BorderRadius.circular(14),
                     ),
                   ),
-                  icon: const Icon(Icons.download_for_offline_rounded),
+                  icon: Icon(
+                    chosenEligibleCount == 0 && uncheckedEligibleCount > 0
+                        ? Icons.fast_forward_rounded
+                        : Icons.download_for_offline_rounded,
+                  ),
                   label: Text(
-                    eligibleItems.isEmpty && _strictLockMarked
+                    allEligibleItems.isEmpty && _strictLockMarked
                         ? 'Semua Sudah Diunduh (Hapus Tanda Dulu)'
-                        : 'Unduh Massal (${_selectedIds.length} Media)',
+                        : (chosenEligibleCount == 0 &&
+                                uncheckedEligibleCount > 0
+                            ? 'Tandai Dilewati ($uncheckedEligibleCount Album)'
+                            : (uncheckedEligibleCount > 0
+                                ? 'Unduh $chosenEligibleCount • Skip $uncheckedEligibleCount'
+                                : 'Unduh Massal (${_selectedIds.length} Media)')),
                     style: const TextStyle(
                       fontSize: 14.5,
                       fontWeight: FontWeight.w700,

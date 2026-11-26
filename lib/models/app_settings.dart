@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 
+import 'media_metadata.dart';
+
 enum DefaultQualityPreset {
   best,
   p1080,
@@ -44,6 +46,11 @@ class AppSettings {
   /// to prevent HTTP 429 rate limits on Pixiv, TikTok, Instagram, etc.
   final int downloadRateLimitMs;
 
+  /// Content visibility checklist filters (all enabled by default).
+  final bool showNormalContent;
+  final bool showEcchiContent;
+  final bool showNsfwContent;
+
   const AppSettings({
     this.themeMode = ThemeMode.dark,
     this.defaultQuality = DefaultQualityPreset.best,
@@ -53,9 +60,37 @@ class AppSettings {
     this.customCookies = '',
     this.maxConcurrentAlbums = 3,
     this.downloadRateLimitMs = 0,
+    this.showNormalContent = true,
+    this.showEcchiContent = true,
+    this.showNsfwContent = true,
   });
 
   bool get hasCookies => customCookies.trim().isNotEmpty;
+
+  bool get showsAllContentRatings =>
+      showNormalContent && showEcchiContent && showNsfwContent;
+
+  bool isContentRatingVisible(ContentRating rating) {
+    switch (rating) {
+      case ContentRating.normal:
+        return showNormalContent;
+      case ContentRating.ecchi:
+        return showEcchiContent;
+      case ContentRating.nsfw:
+        return showNsfwContent;
+    }
+  }
+
+  String get contentVisibilitySummary {
+    final active = <String>[
+      if (showNormalContent) ContentRating.normal.label,
+      if (showEcchiContent) ContentRating.ecchi.label,
+      if (showNsfwContent) ContentRating.nsfw.label,
+    ];
+    if (active.length == 3) return 'Semua ditampilkan (Biasa, Ecchi, NSFW)';
+    if (active.isEmpty) return 'Semua disembunyikan';
+    return 'Ditampilkan: ${active.join(', ')}';
+  }
 
   String get rateLimitLabel {
     if (downloadRateLimitMs <= 0) return 'Tanpa jeda (Maksimal)';
@@ -77,6 +112,9 @@ class AppSettings {
     String? customCookies,
     int? maxConcurrentAlbums,
     int? downloadRateLimitMs,
+    bool? showNormalContent,
+    bool? showEcchiContent,
+    bool? showNsfwContent,
   }) {
     return AppSettings(
       themeMode: themeMode ?? this.themeMode,
@@ -89,6 +127,9 @@ class AppSettings {
           .clamp(minConcurrentAlbums, maxConcurrentAlbumsLimit),
       downloadRateLimitMs: (downloadRateLimitMs ?? this.downloadRateLimitMs)
           .clamp(0, 10000),
+      showNormalContent: showNormalContent ?? this.showNormalContent,
+      showEcchiContent: showEcchiContent ?? this.showEcchiContent,
+      showNsfwContent: showNsfwContent ?? this.showNsfwContent,
     );
   }
 
@@ -102,6 +143,9 @@ class AppSettings {
       'customCookies': customCookies,
       'maxConcurrentAlbums': maxConcurrentAlbums,
       'downloadRateLimitMs': downloadRateLimitMs,
+      'showNormalContent': showNormalContent,
+      'showEcchiContent': showEcchiContent,
+      'showNsfwContent': showNsfwContent,
     };
   }
 
@@ -126,6 +170,9 @@ class AppSettings {
         maxConcurrentAlbumsLimit,
       ),
       downloadRateLimitMs: parsedDelay.clamp(0, 10000),
+      showNormalContent: json['showNormalContent'] as bool? ?? true,
+      showEcchiContent: json['showEcchiContent'] as bool? ?? true,
+      showNsfwContent: json['showNsfwContent'] as bool? ?? true,
     );
   }
 }

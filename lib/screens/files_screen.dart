@@ -9,6 +9,7 @@ import 'package:flutter/services.dart';
 import '../models/creator_profile.dart';
 import '../models/managed_file.dart';
 import '../models/media_info.dart';
+import '../models/media_metadata.dart';
 import '../models/media_platform.dart';
 import '../services/download_manager.dart';
 import '../widgets/file_gallery_viewer.dart';
@@ -31,6 +32,7 @@ enum _FileMenuAction {
   view,
   setWallpaper,
   toggleLock,
+  tagContent,
   openExternal,
   share,
   select,
@@ -38,7 +40,7 @@ enum _FileMenuAction {
   delete,
 }
 
-enum _AlbumMenuAction { open, unlock, lock, share, select, delete }
+enum _AlbumMenuAction { open, info, unlock, lock, share, select, delete }
 
 class _SelectableIndexMeta {
   final int index;
@@ -410,7 +412,9 @@ class _FilesScreenState extends State<FilesScreen> {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final allFiles = widget.manager.managedFiles;
+    final allFiles = widget.manager.visibleManagedFiles;
+    final allHiddenByFilter =
+        allFiles.isEmpty && widget.manager.managedFiles.isNotEmpty;
 
     // Group: platform -> creator -> files (memoized by reference!)
     final byPlatform = _getByPlatform(allFiles);
@@ -737,21 +741,28 @@ class _FilesScreenState extends State<FilesScreen> {
                             mainAxisSize: MainAxisSize.min,
                             children: [
                               Icon(
-                                Icons.folder_copy_outlined,
+                                allHiddenByFilter
+                                    ? Icons.visibility_off_outlined
+                                    : Icons.folder_copy_outlined,
                                 size: 56,
                                 color: theme.colorScheme.onSurfaceVariant
                                     .withValues(alpha: 0.5),
                               ),
                               const SizedBox(height: 12),
                               Text(
-                                'Belum ada folder file',
+                                allHiddenByFilter
+                                    ? 'Semua file disembunyikan oleh filter'
+                                    : 'Belum ada folder file',
+                                textAlign: TextAlign.center,
                                 style: theme.textTheme.titleMedium?.copyWith(
                                   fontWeight: FontWeight.w700,
                                 ),
                               ),
                               const SizedBox(height: 6),
                               Text(
-                                'Media yang diunduh otomatis dipisahkan berdasarkan Aplikasi & Username. Foto Pixiv disimpan secara Privat hingga Anda Unlock.',
+                                allHiddenByFilter
+                                    ? 'Buka Pengaturan → Visibilitas Konten untuk mencentang kategori Biasa, Ecchi, atau NSFW yang ingin ditampilkan.'
+                                    : 'Media yang diunduh otomatis dipisahkan berdasarkan Aplikasi & Username. Foto Pixiv disimpan secara Privat hingga Anda Unlock.',
                                 textAlign: TextAlign.center,
                                 style: theme.textTheme.bodySmall?.copyWith(
                                   color: theme.colorScheme.onSurfaceVariant,
@@ -1745,6 +1756,11 @@ class _FilesScreenState extends State<FilesScreen> {
           (context, index) {
             final album = albums[index];
             final isSelected = _selectedKeys.contains(album.albumName);
+            final albumTags = widget.manager.getAlbumTags(
+              _selectedPlatformFolder!,
+              _selectedCreatorFolder!,
+              album.albumName,
+            );
 
             return MetaData(
               metaData: _SelectableIndexMeta(index),
@@ -1919,6 +1935,20 @@ class _FilesScreenState extends State<FilesScreen> {
                                 color: theme.colorScheme.onSurfaceVariant,
                               ),
                             ),
+                            if (albumTags.isNotEmpty) ...[
+                              const SizedBox(height: 2),
+                              Text(
+                                albumTags.take(3).map((t) => '#$t').join(' '),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: theme.textTheme.labelSmall?.copyWith(
+                                  fontSize: 10,
+                                  color: theme.colorScheme.primary
+                                      .withValues(alpha: 0.9),
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                            ],
                           ],
                         ),
                       ),
@@ -1949,6 +1979,11 @@ class _FilesScreenState extends State<FilesScreen> {
         itemBuilder: (context, index) {
           final album = albums[index];
           final isSelected = _selectedKeys.contains(album.albumName);
+          final albumTags = widget.manager.getAlbumTags(
+            _selectedPlatformFolder!,
+            _selectedCreatorFolder!,
+            album.albumName,
+          );
 
           return MetaData(
             metaData: _SelectableIndexMeta(index),
@@ -2049,6 +2084,19 @@ class _FilesScreenState extends State<FilesScreen> {
                                 color: theme.colorScheme.onSurfaceVariant,
                               ),
                             ),
+                            if (albumTags.isNotEmpty) ...[
+                              const SizedBox(height: 2),
+                              Text(
+                                albumTags.take(4).map((t) => '#$t').join(' '),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: theme.textTheme.labelSmall?.copyWith(
+                                  color: theme.colorScheme.primary
+                                      .withValues(alpha: 0.9),
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                            ],
                           ],
                         ),
                       ),
@@ -2093,6 +2141,7 @@ class _FilesScreenState extends State<FilesScreen> {
               behavior: HitTestBehavior.opaque,
               child: _GalleryFileTile(
                 file: file,
+                rating: widget.manager.getPhotoRating(file),
                 selectionMode: _isSelectionMode,
                 selected: isSelected,
                 onTap: () {
@@ -2177,13 +2226,27 @@ class _FilesScreenState extends State<FilesScreen> {
                               ),
                             ),
                             const SizedBox(height: 4),
-                            Text(
-                              '${file.extension} • ${formatBytes(file.fileSize)} • ${_fmtDate(file.modifiedAt)}',
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: theme.textTheme.bodySmall?.copyWith(
-                                color: theme.colorScheme.onSurfaceVariant,
-                              ),
+                            Row(
+                              children: [
+                                if (widget.manager.getPhotoRating(file) !=
+                                    ContentRating.normal) ...[
+                                  ContentRatingBadge(
+                                    rating: widget.manager.getPhotoRating(file),
+                                    compact: true,
+                                  ),
+                                  const SizedBox(width: 6),
+                                ],
+                                Expanded(
+                                  child: Text(
+                                    '${file.extension} • ${formatBytes(file.fileSize)} • ${_fmtDate(file.modifiedAt)}',
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: theme.textTheme.bodySmall?.copyWith(
+                                      color: theme.colorScheme.onSurfaceVariant,
+                                    ),
+                                  ),
+                                ),
+                              ],
                             ),
                           ],
                         ),
@@ -2239,6 +2302,9 @@ class _FilesScreenState extends State<FilesScreen> {
     switch (action) {
       case _AlbumMenuAction.open:
         await _openPixivAlbum(albums, index);
+        break;
+      case _AlbumMenuAction.info:
+        _showAlbumInfoAndTagsSheet(album);
         break;
       case _AlbumMenuAction.unlock:
         await _unlockFiles(album.pages.where((p) => p.isPrivate).toList());
@@ -2309,6 +2375,13 @@ class _FilesScreenState extends State<FilesScreen> {
         } else {
           await _lockFiles([file]);
         }
+        break;
+      case _FileMenuAction.tagContent:
+        await showPhotoContentRatingSheet(
+          context,
+          manager: widget.manager,
+          file: file,
+        );
         break;
       case _FileMenuAction.openExternal:
         await _openExternalFile(file);
@@ -2414,7 +2487,156 @@ class _FilesScreenState extends State<FilesScreen> {
     );
   }
 
+  void _showAlbumInfoAndTagsSheet(_PixivAlbumGroup album) {
+    final platformFolder = _selectedPlatformFolder ?? album.cover.platformFolder;
+    final creatorFolder = _selectedCreatorFolder ?? album.cover.creatorFolder;
+    final tags = widget.manager.getAlbumTags(
+      platformFolder,
+      creatorFolder,
+      album.albumName,
+    );
+    var normalCount = 0;
+    var ecchiCount = 0;
+    var nsfwCount = 0;
+    for (final p in album.pages) {
+      switch (widget.manager.getPhotoRating(p)) {
+        case ContentRating.normal:
+          normalCount++;
+          break;
+        case ContentRating.ecchi:
+          ecchiCount++;
+          break;
+        case ContentRating.nsfw:
+          nsfwCount++;
+          break;
+      }
+    }
+
+    showModalBottomSheet<void>(
+      context: context,
+      showDragHandle: true,
+      isScrollControlled: true,
+      builder: (ctx) {
+        final theme = Theme.of(ctx);
+        return SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(20, 4, 20, 20),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Info & Tag Album',
+                  style: theme.textTheme.titleMedium?.copyWith(
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+                const SizedBox(height: 12),
+                _InfoRow(label: 'Album', value: album.albumName),
+                _InfoRow(label: 'Artist', value: creatorFolder),
+                _InfoRow(
+                  label: 'Halaman',
+                  value: '${album.pages.length} file • ${formatBytes(album.totalBytes)}',
+                ),
+                _InfoRow(
+                  label: 'Privasi',
+                  value: '${album.privateCount} privat • ${album.publicCount} galeri',
+                ),
+                _InfoRow(
+                  label: 'Konten',
+                  value: '$normalCount biasa • $ecchiCount ecchi • $nsfwCount NSFW',
+                ),
+                const SizedBox(height: 10),
+                Text(
+                  tags.isNotEmpty
+                      ? 'Tag Album (${tags.length}) — ketuk untuk salin'
+                      : 'Belum ada tag tersimpan untuk album ini',
+                  style: theme.textTheme.labelMedium?.copyWith(
+                    fontWeight: FontWeight.w700,
+                    color: theme.colorScheme.onSurfaceVariant,
+                  ),
+                ),
+                if (tags.isNotEmpty) ...[
+                  const SizedBox(height: 8),
+                  ConstrainedBox(
+                    constraints: const BoxConstraints(maxHeight: 220),
+                    child: SingleChildScrollView(
+                      child: Wrap(
+                        spacing: 6,
+                        runSpacing: 6,
+                        children: [
+                          for (final tag in tags)
+                            ActionChip(
+                              label: Text(
+                                '#$tag',
+                                style: const TextStyle(fontSize: 12),
+                              ),
+                              visualDensity: VisualDensity.compact,
+                              materialTapTargetSize:
+                                  MaterialTapTargetSize.shrinkWrap,
+                              onPressed: () {
+                                Clipboard.setData(ClipboardData(text: tag));
+                                Navigator.pop(ctx);
+                                ScaffoldMessenger.of(context)
+                                  ..hideCurrentSnackBar()
+                                  ..showSnackBar(
+                                    SnackBar(
+                                      duration: const Duration(seconds: 1),
+                                      content: Text('Tag "#$tag" disalin.'),
+                                    ),
+                                  );
+                              },
+                            ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
+                const SizedBox(height: 14),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.end,
+                  children: [
+                    if (tags.isNotEmpty) ...[
+                      TextButton.icon(
+                        onPressed: () {
+                          Clipboard.setData(
+                            ClipboardData(
+                              text: tags.map((t) => '#$t').join(' '),
+                            ),
+                          );
+                          Navigator.pop(ctx);
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(
+                              content: Text('Semua tag album disalin.'),
+                            ),
+                          );
+                        },
+                        icon: const Icon(Icons.copy_rounded, size: 17),
+                        label: const Text('Salin Tag'),
+                      ),
+                      const SizedBox(width: 8),
+                    ],
+                    FilledButton.tonal(
+                      onPressed: () => Navigator.pop(ctx),
+                      child: const Text('Tutup'),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
   void _showFileInfoSheet(ManagedFile file) {
+    final rating = widget.manager.getPhotoRating(file);
+    final albumTags = widget.manager.getAlbumTags(
+      file.platformFolder,
+      file.creatorFolder,
+      file.effectiveAlbumName,
+    );
     showModalBottomSheet<void>(
       context: context,
       showDragHandle: true,
@@ -2438,6 +2660,7 @@ class _FilesScreenState extends State<FilesScreen> {
                     ? 'Privat (Tersembunyi dari Galeri & WA)'
                     : 'Publik (Muncul di Galeri & WA)',
               ),
+              _InfoRow(label: 'Konten', value: rating.label),
               _InfoRow(label: 'Nama', value: file.fileName),
               _InfoRow(
                 label: 'Folder',
@@ -2446,6 +2669,11 @@ class _FilesScreenState extends State<FilesScreen> {
               _InfoRow(label: 'Ukuran', value: formatBytes(file.fileSize)),
               _InfoRow(label: 'Tipe', value: file.mimeType),
               _InfoRow(label: 'Tanggal', value: _fmtDate(file.modifiedAt)),
+              if (albumTags.isNotEmpty)
+                _InfoRow(
+                  label: 'Tag',
+                  value: albumTags.map((t) => '#$t').join(' '),
+                ),
               _InfoRow(
                 label: 'Lokasi',
                 value: file.savedPath.isNotEmpty
@@ -2596,6 +2824,16 @@ class _AlbumPopupMenu extends StatelessWidget {
             ],
           ),
         ),
+        const PopupMenuItem(
+          value: _AlbumMenuAction.info,
+          child: Row(
+            children: [
+              Icon(Icons.tag_rounded, size: 19),
+              SizedBox(width: 10),
+              Text('Info & Tag Album'),
+            ],
+          ),
+        ),
         if (album.hasPrivate)
           const PopupMenuItem(
             value: _AlbumMenuAction.unlock,
@@ -2658,6 +2896,7 @@ class _AlbumPopupMenu extends StatelessWidget {
 
 class _GalleryFileTile extends StatelessWidget {
   final ManagedFile file;
+  final ContentRating rating;
   final bool selectionMode;
   final bool selected;
   final VoidCallback onTap;
@@ -2665,6 +2904,7 @@ class _GalleryFileTile extends StatelessWidget {
 
   const _GalleryFileTile({
     required this.file,
+    required this.rating,
     required this.selectionMode,
     required this.selected,
     required this.onTap,
@@ -2782,6 +3022,13 @@ class _GalleryFileTile extends StatelessWidget {
                       ),
                     ),
                   ),
+                ),
+
+              if (!selectionMode && rating != ContentRating.normal)
+                Positioned(
+                  left: 5,
+                  bottom: 5,
+                  child: ContentRatingBadge(rating: rating, compact: true),
                 ),
 
               if (selectionMode)
@@ -2903,6 +3150,17 @@ class _FilePopupMenu extends StatelessWidget {
             ],
           ),
         ),
+        if (isImage)
+          const PopupMenuItem(
+            value: _FileMenuAction.tagContent,
+            child: Row(
+              children: [
+                Icon(Icons.label_outline_rounded, size: 19),
+                SizedBox(width: 10),
+                Text('Tandai Konten (Biasa/Ecchi/NSFW)'),
+              ],
+            ),
+          ),
         const PopupMenuItem(
           value: _FileMenuAction.share,
           child: Row(

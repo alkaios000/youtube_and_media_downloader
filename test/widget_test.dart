@@ -5,15 +5,42 @@ import 'package:linkdrop_downloader/models/creator_profile.dart';
 import 'package:linkdrop_downloader/models/download_item.dart';
 import 'package:linkdrop_downloader/models/managed_file.dart';
 import 'package:linkdrop_downloader/models/media_info.dart';
+import 'package:linkdrop_downloader/models/media_metadata.dart';
 import 'package:linkdrop_downloader/models/media_platform.dart';
 import 'package:linkdrop_downloader/screens/downloads_screen.dart';
 import 'package:linkdrop_downloader/screens/files_screen.dart';
 import 'package:linkdrop_downloader/screens/home_shell.dart';
 import 'package:linkdrop_downloader/screens/settings_screen.dart';
+import 'package:linkdrop_downloader/services/direct_extractors.dart';
 import 'package:linkdrop_downloader/services/download_manager.dart';
+import 'package:linkdrop_downloader/services/storage_service.dart';
 import 'package:linkdrop_downloader/theme/app_theme.dart';
+import 'package:linkdrop_downloader/widgets/file_gallery_viewer.dart';
 import 'package:linkdrop_downloader/widgets/media_preview_card.dart';
 import 'package:linkdrop_downloader/widgets/pixiv_album_viewer.dart';
+
+class _MemoryStorageService extends StorageService {
+  @override
+  Future<void> saveHistory(List<DownloadItem> items) async {}
+
+  @override
+  Future<void> saveDownloadedMarkers(Set<String> markers) async {}
+
+  @override
+  Future<void> saveCreatorProfiles(List<CreatorProfileRecord> profiles) async {}
+
+  @override
+  Future<void> saveAlbumMetadata(Map<String, AlbumMetadata> metadata) async {}
+
+  @override
+  Future<void> savePhotoRatings(Map<String, ContentRating> ratings) async {}
+
+  @override
+  Future<void> saveSettings(AppSettings settings) async {}
+
+  @override
+  Future<void> syncCookiesFile(String cookiesContent) async {}
+}
 
 class _FakeFilesManager extends DownloadManager {
   final List<ManagedFile> _fakeFiles;
@@ -24,7 +51,7 @@ class _FakeFilesManager extends DownloadManager {
     this._fakeFiles,
     this._fakeProfiles, {
     this.fakeItems = const [],
-  });
+  }) : super(storage: _MemoryStorageService());
 
   @override
   List<ManagedFile> get managedFiles => _fakeFiles;
@@ -887,6 +914,276 @@ void main() {
     );
     await tester.pumpAndSettle();
     expect(find.text('Album Satu'), findsOneWidget);
+
+    manager.dispose();
+  });
+
+  testWidgets(
+      'Pixiv bulk profile marks unchecked albums as skipped/downloaded and supports skip-only submit',
+      (WidgetTester tester) async {
+    final manager = DownloadManager(storage: _MemoryStorageService());
+    List<SelectableMediaItem>? submittedChosen;
+
+    const item1 = SelectableMediaItem(
+      id: 'px_1',
+      title: 'Album One',
+      sourcePostUrl: 'https://www.pixiv.net/artworks/7001',
+      extension: 'jpg',
+      kind: MediaKind.image,
+      engine: DownloadEngine.directHttp,
+      badgeLabel: '1 Hal',
+      pixivIllustId: '7001',
+      tags: ['Original', 'Anime'],
+    );
+    const item2 = SelectableMediaItem(
+      id: 'px_2',
+      title: 'Album Two',
+      sourcePostUrl: 'https://www.pixiv.net/artworks/7002',
+      extension: 'jpg',
+      kind: MediaKind.image,
+      engine: DownloadEngine.directHttp,
+      badgeLabel: '2 Hal',
+      pixivIllustId: '7002',
+      tags: ['Landscape'],
+    );
+    const item3 = SelectableMediaItem(
+      id: 'px_3',
+      title: 'Album Three',
+      sourcePostUrl: 'https://www.pixiv.net/artworks/7003',
+      extension: 'jpg',
+      kind: MediaKind.image,
+      engine: DownloadEngine.directHttp,
+      badgeLabel: '3 Hal',
+      pixivIllustId: '7003',
+    );
+
+    const profile = MediaInfo(
+      originalUrl: 'https://www.pixiv.net/users/888',
+      platform: MediaPlatform.pixiv,
+      title: 'Karya Artist (3 karya)',
+      author: 'PixivArtist',
+      extractorLabel: 'Pixiv',
+      options: [],
+      isBulkProfile: true,
+      selectableItems: [item1, item2, item3],
+    );
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: AppTheme.darkTheme(),
+        home: Scaffold(
+          body: SingleChildScrollView(
+            child: MediaPreviewCard(
+              info: profile,
+              initialOption: null,
+              isDownloaded: manager.isMarkedDownloaded,
+              onDownloadOption: (_) {},
+              onDownloadSelectedPhotos: (_) {},
+              onDownloadBulkProfile: (chosen, _) => submittedChosen = chosen,
+              onDismiss: () {},
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    // Uncheck Album Two -> button switches to "Unduh 2 • Skip 1"
+    await tester.tap(find.text('2 Hal'));
+    await tester.pump();
+    expect(find.text('Unduh 2 • Skip 1'), findsOneWidget);
+    expect(find.textContaining('1 album tidak dicentang'), findsOneWidget);
+
+    // Uncheck all remaining -> button stays enabled as "Tandai Dilewati (3 Album)"!
+    await tester.tap(find.text('1 Hal'));
+    await tester.tap(find.text('3 Hal'));
+    await tester.pump();
+    expect(find.text('Tandai Dilewati (3 Album)'), findsOneWidget);
+
+    await tester.tap(find.text('Tandai Dilewati (3 Album)'));
+    await tester.pump();
+    expect(submittedChosen, isEmpty);
+
+    // Executing skip-only bulk call marks unchecked albums as downloaded with 0 queued downloads!
+    final started = await manager.startBulkDownloads(
+      profile,
+      const [],
+      skipped: const [item2, item3],
+    );
+    expect(started, 0);
+    expect(manager.items, isEmpty);
+    expect(manager.isMarkedDownloaded('pixiv:7002'), isTrue);
+    expect(manager.isMarkedDownloaded('pixiv:7003'), isTrue);
+    expect(manager.isMarkedDownloaded('pixiv:7001'), isFalse);
+
+    manager.dispose();
+  });
+
+  testWidgets(
+      'Pixiv album tags, FileGalleryViewer Tandai button (left of Hapus), and Settings Visibilitas Konten checklist work end-to-end',
+      (WidgetTester tester) async {
+    // 1) Verify DirectExtractors.parsePixivTags handles both Pixiv API response formats
+    final parsedDetailed = DirectExtractors.parsePixivTags({
+      'tags': [
+        {
+          'tag': 'オリジナル',
+          'translation': {'en': 'original'},
+        },
+        {'tag': 'R-18'},
+        {'tag': 'R-18'},
+      ],
+    });
+    expect(parsedDetailed, ['オリジナル (original)', 'R-18']);
+    expect(
+      DirectExtractors.parsePixivTags(['Genshin', 'Lumine', 'genshin']),
+      ['Genshin', 'Lumine'],
+    );
+
+    final photoNormal = ManagedFile(
+      fileName: 'p1.jpg',
+      mimeType: 'image/jpeg',
+      mediaKind: MediaKind.image,
+      fileSize: 1024,
+      modifiedAt: DateTime(2026, 11, 26, 10, 0),
+      relativePath: 'Pixiv/ArtistTag/AlbumTag',
+      savedPath: '/nonexistent/p1.jpg',
+      contentUri: 'content://test/tag/1',
+      platformFolder: 'Pixiv',
+      creatorFolder: 'ArtistTag',
+      albumFolder: 'AlbumTag',
+      isPrivate: true,
+    );
+    final photoToMark = ManagedFile(
+      fileName: 'p2.jpg',
+      mimeType: 'image/jpeg',
+      mediaKind: MediaKind.image,
+      fileSize: 1024,
+      modifiedAt: DateTime(2026, 11, 26, 10, 1),
+      relativePath: 'Pixiv/ArtistTag/AlbumTag',
+      savedPath: '/nonexistent/p2.jpg',
+      contentUri: 'content://test/tag/2',
+      platformFolder: 'Pixiv',
+      creatorFolder: 'ArtistTag',
+      albumFolder: 'AlbumTag',
+      isPrivate: true,
+    );
+
+    final manager = _FakeFilesManager([photoNormal, photoToMark], const {});
+    await manager.saveAlbumMetadata(
+      platformFolder: 'Pixiv',
+      creatorFolder: 'ArtistTag',
+      albumFolder: 'AlbumTag',
+      pixivIllustId: '9999',
+      tags: const ['Original', 'Fantasy'],
+    );
+    expect(
+      manager.getAlbumTags('Pixiv', 'ArtistTag', 'AlbumTag'),
+      ['Original', 'Fantasy'],
+    );
+
+    // 2) Verify PixivAlbumViewer renders per-album tags strip
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: AppTheme.darkTheme(),
+        home: PixivAlbumViewer(
+          manager: manager,
+          platformFolder: 'Pixiv',
+          creatorFolder: 'ArtistTag',
+          albumName: 'AlbumTag',
+          albumNames: const ['AlbumTag'],
+          initialAlbumIndex: 0,
+        ),
+      ),
+    );
+    await tester.pump();
+    expect(find.text('#Original'), findsOneWidget);
+    expect(find.text('#Fantasy'), findsOneWidget);
+
+    // 3) Open FileGalleryViewer -> verify Tandai button sits directly to the LEFT of Hapus
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: AppTheme.darkTheme(),
+        home: FileGalleryViewer(
+          manager: manager,
+          images: [photoNormal, photoToMark],
+          initialIndex: 1,
+        ),
+      ),
+    );
+    await tester.pump();
+
+    expect(find.text('Bagikan'), findsOneWidget);
+    expect(find.text('Tandai'), findsOneWidget);
+    expect(find.text('Hapus'), findsOneWidget);
+
+    final bagikanX = tester.getCenter(find.text('Bagikan')).dx;
+    final tandaiX = tester.getCenter(find.text('Tandai')).dx;
+    final hapusX = tester.getCenter(find.text('Hapus')).dx;
+    expect(tandaiX, greaterThan(bagikanX));
+    expect(tandaiX, lessThan(hapusX));
+
+    // Default rating is Biasa -> tap Tandai -> pick NSFW
+    expect(manager.getPhotoRating(photoToMark), ContentRating.normal);
+    await tester.tap(find.text('Tandai'));
+    await tester.pumpAndSettle();
+    expect(find.text('Tandai Konten Foto'), findsOneWidget);
+    expect(find.text('Biasa'), findsOneWidget);
+    expect(find.text('Ecchi'), findsOneWidget);
+    expect(find.text('NSFW'), findsOneWidget);
+
+    await tester.tap(find.text('NSFW'));
+    await tester.pumpAndSettle();
+    expect(manager.getPhotoRating(photoToMark), ContentRating.nsfw);
+
+    // Rating survives Private <-> Public Gallery move because ratingKey is logical!
+    final unlockedCopy = ManagedFile(
+      fileName: photoToMark.fileName,
+      mimeType: photoToMark.mimeType,
+      mediaKind: photoToMark.mediaKind,
+      fileSize: photoToMark.fileSize,
+      modifiedAt: photoToMark.modifiedAt,
+      relativePath: 'Pictures/all_download/Pixiv/ArtistTag/AlbumTag',
+      savedPath: '/storage/emulated/0/Pictures/all_download/Pixiv/ArtistTag/AlbumTag/p2.jpg',
+      contentUri: 'content://media/external/images/999',
+      platformFolder: photoToMark.platformFolder,
+      creatorFolder: photoToMark.creatorFolder,
+      albumFolder: photoToMark.albumFolder,
+      isPrivate: false,
+    );
+    expect(manager.getPhotoRating(unlockedCopy), ContentRating.nsfw);
+
+    // 4) Open Settings -> Visibilitas Konten checklist -> uncheck NSFW -> filters visibleManagedFiles!
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: AppTheme.darkTheme(),
+        home: Scaffold(
+          body: SafeArea(
+            child: SettingsScreen(manager: manager),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    expect(find.text('Visibilitas Konten'), findsOneWidget);
+
+    await tester.tap(find.text('Visibilitas Konten'));
+    await tester.pumpAndSettle();
+
+    expect(find.byType(CheckboxListTile), findsNWidgets(3));
+    expect(manager.visibleManagedFiles.length, 2);
+
+    // Uncheck NSFW
+    await tester.tap(find.text('NSFW'));
+    await tester.pumpAndSettle();
+    expect(manager.settings.showNsfwContent, isFalse);
+    expect(manager.visibleManagedFiles.length, 1);
+    expect(manager.visibleManagedFiles.first.fileName, 'p1.jpg');
+
+    // 5) Backup JSON round-trip preserves visibility settings, album tags, and photo ratings!
+    final backup = manager.parseBackupText(manager.buildBackupJson());
+    expect(backup.settings.showNsfwContent, isFalse);
+    expect(backup.albumMetadata.length, 1);
+    expect(backup.photoRatings[photoToMark.ratingKey], ContentRating.nsfw);
 
     manager.dispose();
   });

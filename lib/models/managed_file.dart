@@ -34,6 +34,24 @@ class ManagedFile {
 
   String get uniqueKey => contentUri.isNotEmpty ? contentUri : savedPath;
 
+  /// Stable logical key across Private Vault <-> Public Gallery moves & backups,
+  /// used to persist per-photo content ratings (Biasa / Ecchi / NSFW).
+  String get ratingKey => buildPhotoRatingKey(
+        platformFolder: platformFolder,
+        creatorFolder: creatorFolder,
+        albumName: effectiveAlbumName,
+        fileName: fileName,
+      );
+
+  static String buildPhotoRatingKey({
+    required String platformFolder,
+    required String creatorFolder,
+    required String albumName,
+    required String fileName,
+  }) {
+    return '${platformFolder.trim().toLowerCase()}|${creatorFolder.trim().toLowerCase()}|${albumName.trim().toLowerCase()}|${fileName.trim().toLowerCase()}';
+  }
+
   String get extension {
     final dot = fileName.lastIndexOf('.');
     if (dot <= 0 || dot == fileName.length - 1) return '';

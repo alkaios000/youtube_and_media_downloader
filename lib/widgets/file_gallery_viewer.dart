@@ -6,8 +6,196 @@ import 'package:flutter/services.dart';
 
 import '../models/managed_file.dart';
 import '../models/media_info.dart';
+import '../models/media_metadata.dart';
 import '../services/download_manager.dart';
 import 'wallpaper_sheet.dart';
+
+/// Quick 3-option content rating picker sheet (Biasa / Ecchi / NSFW)
+/// usable from [FileGalleryViewer], [PixivAlbumViewer], and [FilesScreen].
+Future<ContentRating?> showPhotoContentRatingSheet(
+  BuildContext context, {
+  required DownloadManager manager,
+  required ManagedFile file,
+}) async {
+  final current = manager.getPhotoRating(file);
+  final chosen = await showModalBottomSheet<ContentRating>(
+    context: context,
+    showDragHandle: true,
+    builder: (ctx) {
+      final theme = Theme.of(ctx);
+      return SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 4),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Tandai Konten Foto',
+                      style: theme.textTheme.titleMedium?.copyWith(
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      file.fileName,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: theme.colorScheme.onSurfaceVariant,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 12),
+              for (final rating in ContentRating.values) ...[
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 8),
+                  child: Material(
+                    color: current == rating
+                        ? rating.color.withValues(alpha: 0.14)
+                        : theme.colorScheme.surfaceContainerLow,
+                    borderRadius: BorderRadius.circular(14),
+                    child: InkWell(
+                      borderRadius: BorderRadius.circular(14),
+                      onTap: () => Navigator.pop(ctx, rating),
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 14,
+                          vertical: 12,
+                        ),
+                        decoration: BoxDecoration(
+                          borderRadius: BorderRadius.circular(14),
+                          border: Border.all(
+                            color: current == rating
+                                ? rating.color
+                                : theme.colorScheme.outlineVariant
+                                    .withValues(alpha: 0.45),
+                            width: current == rating ? 1.6 : 1,
+                          ),
+                        ),
+                        child: Row(
+                          children: [
+                            Container(
+                              width: 36,
+                              height: 36,
+                              decoration: BoxDecoration(
+                                color: rating.color.withValues(alpha: 0.18),
+                                borderRadius: BorderRadius.circular(10),
+                              ),
+                              child: Icon(
+                                rating.icon,
+                                color: rating.color,
+                                size: 20,
+                              ),
+                            ),
+                            const SizedBox(width: 12),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    rating.label,
+                                    style: theme.textTheme.titleSmall?.copyWith(
+                                      fontWeight: FontWeight.w800,
+                                      color: current == rating
+                                          ? rating.color
+                                          : null,
+                                    ),
+                                  ),
+                                  Text(
+                                    rating.description,
+                                    style: theme.textTheme.bodySmall?.copyWith(
+                                      color: theme.colorScheme.onSurfaceVariant,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                            Icon(
+                              current == rating
+                                  ? Icons.check_circle_rounded
+                                  : Icons.radio_button_unchecked_rounded,
+                              color: current == rating
+                                  ? rating.color
+                                  : theme.colorScheme.onSurfaceVariant,
+                              size: 21,
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
+      );
+    },
+  );
+
+  if (chosen == null) return null;
+  HapticFeedback.selectionClick();
+  await manager.setPhotoRating(file, chosen);
+  if (context.mounted) {
+    final hiddenByFilter = !manager.settings.isContentRatingVisible(chosen);
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(
+          duration: const Duration(seconds: 2),
+          content: Text(
+            hiddenByFilter
+                ? 'Ditandai ${chosen.label} (disembunyikan oleh filter Visibilitas Konten).'
+                : 'Foto ditandai sebagai ${chosen.label}.',
+          ),
+        ),
+      );
+  }
+  return chosen;
+}
+
+/// Compact pill badge shown on thumbnails/pages when a photo is rated Ecchi or NSFW.
+class ContentRatingBadge extends StatelessWidget {
+  final ContentRating rating;
+  final bool compact;
+
+  const ContentRatingBadge({
+    super.key,
+    required this.rating,
+    this.compact = false,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    if (rating == ContentRating.normal) return const SizedBox.shrink();
+    return Container(
+      padding: EdgeInsets.symmetric(
+        horizontal: compact ? 5 : 6,
+        vertical: compact ? 2 : 3,
+      ),
+      decoration: BoxDecoration(
+        color: rating.color.withValues(alpha: 0.92),
+        borderRadius: BorderRadius.circular(6),
+      ),
+      child: Text(
+        rating.label,
+        style: TextStyle(
+          color: Colors.white,
+          fontSize: compact ? 9 : 10,
+          fontWeight: FontWeight.w800,
+        ),
+      ),
+    );
+  }
+}
 
 /// Full-screen, swipeable, unclipped pinch-to-zoom & double-tap-to-zoom gallery viewer
 /// for downloaded images with Unlock/Lock, Share, Open Externally, Info, and Delete controls.
@@ -233,43 +421,72 @@ class _FileGalleryViewerState extends State<FileGalleryViewer> {
               child: SafeArea(
                 top: false,
                 child: Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-                  child: Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                    children: [
-                      _ViewerActionBtn(
-                        icon: _current.isPrivate
-                            ? Icons.lock_rounded
-                            : Icons.lock_open_rounded,
-                        label: _current.isPrivate ? 'Privat' : 'Galeri',
-                        color: _current.isPrivate
-                            ? const Color(0xFFFBBF24)
-                            : const Color(0xFF4ADE80),
-                        activePill: true,
-                        loading: _togglingPrivacy,
-                        onTap: _togglingPrivacy ? () {} : _togglePrivacyCurrent,
-                      ),
-                      _ViewerActionBtn(
-                        icon: Icons.wallpaper_rounded,
-                        label: 'Wallpaper',
-                        onTap: () => showSetWallpaperSheet(
-                          context,
-                          manager: widget.manager,
-                          file: _current,
-                        ),
-                      ),
-                      _ViewerActionBtn(
-                        icon: Icons.share_rounded,
-                        label: 'Bagikan',
-                        onTap: () => widget.manager.shareManagedFile(_current),
-                      ),
-                      _ViewerActionBtn(
-                        icon: Icons.delete_outline_rounded,
-                        label: 'Hapus',
-                        color: const Color(0xFFF87171),
-                        onTap: _confirmDeleteCurrent,
-                      ),
-                    ],
+                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 10),
+                  child: Builder(
+                    builder: (context) {
+                      final currentRating = widget.manager.getPhotoRating(_current);
+                      final isTagged = currentRating != ContentRating.normal;
+                      return Row(
+                        children: [
+                          Expanded(
+                            child: _ViewerActionBtn(
+                              icon: _current.isPrivate
+                                  ? Icons.lock_rounded
+                                  : Icons.lock_open_rounded,
+                              label: _current.isPrivate ? 'Privat' : 'Galeri',
+                              color: _current.isPrivate
+                                  ? const Color(0xFFFBBF24)
+                                  : const Color(0xFF4ADE80),
+                              activePill: true,
+                              loading: _togglingPrivacy,
+                              onTap: _togglingPrivacy
+                                  ? () {}
+                                  : _togglePrivacyCurrent,
+                            ),
+                          ),
+                          Expanded(
+                            child: _ViewerActionBtn(
+                              icon: Icons.wallpaper_rounded,
+                              label: 'Wallpaper',
+                              onTap: () => showSetWallpaperSheet(
+                                context,
+                                manager: widget.manager,
+                                file: _current,
+                              ),
+                            ),
+                          ),
+                          Expanded(
+                            child: _ViewerActionBtn(
+                              icon: Icons.share_rounded,
+                              label: 'Bagikan',
+                              onTap: () =>
+                                  widget.manager.shareManagedFile(_current),
+                            ),
+                          ),
+                          Expanded(
+                            child: _ViewerActionBtn(
+                              icon: isTagged
+                                  ? currentRating.icon
+                                  : Icons.label_outline_rounded,
+                              label: isTagged ? currentRating.label : 'Tandai',
+                              color: isTagged
+                                  ? currentRating.color
+                                  : Colors.white,
+                              activePill: isTagged,
+                              onTap: _pickRatingForCurrent,
+                            ),
+                          ),
+                          Expanded(
+                            child: _ViewerActionBtn(
+                              icon: Icons.delete_outline_rounded,
+                              label: 'Hapus',
+                              color: const Color(0xFFF87171),
+                              onTap: _confirmDeleteCurrent,
+                            ),
+                          ),
+                        ],
+                      );
+                    },
                   ),
                 ),
               ),
@@ -278,6 +495,17 @@ class _FileGalleryViewerState extends State<FileGalleryViewer> {
         ],
       ),
     );
+  }
+
+  Future<void> _pickRatingForCurrent() async {
+    final chosen = await showPhotoContentRatingSheet(
+      context,
+      manager: widget.manager,
+      file: _current,
+    );
+    if (chosen != null && mounted) {
+      setState(() {});
+    }
   }
 
   Future<void> _togglePrivacyCurrent() async {
@@ -345,6 +573,12 @@ class _FileGalleryViewerState extends State<FileGalleryViewer> {
 
   void _showInfoSheet() {
     final f = _current;
+    final rating = widget.manager.getPhotoRating(f);
+    final albumTags = widget.manager.getAlbumTags(
+      f.platformFolder,
+      f.creatorFolder,
+      f.effectiveAlbumName,
+    );
     showModalBottomSheet<void>(
       context: context,
       showDragHandle: true,
@@ -368,6 +602,7 @@ class _FileGalleryViewerState extends State<FileGalleryViewer> {
                     ? 'Privat (Tersembunyi dari Galeri & WA)'
                     : 'Terbuka (Muncul di Galeri & WA)',
               ),
+              _DetailRow(label: 'Konten', value: rating.label),
               _DetailRow(label: 'Nama', value: f.fileName),
               _DetailRow(
                 label: 'Folder',
@@ -375,6 +610,11 @@ class _FileGalleryViewerState extends State<FileGalleryViewer> {
               ),
               _DetailRow(label: 'Ukuran', value: formatBytes(f.fileSize)),
               _DetailRow(label: 'Format', value: f.mimeType),
+              if (albumTags.isNotEmpty)
+                _DetailRow(
+                  label: 'Tag',
+                  value: albumTags.map((t) => '#$t').join(' '),
+                ),
               _DetailRow(
                 label: 'Lokasi',
                 value: f.savedPath.isNotEmpty ? f.savedPath : f.relativePath,
@@ -567,7 +807,7 @@ class _ViewerActionBtn extends StatelessWidget {
       borderRadius: BorderRadius.circular(14),
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 160),
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 8),
         decoration: activePill
             ? BoxDecoration(
                 color: color.withValues(alpha: 0.18),
@@ -580,10 +820,10 @@ class _ViewerActionBtn extends StatelessWidget {
           children: [
             if (loading)
               SizedBox(
-                width: 24,
-                height: 24,
+                width: 22,
+                height: 22,
                 child: Padding(
-                  padding: const EdgeInsets.all(3),
+                  padding: const EdgeInsets.all(2.5),
                   child: CircularProgressIndicator(
                     strokeWidth: 2,
                     color: color,
@@ -591,13 +831,15 @@ class _ViewerActionBtn extends StatelessWidget {
                 ),
               )
             else
-              Icon(icon, color: color, size: 24),
+              Icon(icon, color: color, size: 22),
             const SizedBox(height: 4),
             Text(
               label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
               style: TextStyle(
                 color: color,
-                fontSize: 12,
+                fontSize: 11,
                 fontWeight: FontWeight.w700,
               ),
             ),

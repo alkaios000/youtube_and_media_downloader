@@ -13,6 +13,7 @@ import '../models/creator_profile.dart';
 import '../models/download_item.dart';
 import '../models/managed_file.dart';
 import '../models/media_info.dart';
+import '../models/media_metadata.dart';
 import '../models/media_platform.dart';
 import 'direct_extractors.dart';
 import 'media_extractor_service.dart';
@@ -109,7 +110,19 @@ class DownloadManager extends ChangeNotifier {
   List<ManagedFile> _managedFiles = const [];
   Set<String> _downloadedMarkers = <String>{};
   final Map<String, CreatorProfileRecord> _creatorProfiles = {};
+  final Map<String, AlbumMetadata> _albumMetadata = {};
+  final Map<String, ContentRating> _photoRatings = {};
   final Map<String, List<String>> _pixivPagesCache = {};
+  int _albumMetadataRevision = 0;
+  int _photoRatingsRevision = 0;
+
+  // Memoized visibility-filtered file list so UI screens keep O(1) identical() caches!
+  List<ManagedFile>? _cachedVisibleSourceRef;
+  int _cachedVisibleRatingsRev = -1;
+  bool _cachedShowNormal = true;
+  bool _cachedShowEcchi = true;
+  bool _cachedShowNsfw = true;
+  List<ManagedFile> _cachedVisibleFiles = const [];
 
   bool _isInitializing = false;
   bool _engineInitStarted = false;
@@ -137,6 +150,7 @@ class DownloadManager extends ChangeNotifier {
   bool _hasPendingNotify = false;
   Timer? _postSyncTimer;
   Timer? _markersFlushTimer;
+  Timer? _albumMetaFlushTimer;
   DateTime _lastHistoryFlush = DateTime.fromMillisecondsSinceEpoch(0);
   DateTime _lastManagedFilesRefresh = DateTime.fromMillisecondsSinceEpoch(0);
   int _taskSeq = 0;
@@ -212,6 +226,174 @@ class DownloadManager extends ChangeNotifier {
   int get activeDownloadCount => _activeDownloadCount;
   int get pausedDownloadCount => _pausedDownloadCount;
   List<ManagedFile> get managedFiles => _managedFiles;
+  int get albumMetadataRevision => _albumMetadataRevision;
+  int get photoRatingsRevision => _photoRatingsRevision;
+  Map<String, AlbumMetadata> get albumMetadataMap =>
+      Map<String, AlbumMetadata>.unmodifiable(_albumMetadata);
+  Map<String, ContentRating> get photoRatingsMap =>
+      Map<String, ContentRating>.unmodifiable(_photoRatings);
+
+  /// Managed files filtered by the user's Content Visibility checklist
+  /// (Biasa / Ecchi / NSFW), memoized so repeated reads remain O(1).
+  List<ManagedFile> get visibleManagedFiles {
+    final source = managedFiles;
+    final showNormal = _settings.showNormalContent;
+    final showEcchi = _settings.showEcchiContent;
+    final showNsfw = _settings.showNsfwContent;
+    if (showNormal && showEcchi && showNsfw) {
+      return source;
+    }
+    if (identical(_cachedVisibleSourceRef, source) &&
+        _cachedVisibleRatingsRev == _photoRatingsRevision &&
+        _cachedShowNormal == showNormal &&
+        _cachedShowEcchi == showEcchi &&
+        _cachedShowNsfw == showNsfw) {
+      return _cachedVisibleFiles;
+    }
+    final filtered = source
+        .where((f) => _settings.isContentRatingVisible(getPhotoRating(f)))
+        .toList(growable: false);
+    _cachedVisibleSourceRef = source;
+    _cachedVisibleRatingsRev = _photoRatingsRevision;
+    _cachedShowNormal = showNormal;
+    _cachedShowEcchi = showEcchi;
+    _cachedShowNsfw = showNsfw;
+    _cachedVisibleFiles = List<ManagedFile>.unmodifiable(filtered);
+    return _cachedVisibleFiles;
+  }
+
+  // ===========================================================================
+  // PER-PHOTO CONTENT RATING (BIASA / ECCHI / NSFW) & PER-ALBUM TAGS
+  // ===========================================================================
+  ContentRating getPhotoRating(ManagedFile file) {
+    return _photoRatings[file.ratingKey] ?? ContentRating.normal;
+  }
+
+  Future<void> setPhotoRating(ManagedFile file, ContentRating rating) async {
+    final key = file.ratingKey;
+    if (key.isEmpty) return;
+    final current = _photoRatings[key] ?? ContentRating.normal;
+    if (current == rating) return;
+    if (rating == ContentRating.normal) {
+      _photoRatings.remove(key);
+    } else {
+      _photoRatings[key] = rating;
+    }
+    _photoRatingsRevision++;
+    _notifyImmediate();
+    try {
+      await _storage.savePhotoRatings(_photoRatings);
+    } catch (_) {}
+  }
+
+  Map<ContentRating, int> countPhotosByRating() {
+    var normal = 0;
+    var ecchi = 0;
+    var nsfw = 0;
+    for (final file in managedFiles) {
+      if (file.mediaKind != MediaKind.image) continue;
+      switch (getPhotoRating(file)) {
+        case ContentRating.normal:
+          normal++;
+          break;
+        case ContentRating.ecchi:
+          ecchi++;
+          break;
+        case ContentRating.nsfw:
+          nsfw++;
+          break;
+      }
+    }
+    return {
+      ContentRating.normal: normal,
+      ContentRating.ecchi: ecchi,
+      ContentRating.nsfw: nsfw,
+    };
+  }
+
+  AlbumMetadata? getAlbumMetadata(
+    String platformFolder,
+    String creatorFolder,
+    String albumFolder,
+  ) {
+    final key = AlbumMetadata.buildLookupKey(
+      platformFolder,
+      creatorFolder,
+      albumFolder,
+    );
+    return _albumMetadata[key];
+  }
+
+  List<String> getAlbumTags(
+    String platformFolder,
+    String creatorFolder,
+    String albumFolder,
+  ) {
+    return getAlbumMetadata(platformFolder, creatorFolder, albumFolder)?.tags ??
+        const <String>[];
+  }
+
+  Future<void> saveAlbumMetadata({
+    required String platformFolder,
+    required String creatorFolder,
+    required String albumFolder,
+    String? pixivIllustId,
+    required List<String> tags,
+  }) async {
+    final cleanAlbum = albumFolder.trim();
+    if (cleanAlbum.isEmpty || tags.isEmpty) return;
+    final seen = <String>{};
+    final cleanedTags = <String>[];
+    for (final t in tags) {
+      final s = t.trim();
+      if (s.isNotEmpty && seen.add(s.toLowerCase())) {
+        cleanedTags.add(s);
+      }
+    }
+    if (cleanedTags.isEmpty) return;
+
+    final record = AlbumMetadata(
+      platformFolder: platformFolder.trim(),
+      creatorFolder: creatorFolder.trim(),
+      albumFolder: cleanAlbum,
+      pixivIllustId: pixivIllustId,
+      tags: List<String>.unmodifiable(cleanedTags),
+      updatedAt: DateTime.now(),
+    );
+    _albumMetadata[record.lookupKey] = record;
+    _albumMetadataRevision++;
+
+    if (_activeDownloadCount > 0 && _items.length >= 20) {
+      _notifyThrottled();
+      _scheduleAlbumMetaFlush();
+      return;
+    }
+    _notifyImmediate();
+    try {
+      await _storage.saveAlbumMetadata(_albumMetadata);
+    } catch (_) {}
+  }
+
+  void _scheduleAlbumMetaFlush() {
+    if (_isDisposed) return;
+    if (_albumMetaFlushTimer?.isActive ?? false) return;
+    _albumMetaFlushTimer = Timer(const Duration(milliseconds: 1400), () {
+      _albumMetaFlushTimer = null;
+      if (_isDisposed) return;
+      unawaited(_storage.saveAlbumMetadata(_albumMetadata));
+    });
+  }
+
+  String _sanitizeFolderSegmentLikeNative(String raw, String fallback) {
+    final cleaned = raw
+        .replaceFirst(RegExp(r'^@'), '')
+        .replaceAll(RegExp(r'[\\/:*?"<>|\r\n\t]+'), '_')
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .trim()
+        .replaceAll(RegExp(r'^\.+|\.+$'), '');
+    if (cleaned.isEmpty) return fallback;
+    return cleaned.length > 48 ? cleaned.substring(0, 48).trim() : cleaned;
+  }
   Set<String> get downloadedMarkers => Set.unmodifiable(_downloadedMarkers);
   List<CreatorProfileRecord> get creatorProfiles =>
       List.unmodifiable(_creatorProfiles.values);
@@ -420,6 +602,8 @@ class DownloadManager extends ChangeNotifier {
       downloadedMarkers: _downloadedMarkers,
       creatorProfiles: _creatorProfiles.values.toList(growable: false),
       history: _items,
+      albumMetadata: _albumMetadata,
+      photoRatings: _photoRatings,
     );
   }
 
@@ -457,6 +641,12 @@ class DownloadManager extends ChangeNotifier {
       for (final rec in bundle.creatorProfiles) {
         _creatorProfiles.putIfAbsent(rec.lookupKey, () => rec);
       }
+      bundle.albumMetadata.forEach((k, v) {
+        _albumMetadata.putIfAbsent(k, () => v);
+      });
+      bundle.photoRatings.forEach((k, v) {
+        _photoRatings.putIfAbsent(k, () => v);
+      });
       final existingIds = _items.map((e) => e.id).toSet();
       final incoming = bundle.history
           .where((e) => !existingIds.contains(e.id))
@@ -469,9 +659,17 @@ class DownloadManager extends ChangeNotifier {
         ..addEntries(
           bundle.creatorProfiles.map((r) => MapEntry(r.lookupKey, r)),
         );
+      _albumMetadata
+        ..clear()
+        ..addAll(bundle.albumMetadata);
+      _photoRatings
+        ..clear()
+        ..addAll(bundle.photoRatings);
       final activeNow = _items.where((i) => i.isActive).toList(growable: false);
       _setItems([...activeNow, ...bundle.history]);
     }
+    _albumMetadataRevision++;
+    _photoRatingsRevision++;
 
     _notifyImmediate();
 
@@ -479,6 +677,8 @@ class DownloadManager extends ChangeNotifier {
       _storage.saveSettings(_settings),
       _storage.saveDownloadedMarkers(_downloadedMarkers),
       _storage.saveCreatorProfiles(_creatorProfiles.values.toList()),
+      _storage.saveAlbumMetadata(_albumMetadata),
+      _storage.savePhotoRatings(_photoRatings),
       _storage.saveHistory(_items),
     ]);
   }
@@ -533,6 +733,12 @@ class DownloadManager extends ChangeNotifier {
       _storage
           .loadCreatorProfiles()
           .catchError((_) => <CreatorProfileRecord>[]),
+      _storage
+          .loadAlbumMetadata()
+          .catchError((_) => <String, AlbumMetadata>{}),
+      _storage
+          .loadPhotoRatings()
+          .catchError((_) => <String, ContentRating>{}),
     ]);
     if (_isDisposed) return;
 
@@ -559,6 +765,18 @@ class DownloadManager extends ChangeNotifier {
     _creatorProfiles
       ..clear()
       ..addEntries(loadedProfiles.map((r) => MapEntry(r.lookupKey, r)));
+
+    final loadedAlbumMeta = localData[3] as Map<String, AlbumMetadata>;
+    _albumMetadata
+      ..clear()
+      ..addAll(loadedAlbumMeta);
+    _albumMetadataRevision++;
+
+    final loadedRatings = localData[4] as Map<String, ContentRating>;
+    _photoRatings
+      ..clear()
+      ..addAll(loadedRatings);
+    _photoRatingsRevision++;
 
     _notifyImmediate();
 
@@ -773,6 +991,7 @@ class DownloadManager extends ChangeNotifier {
     String? pixivIllustId,
     bool isPixivUgoira = false,
     List<String> extraMarkerKeys = const [],
+    List<String> tags = const [],
     bool markAlbumKey = true,
   }) {
     return {
@@ -792,6 +1011,7 @@ class DownloadManager extends ChangeNotifier {
         'pixivIllustId': pixivIllustId,
       if (isPixivUgoira) 'isPixivUgoira': true,
       if (extraMarkerKeys.isNotEmpty) 'extraMarkerKeys': extraMarkerKeys,
+      if (tags.isNotEmpty) 'tags': tags,
       'markAlbumKey': markAlbumKey,
     };
   }
@@ -815,6 +1035,7 @@ class DownloadManager extends ChangeNotifier {
     final resumePayload = _encodeResumePayload(
       option: option,
       extraMarkerKeys: extraMarkerKeys,
+      tags: info.tags,
       markAlbumKey: markAlbumKey,
     );
 
@@ -964,18 +1185,29 @@ class DownloadManager extends ChangeNotifier {
   /// Bulk downloads selected items from ANY Profile or Playlist URL
   /// (Pixiv, YouTube, TikTok, IG, X, FB, Douyin).
   /// Any item already marked downloaded is strictly skipped unless unmarked first!
+  /// Items passed in [skipped] are NOT downloaded, yet marked as downloaded so
+  /// future "Lanjut Unduh" profile checks automatically skip them.
   Future<int> startBulkDownloads(
     MediaInfo collectionInfo,
     List<SelectableMediaItem> selected, {
     bool audioOnly = false,
+    List<SelectableMediaItem> skipped = const [],
   }) async {
+    if (selected.isEmpty && skipped.isEmpty) return 0;
+    _autoRememberCreatorProfile(collectionInfo);
+
+    if (skipped.isNotEmpty) {
+      await markManyDownloaded(
+        skipped.map((e) => e.markerKey).where((k) => k.isNotEmpty),
+      );
+    }
+
     if (selected.isEmpty) return 0;
     if (_permissionChecked &&
         !_permissionStatus.granted &&
         _permissionStatus.sdkInt <= 28) {
       await requestStoragePermissions();
     }
-    _autoRememberCreatorProfile(collectionInfo);
 
     final eligible =
         selected.where((sel) => !isMarkedDownloaded(sel.markerKey)).toList();
@@ -1014,6 +1246,7 @@ class DownloadManager extends ChangeNotifier {
         'extension': ext,
         'mediaKind': kind.name,
         'extraMarkerKeys': [sel.markerKey],
+        if (sel.tags.isNotEmpty) 'tags': sel.tags,
         'markAlbumKey': true,
       };
 
@@ -1105,6 +1338,7 @@ class DownloadManager extends ChangeNotifier {
             thumbnailUrl: sel.thumbnailUrl,
             extractorLabel: collectionInfo.extractorLabel,
             options: const [],
+            tags: sel.tags,
           );
 
           if (sel.pixivIllustId != null && sel.pixivIllustId!.isNotEmpty) {
@@ -1189,6 +1423,34 @@ class DownloadManager extends ChangeNotifier {
       ),
     };
 
+    // Ensure every downloaded Pixiv album has its tags (fallback fetch only if batch omitted tags).
+    var effectiveInfo = info;
+    if (effectiveInfo.tags.isEmpty) {
+      final fetchedTags = await _extractor.directExtractors.fetchPixivIllustTags(
+        illustId,
+        cookieHeader: pixivCookie,
+        customCookies: _settings.customCookies,
+      );
+      if (_isTaskStopped(taskId)) return;
+      if (fetchedTags.isNotEmpty) {
+        effectiveInfo = MediaInfo(
+          originalUrl: info.originalUrl,
+          platform: info.platform,
+          title: info.title,
+          author: info.author,
+          thumbnailUrl: info.thumbnailUrl,
+          duration: info.duration,
+          extractorLabel: info.extractorLabel,
+          options: info.options,
+          thumbnailHeaders: info.thumbnailHeaders,
+          selectableItems: info.selectableItems,
+          isBulkProfile: info.isBulkProfile,
+          creatorProfileUrl: info.creatorProfileUrl,
+          tags: fetchedTags,
+        );
+      }
+    }
+
     Future<bool> tryRunUgoira() async {
       _updateItem(
         taskId,
@@ -1217,7 +1479,7 @@ class DownloadManager extends ChangeNotifier {
         isUgoira: true,
         ugoiraFrames: ugoira.frames,
       );
-      final safeBase = _sanitizeBaseName(info.title);
+      final safeBase = _sanitizeBaseName(effectiveInfo.title);
       _updateItem(
         taskId,
         (item) => item.copyWith(
@@ -1236,12 +1498,13 @@ class DownloadManager extends ChangeNotifier {
             pixivIllustId: illustId,
             isPixivUgoira: true,
             extraMarkerKeys: extraMarkerKeys,
+            tags: effectiveInfo.tags,
           ),
         ),
       );
       await _runDirectHttpDownload(
         taskId,
-        info,
+        effectiveInfo,
         opt,
         extraMarkerKeys: extraMarkerKeys,
         acquireAlbumSlot: false,
@@ -1326,13 +1589,14 @@ class DownloadManager extends ChangeNotifier {
           option: opt,
           pixivIllustId: illustId,
           extraMarkerKeys: extraMarkerKeys,
+          tags: effectiveInfo.tags,
         ),
       ),
     );
 
     await _runDirectHttpDownload(
       taskId,
-      info,
+      effectiveInfo,
       opt,
       extraMarkerKeys: extraMarkerKeys,
       acquireAlbumSlot: false,
@@ -1465,6 +1729,11 @@ class DownloadManager extends ChangeNotifier {
     );
 
     final payload = item.resumePayload ?? const <String, dynamic>{};
+    final payloadTags = (payload['tags'] as List?)
+            ?.map((e) => e.toString().trim())
+            .where((e) => e.isNotEmpty)
+            .toList(growable: false) ??
+        const <String>[];
     final info = MediaInfo(
       originalUrl: item.sourceUrl,
       platform: item.platform,
@@ -1473,6 +1742,7 @@ class DownloadManager extends ChangeNotifier {
       thumbnailUrl: item.thumbnailUrl,
       extractorLabel: 'Resume',
       options: const [],
+      tags: payloadTags,
     );
 
     final extraKeys = (payload['extraMarkerKeys'] as List?)
@@ -1736,6 +2006,24 @@ class DownloadManager extends ChangeNotifier {
           if (markAlbumKey) info.markerKey,
           ...extraMarkerKeys,
         ]);
+
+        if (info.tags.isNotEmpty) {
+          final resolvedAlbum = saved.albumFolder.trim().isNotEmpty
+              ? saved.albumFolder.trim()
+              : _sanitizeFolderSegmentLikeNative(info.title, '');
+          final illustId = info.markerKey.startsWith('pixiv:')
+              ? info.markerKey.substring(6)
+              : null;
+          if (resolvedAlbum.isNotEmpty) {
+            await saveAlbumMetadata(
+              platformFolder: saved.platformFolder,
+              creatorFolder: saved.creatorFolder,
+              albumFolder: resolvedAlbum,
+              pixivIllustId: illustId,
+              tags: info.tags,
+            );
+          }
+        }
         _schedulePostDownloadSync();
       } catch (e) {
         final rawMsg = e.toString();
@@ -2316,6 +2604,24 @@ class DownloadManager extends ChangeNotifier {
           if (markAlbumKey) info.markerKey,
           ...extraMarkerKeys,
         ]);
+
+        if (info.tags.isNotEmpty) {
+          final resolvedAlbum = representative.albumFolder.trim().isNotEmpty
+              ? representative.albumFolder.trim()
+              : _sanitizeFolderSegmentLikeNative(info.title, '');
+          final illustId = info.markerKey.startsWith('pixiv:')
+              ? info.markerKey.substring(6)
+              : null;
+          if (resolvedAlbum.isNotEmpty) {
+            await saveAlbumMetadata(
+              platformFolder: representative.platformFolder,
+              creatorFolder: representative.creatorFolder,
+              albumFolder: resolvedAlbum,
+              pixivIllustId: illustId,
+              tags: info.tags,
+            );
+          }
+        }
         _schedulePostDownloadSync();
       } else {
         final firstErr = failedSubs.isNotEmpty
@@ -2748,7 +3054,10 @@ class DownloadManager extends ChangeNotifier {
     if (!hasActive) {
       _markersFlushTimer?.cancel();
       _markersFlushTimer = null;
+      _albumMetaFlushTimer?.cancel();
+      _albumMetaFlushTimer = null;
       unawaited(_storage.saveDownloadedMarkers(_downloadedMarkers));
+      unawaited(_storage.saveAlbumMetadata(_albumMetadata));
       unawaited(_runPostDownloadSync(
         includeMediaRefresh: includeMediaRefresh,
         forceMediaRefresh: true,
@@ -2809,6 +3118,7 @@ class DownloadManager extends ChangeNotifier {
     _throttleNotifyTimer?.cancel();
     _postSyncTimer?.cancel();
     _markersFlushTimer?.cancel();
+    _albumMetaFlushTimer?.cancel();
     _progressSub?.cancel();
     _shareSub?.cancel();
     for (final token in _directCancelTokens.values) {

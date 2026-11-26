@@ -55,6 +55,9 @@ class SelectableMediaItem {
   /// True when this Pixiv work is an animated Ugoira (illustType == 2).
   final bool isPixivUgoira;
 
+  /// Artwork tags fetched from Pixiv (or other platforms) for per-album tag saving.
+  final List<String> tags;
+
   /// Stable canonical key used to remember & display "Sudah diunduh" badges across sessions.
   String get markerKey {
     if (pixivIllustId != null && pixivIllustId!.isNotEmpty) {
@@ -77,6 +80,7 @@ class SelectableMediaItem {
     this.author,
     this.pixivIllustId,
     this.isPixivUgoira = false,
+    this.tags = const [],
   });
 
   String get mimeType {
@@ -198,6 +202,9 @@ class MediaInfo {
   /// Canonical profile URL of the creator/artist when derivable (for 1-tap "Lanjut Unduh").
   final String? creatorProfileUrl;
 
+  /// Artwork tags (e.g. Pixiv tags) to persist alongside the downloaded album.
+  final List<String> tags;
+
   const MediaInfo({
     required this.originalUrl,
     required this.platform,
@@ -211,6 +218,7 @@ class MediaInfo {
     this.selectableItems = const [],
     this.isBulkProfile = false,
     this.creatorProfileUrl,
+    this.tags = const [],
   });
 
   bool get hasSelectableGallery => selectableItems.length > 1 || isBulkProfile;

@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../models/media_info.dart';
 import '../models/media_platform.dart';
 import '../services/download_manager.dart';
 import '../widgets/clipboard_banner.dart';
@@ -438,12 +439,23 @@ class _DownloaderScreenState extends State<DownloaderScreen> {
                       );
                     },
                     onDownloadBulkProfile: (selected, audioOnly) async {
+                      final chosenIds = selected.map((e) => e.id).toSet();
+                      final skipped =
+                          preview.platform == MediaPlatform.pixiv &&
+                                  preview.isBulkProfile
+                              ? preview.selectableItems
+                                  .where((e) =>
+                                      !manager.isMarkedDownloaded(e.markerKey) &&
+                                      !chosenIds.contains(e.id))
+                                  .toList(growable: false)
+                              : const <SelectableMediaItem>[];
                       final started = await manager.startBulkDownloads(
                         preview,
                         selected,
                         audioOnly: audioOnly,
+                        skipped: skipped,
                       );
-                      if (started == 0) {
+                      if (started == 0 && skipped.isEmpty) {
                         _showSnack(
                           'Semua karya terpilih sudah ditandai terunduh. Hapus tanda dulu untuk mengunduh ulang.',
                         );
@@ -451,9 +463,19 @@ class _DownloaderScreenState extends State<DownloaderScreen> {
                       }
                       manager.clearPreview();
                       widget.urlController.clear();
-                      _showSnack(
-                        'Antrean unduh massal dimulai ($started media)...',
-                      );
+                      if (started > 0 && skipped.isNotEmpty) {
+                        _showSnack(
+                          'Unduh $started media • ${skipped.length} album ditandai dilewati (skip).',
+                        );
+                      } else if (started == 0 && skipped.isNotEmpty) {
+                        _showSnack(
+                          '${skipped.length} album ditandai dilewati — tidak akan diunduh ke depannya.',
+                        );
+                      } else {
+                        _showSnack(
+                          'Antrean unduh massal dimulai ($started media)...',
+                        );
+                      }
                     },
                   ),
                 ],

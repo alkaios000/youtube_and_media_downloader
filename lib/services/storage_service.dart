@@ -9,6 +9,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../models/app_settings.dart';
 import '../models/creator_profile.dart';
 import '../models/download_item.dart';
+import '../models/media_metadata.dart';
 
 List<Map<String, dynamic>> _decodeJsonMapList(String raw) {
   final decoded = jsonDecode(raw);
@@ -29,6 +30,8 @@ class BackupDataBundle {
   final Set<String> downloadedMarkers;
   final List<CreatorProfileRecord> creatorProfiles;
   final List<DownloadItem> history;
+  final Map<String, AlbumMetadata> albumMetadata;
+  final Map<String, ContentRating> photoRatings;
   final DateTime? exportedAt;
 
   const BackupDataBundle({
@@ -36,6 +39,8 @@ class BackupDataBundle {
     required this.downloadedMarkers,
     required this.creatorProfiles,
     required this.history,
+    this.albumMetadata = const {},
+    this.photoRatings = const {},
     this.exportedAt,
   });
 }
@@ -45,12 +50,18 @@ class StorageService {
   static const String _settingsKey = 'linkdrop_settings_v1';
   static const String _downloadedMarkersKey = 'all_download_markers_v1';
   static const String _creatorProfilesKey = 'all_download_creator_profiles_v1';
+  static const String _albumMetadataKey = 'all_download_album_metadata_v1';
+  static const String _photoRatingsKey = 'all_download_photo_ratings_v1';
 
   // Serialized coalescing writers prevent concurrent multi-MB JSON spikes in RAM.
   bool _isWritingHistory = false;
   List<DownloadItem>? _pendingHistoryWrite;
   bool _isWritingMarkers = false;
   Set<String>? _pendingMarkersWrite;
+  bool _isWritingAlbumMeta = false;
+  Map<String, AlbumMetadata>? _pendingAlbumMetaWrite;
+  bool _isWritingRatings = false;
+  Map<String, ContentRating>? _pendingRatingsWrite;
 
   Future<File?> _supportFileOrNull(String fileName) async {
     try {
@@ -250,6 +261,146 @@ class StorageService {
     );
   }
 
+  Future<Map<String, AlbumMetadata>> loadAlbumMetadata() async {
+    final file = await _supportFileOrNull('album_metadata_v1.json');
+    if (file != null && await file.exists()) {
+      try {
+        final raw = await file.readAsString();
+        if (raw.isNotEmpty) {
+          return _parseAlbumMetadataRaw(raw);
+        }
+      } catch (_) {}
+    }
+
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString(_albumMetadataKey);
+      if (raw == null || raw.isEmpty) return {};
+      return _parseAlbumMetadataRaw(raw);
+    } catch (_) {
+      return {};
+    }
+  }
+
+  Map<String, AlbumMetadata> _parseAlbumMetadataRaw(String raw) {
+    final decoded = jsonDecode(raw);
+    final out = <String, AlbumMetadata>{};
+    if (decoded is List) {
+      for (final entry in decoded) {
+        if (entry is Map) {
+          final meta = AlbumMetadata.fromJson(Map<String, dynamic>.from(entry));
+          if (meta.albumFolder.isNotEmpty && meta.tags.isNotEmpty) {
+            out[meta.lookupKey] = meta;
+          }
+        }
+      }
+    } else if (decoded is Map) {
+      decoded.forEach((_, value) {
+        if (value is Map) {
+          final meta = AlbumMetadata.fromJson(Map<String, dynamic>.from(value));
+          if (meta.albumFolder.isNotEmpty && meta.tags.isNotEmpty) {
+            out[meta.lookupKey] = meta;
+          }
+        }
+      });
+    }
+    return out;
+  }
+
+  Future<void> saveAlbumMetadata(Map<String, AlbumMetadata> metadata) async {
+    _pendingAlbumMetaWrite = Map<String, AlbumMetadata>.unmodifiable(metadata);
+    if (_isWritingAlbumMeta) return;
+
+    _isWritingAlbumMeta = true;
+    try {
+      while (_pendingAlbumMetaWrite != null) {
+        final batch = _pendingAlbumMetaWrite!;
+        _pendingAlbumMetaWrite = null;
+        final list =
+            batch.values.map((e) => e.toJson()).toList(growable: false);
+        final encoded = list.length >= 150
+            ? await Isolate.run(() => _encodeJsonPayload(list))
+            : jsonEncode(list);
+        final file = await _supportFileOrNull('album_metadata_v1.json');
+        if (file != null) {
+          await _writeAtomicFile(file, encoded);
+        } else {
+          final prefs = await SharedPreferences.getInstance();
+          await prefs.setString(_albumMetadataKey, encoded);
+        }
+      }
+    } finally {
+      _isWritingAlbumMeta = false;
+    }
+  }
+
+  Future<Map<String, ContentRating>> loadPhotoRatings() async {
+    final file = await _supportFileOrNull('photo_ratings_v1.json');
+    if (file != null && await file.exists()) {
+      try {
+        final raw = await file.readAsString();
+        if (raw.isNotEmpty) {
+          return _parsePhotoRatingsRaw(raw);
+        }
+      } catch (_) {}
+    }
+
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString(_photoRatingsKey);
+      if (raw == null || raw.isEmpty) return {};
+      return _parsePhotoRatingsRaw(raw);
+    } catch (_) {
+      return {};
+    }
+  }
+
+  Map<String, ContentRating> _parsePhotoRatingsRaw(String raw) {
+    final decoded = jsonDecode(raw);
+    final out = <String, ContentRating>{};
+    if (decoded is Map) {
+      decoded.forEach((k, v) {
+        final key = k.toString().trim();
+        final rating = ContentRatingMeta.fromName(v?.toString());
+        if (key.isNotEmpty && rating != ContentRating.normal) {
+          out[key] = rating;
+        }
+      });
+    }
+    return out;
+  }
+
+  Future<void> savePhotoRatings(Map<String, ContentRating> ratings) async {
+    _pendingRatingsWrite = Map<String, ContentRating>.unmodifiable(ratings);
+    if (_isWritingRatings) return;
+
+    _isWritingRatings = true;
+    try {
+      while (_pendingRatingsWrite != null) {
+        final batch = _pendingRatingsWrite!;
+        _pendingRatingsWrite = null;
+        final serialized = <String, String>{};
+        batch.forEach((k, v) {
+          if (k.isNotEmpty && v != ContentRating.normal) {
+            serialized[k] = v.name;
+          }
+        });
+        final encoded = serialized.length >= 300
+            ? await Isolate.run(() => _encodeJsonPayload(serialized))
+            : jsonEncode(serialized);
+        final file = await _supportFileOrNull('photo_ratings_v1.json');
+        if (file != null) {
+          await _writeAtomicFile(file, encoded);
+        } else {
+          final prefs = await SharedPreferences.getInstance();
+          await prefs.setString(_photoRatingsKey, encoded);
+        }
+      }
+    } finally {
+      _isWritingRatings = false;
+    }
+  }
+
   Future<AppSettings> loadSettings() async {
     final prefs = await SharedPreferences.getInstance();
     final raw = prefs.getString(_settingsKey);
@@ -269,20 +420,30 @@ class StorageService {
   }
 
   /// Builds a portable JSON backup containing settings, downloaded markers,
-  /// saved per-artist profile URLs, and download history/paused tasks.
+  /// saved per-artist profile URLs, album tags, photo ratings, and download history.
   String buildBackupJson({
     required AppSettings settings,
     required Set<String> downloadedMarkers,
     required List<CreatorProfileRecord> creatorProfiles,
     required List<DownloadItem> history,
+    Map<String, AlbumMetadata> albumMetadata = const {},
+    Map<String, ContentRating> photoRatings = const {},
   }) {
+    final serializedRatings = <String, String>{};
+    photoRatings.forEach((k, v) {
+      if (k.isNotEmpty && v != ContentRating.normal) {
+        serializedRatings[k] = v.name;
+      }
+    });
     final payload = {
       'app': 'all_download',
-      'schemaVersion': 2,
+      'schemaVersion': 3,
       'exportedAt': DateTime.now().toIso8601String(),
       'settings': settings.toJson(),
       'downloadedMarkers': downloadedMarkers.toList(growable: false),
       'creatorProfiles': creatorProfiles.map((e) => e.toJson()).toList(growable: false),
+      'albumMetadata': albumMetadata.values.map((e) => e.toJson()).toList(growable: false),
+      'photoRatings': serializedRatings,
       'history': history.map((e) => e.toJson()).toList(growable: false),
     };
     return const JsonEncoder.withIndent('  ').convert(payload);
@@ -302,6 +463,8 @@ class StorageService {
     final hasAnyExpectedKey = map.containsKey('settings') ||
         map.containsKey('downloadedMarkers') ||
         map.containsKey('creatorProfiles') ||
+        map.containsKey('albumMetadata') ||
+        map.containsKey('photoRatings') ||
         map.containsKey('history');
     if (!hasAnyExpectedKey) {
       throw const FormatException(
@@ -323,6 +486,27 @@ class StorageService {
             .where((r) => r.profileUrl.isNotEmpty)
             .toList() ??
         <CreatorProfileRecord>[];
+    final albumMeta = <String, AlbumMetadata>{};
+    if (map['albumMetadata'] is List) {
+      for (final entry in map['albumMetadata'] as List) {
+        if (entry is Map) {
+          final meta = AlbumMetadata.fromJson(Map<String, dynamic>.from(entry));
+          if (meta.albumFolder.isNotEmpty && meta.tags.isNotEmpty) {
+            albumMeta[meta.lookupKey] = meta;
+          }
+        }
+      }
+    }
+    final ratings = <String, ContentRating>{};
+    if (map['photoRatings'] is Map) {
+      (map['photoRatings'] as Map).forEach((k, v) {
+        final key = k.toString().trim();
+        final rating = ContentRatingMeta.fromName(v?.toString());
+        if (key.isNotEmpty && rating != ContentRating.normal) {
+          ratings[key] = rating;
+        }
+      });
+    }
     final history = (map['history'] as List?)
             ?.whereType<Map>()
             .map((e) {
@@ -342,6 +526,8 @@ class StorageService {
       downloadedMarkers: markers,
       creatorProfiles: profiles,
       history: history,
+      albumMetadata: albumMeta,
+      photoRatings: ratings,
       exportedAt: DateTime.tryParse(map['exportedAt']?.toString() ?? ''),
     );
   }

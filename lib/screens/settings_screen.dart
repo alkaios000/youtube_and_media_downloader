@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 
 import '../models/app_settings.dart';
 import '../models/media_info.dart';
+import '../models/media_metadata.dart';
 import '../services/download_manager.dart';
 import '../services/storage_service.dart';
 
@@ -85,6 +86,18 @@ class SettingsScreen extends StatelessWidget {
                         _AppearanceGeneralSubmenu(manager: manager),
                       ),
                     ),
+                    const Divider(height: 1, indent: 68),
+                    _SettingsMenuTile(
+                      icon: Icons.visibility_outlined,
+                      iconColor: const Color(0xFFEC4899),
+                      title: 'Visibilitas Konten',
+                      badgeLabel: 'BARU',
+                      subtitle: settings.contentVisibilitySummary,
+                      onTap: () => _openSubmenu(
+                        context,
+                        _ContentVisibilitySubmenu(manager: manager),
+                      ),
+                    ),
                   ],
                 ),
               ),
@@ -150,6 +163,7 @@ class _SettingsMenuTile extends StatelessWidget {
   final Color iconColor;
   final String title;
   final String subtitle;
+  final String? badgeLabel;
   final VoidCallback onTap;
 
   const _SettingsMenuTile({
@@ -158,6 +172,7 @@ class _SettingsMenuTile extends StatelessWidget {
     required this.title,
     required this.subtitle,
     required this.onTap,
+    this.badgeLabel,
   });
 
   @override
@@ -173,9 +188,36 @@ class _SettingsMenuTile extends StatelessWidget {
         ),
         child: Icon(icon, color: iconColor, size: 22),
       ),
-      title: Text(
-        title,
-        style: const TextStyle(fontWeight: FontWeight.w700),
+      title: Row(
+        children: [
+          Flexible(
+            child: Text(
+              title,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(fontWeight: FontWeight.w700),
+            ),
+          ),
+          if (badgeLabel != null && badgeLabel!.isNotEmpty) ...[
+            const SizedBox(width: 7),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+              decoration: BoxDecoration(
+                color: iconColor.withValues(alpha: 0.18),
+                borderRadius: BorderRadius.circular(6),
+                border: Border.all(color: iconColor.withValues(alpha: 0.45)),
+              ),
+              child: Text(
+                badgeLabel!,
+                style: TextStyle(
+                  fontSize: 9.5,
+                  fontWeight: FontWeight.w800,
+                  color: iconColor,
+                ),
+              ),
+            ),
+          ],
+        ],
       ),
       subtitle: Text(
         subtitle,
@@ -762,12 +804,211 @@ class _AppearanceGeneralSubmenu extends StatelessWidget {
                         settings.copyWith(clipboardAutoDetect: v),
                       ),
                     ),
+                    const Divider(height: 1),
+                    ListTile(
+                      leading: const Icon(
+                        Icons.visibility_outlined,
+                        color: Color(0xFFEC4899),
+                      ),
+                      title: const Text('Visibilitas Konten'),
+                      subtitle: Text(settings.contentVisibilitySummary),
+                      trailing: const Icon(Icons.chevron_right_rounded),
+                      onTap: () => Navigator.of(context).push<void>(
+                        MaterialPageRoute<void>(
+                          builder: (_) =>
+                              _ContentVisibilitySubmenu(manager: manager),
+                        ),
+                      ),
+                    ),
                   ],
                 ),
               ),
             ],
           );
         },
+      ),
+    );
+  }
+}
+
+// =============================================================================
+// SUBMENU 4B: Visibilitas Konten (Checklist Biasa / Ecchi / NSFW)
+// =============================================================================
+class _ContentVisibilitySubmenu extends StatelessWidget {
+  final DownloadManager manager;
+
+  const _ContentVisibilitySubmenu({required this.manager});
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Visibilitas Konten')),
+      body: ListenableBuilder(
+        listenable: manager,
+        builder: (context, _) {
+          final theme = Theme.of(context);
+          final settings = manager.settings;
+          final counts = manager.countPhotosByRating();
+
+          return ListView(
+            padding: const EdgeInsets.fromLTRB(16, 8, 16, 32),
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(4, 0, 4, 12),
+                child: Text(
+                  'Centang kategori konten foto yang ingin ditampilkan di tab File, Album, dan Semua Foto. Semua foto secara default bertanda Biasa dan dapat diganti langsung dari tombol Tandai saat melihat foto.',
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: theme.colorScheme.onSurfaceVariant,
+                    height: 1.4,
+                  ),
+                ),
+              ),
+              Card(
+                clipBehavior: Clip.antiAlias,
+                child: Column(
+                  children: [
+                    CheckboxListTile(
+                      secondary: _ratingIconBox(ContentRating.normal),
+                      title: Row(
+                        children: [
+                          Text(
+                            ContentRating.normal.label,
+                            style: const TextStyle(fontWeight: FontWeight.w700),
+                          ),
+                          const SizedBox(width: 8),
+                          _ratingCountChip(
+                            context,
+                            counts[ContentRating.normal] ?? 0,
+                            ContentRating.normal.color,
+                          ),
+                        ],
+                      ),
+                      subtitle: Text(ContentRating.normal.description),
+                      value: settings.showNormalContent,
+                      onChanged: (v) => manager.updateSettings(
+                        settings.copyWith(showNormalContent: v ?? true),
+                      ),
+                    ),
+                    const Divider(height: 1, indent: 68),
+                    CheckboxListTile(
+                      secondary: _ratingIconBox(ContentRating.ecchi),
+                      title: Row(
+                        children: [
+                          Text(
+                            ContentRating.ecchi.label,
+                            style: const TextStyle(fontWeight: FontWeight.w700),
+                          ),
+                          const SizedBox(width: 8),
+                          _ratingCountChip(
+                            context,
+                            counts[ContentRating.ecchi] ?? 0,
+                            ContentRating.ecchi.color,
+                          ),
+                        ],
+                      ),
+                      subtitle: Text(ContentRating.ecchi.description),
+                      value: settings.showEcchiContent,
+                      onChanged: (v) => manager.updateSettings(
+                        settings.copyWith(showEcchiContent: v ?? true),
+                      ),
+                    ),
+                    const Divider(height: 1, indent: 68),
+                    CheckboxListTile(
+                      secondary: _ratingIconBox(ContentRating.nsfw),
+                      title: Row(
+                        children: [
+                          Text(
+                            ContentRating.nsfw.label,
+                            style: const TextStyle(fontWeight: FontWeight.w700),
+                          ),
+                          const SizedBox(width: 8),
+                          _ratingCountChip(
+                            context,
+                            counts[ContentRating.nsfw] ?? 0,
+                            ContentRating.nsfw.color,
+                          ),
+                        ],
+                      ),
+                      subtitle: Text(ContentRating.nsfw.description),
+                      value: settings.showNsfwContent,
+                      onChanged: (v) => manager.updateSettings(
+                        settings.copyWith(showNsfwContent: v ?? true),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 14),
+              Row(
+                children: [
+                  Expanded(
+                    child: FilledButton.tonalIcon(
+                      onPressed: settings.showsAllContentRatings
+                          ? null
+                          : () => manager.updateSettings(
+                                settings.copyWith(
+                                  showNormalContent: true,
+                                  showEcchiContent: true,
+                                  showNsfwContent: true,
+                                ),
+                              ),
+                      icon: const Icon(Icons.done_all_rounded, size: 18),
+                      label: const Text('Tampilkan Semua'),
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: OutlinedButton.icon(
+                      onPressed: (settings.showNormalContent &&
+                              !settings.showEcchiContent &&
+                              !settings.showNsfwContent)
+                          ? null
+                          : () => manager.updateSettings(
+                                settings.copyWith(
+                                  showNormalContent: true,
+                                  showEcchiContent: false,
+                                  showNsfwContent: false,
+                                ),
+                              ),
+                      icon: const Icon(Icons.shield_outlined, size: 18),
+                      label: const Text('Biasa Saja'),
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _ratingIconBox(ContentRating rating) {
+    return Container(
+      width: 38,
+      height: 38,
+      decoration: BoxDecoration(
+        color: rating.color.withValues(alpha: 0.16),
+        borderRadius: BorderRadius.circular(10),
+      ),
+      child: Icon(rating.icon, color: rating.color, size: 20),
+    );
+  }
+
+  Widget _ratingCountChip(BuildContext context, int count, Color color) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 1.5),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.14),
+        borderRadius: BorderRadius.circular(999),
+      ),
+      child: Text(
+        '$count foto',
+        style: TextStyle(
+          fontSize: 10.5,
+          fontWeight: FontWeight.w700,
+          color: color,
+        ),
       ),
     );
   }
@@ -1096,6 +1337,10 @@ Future<void> _confirmAndApplyBackup(
           const SizedBox(height: 8),
           Text('• Penanda sudah diunduh: ${bundle.downloadedMarkers.length}'),
           Text('• Link profil artis: ${bundle.creatorProfiles.length}'),
+          if (bundle.albumMetadata.isNotEmpty)
+            Text('• Tag album tersimpan: ${bundle.albumMetadata.length}'),
+          if (bundle.photoRatings.isNotEmpty)
+            Text('• Foto bertanda Ecchi/NSFW: ${bundle.photoRatings.length}'),
           Text('• Riwayat & antrean terjeda: ${bundle.history.length}'),
           const SizedBox(height: 12),
           Text(

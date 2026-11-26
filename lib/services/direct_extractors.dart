@@ -265,6 +265,7 @@ class DirectExtractors {
       final xRestrict = (meta['xRestrict'] as num?)?.toInt() ?? 0;
       final isR18 = xRestrict > 0;
       final r18Tag = xRestrict == 2 ? 'R-18G' : (xRestrict == 1 ? 'R-18' : '');
+      final artworkTags = parsePixivTags(meta['tags']);
 
       // Check if Pixiv redacted original URLs because R-18 requires login / R-18 setting
       final metaUrls = meta['urls'] as Map?;
@@ -361,6 +362,7 @@ class DirectExtractors {
           extractorLabel: isR18 ? 'Pixiv Ugoira ($r18Tag)' : 'Pixiv Ugoira Engine',
           options: ugoiraOptions,
           creatorProfileUrl: profileUrl,
+          tags: artworkTags,
         );
       }
 
@@ -463,6 +465,7 @@ class DirectExtractors {
             isR18 ? 'Pixiv Original ($r18Tag)' : 'Pixiv Original Engine',
         selectableItems: items,
         creatorProfileUrl: profileUrl,
+        tags: artworkTags,
         options: [
           MediaFormatOption(
             id: 'pixiv_all',
@@ -561,6 +564,7 @@ class DirectExtractors {
         final xRestrict = (work?['xRestrict'] as num?)?.toInt() ?? 0;
         final isUgoira = illustType == 2;
         final isR18 = xRestrict > 0;
+        final workTags = parsePixivTags(work?['tags']);
 
         String badge;
         if (isUgoira) {
@@ -587,6 +591,7 @@ class DirectExtractors {
             author: creatorName,
             pixivIllustId: id,
             isPixivUgoira: isUgoira,
+            tags: workTags,
           ),
         );
       }
@@ -751,6 +756,7 @@ class DirectExtractors {
           final xRestrict = (w['xRestrict'] as num?)?.toInt() ?? 0;
           final isUgoira = illustType == 2;
           final isR18 = xRestrict > 0;
+          final workTags = parsePixivTags(w['tags']);
 
           final badge = isUgoira
               ? (isR18 ? 'R-18 Ugoira' : 'Ugoira')
@@ -772,6 +778,7 @@ class DirectExtractors {
               author: artist.isNotEmpty ? artist : 'Pixiv',
               pixivIllustId: id,
               isPixivUgoira: isUgoira,
+              tags: workTags,
             ),
           );
           added++;
@@ -900,6 +907,79 @@ class DirectExtractors {
       }
     } catch (_) {}
     return const [];
+  }
+
+  /// Fetches artwork tags for a Pixiv illust ID (used as fallback when bulk
+  /// batch metadata did not include tags or when resuming an older task).
+  Future<List<String>> fetchPixivIllustTags(
+    String illustId, {
+    String cookieHeader = '',
+    String customCookies = '',
+  }) async {
+    final headers = buildPixivHeaders(
+      cookieHeader: cookieHeader,
+      customCookies: customCookies,
+    );
+    try {
+      final res = await _dio.get<dynamic>(
+        'https://www.pixiv.net/ajax/illust/$illustId?lang=en',
+        options: Options(headers: headers),
+      );
+      final body = res.data is String ? jsonDecode(res.data as String) : res.data;
+      if (body is Map && body['error'] != true && body['body'] is Map) {
+        return parsePixivTags((body['body'] as Map)['tags']);
+      }
+    } catch (_) {}
+    return const [];
+  }
+
+  /// Parses tags from either Pixiv's `/ajax/illust/{id}` object structure
+  /// (`{"tags": [{"tag": "...", "translation": {"en": "..."}}]}`) OR the
+  /// flat `List<String>` returned by `/profile/illusts` and `/bookmarks`.
+  static List<String> parsePixivTags(dynamic raw) {
+    final out = <String>[];
+    final seen = <String>{};
+
+    void addTag(String value) {
+      final clean = value.trim();
+      if (clean.isEmpty) return;
+      if (seen.add(clean.toLowerCase())) {
+        out.add(clean);
+      }
+    }
+
+    if (raw is Map && raw['tags'] is List) {
+      for (final entry in raw['tags'] as List) {
+        if (entry is Map) {
+          final tag = entry['tag']?.toString().trim() ?? '';
+          final transMap = entry['translation'];
+          final en = transMap is Map
+              ? (transMap['en']?.toString().trim() ?? '')
+              : '';
+          if (tag.isNotEmpty &&
+              en.isNotEmpty &&
+              en.toLowerCase() != tag.toLowerCase()) {
+            addTag('$tag ($en)');
+          } else if (tag.isNotEmpty) {
+            addTag(tag);
+          } else if (en.isNotEmpty) {
+            addTag(en);
+          }
+        } else if (entry != null) {
+          addTag(entry.toString());
+        }
+      }
+    } else if (raw is List) {
+      for (final entry in raw) {
+        if (entry is Map) {
+          final tag = entry['tag']?.toString().trim() ?? '';
+          if (tag.isNotEmpty) addTag(tag);
+        } else if (entry != null) {
+          addTag(entry.toString());
+        }
+      }
+    }
+    return List<String>.unmodifiable(out);
   }
 
   Future<String?> _findPixivUserIdByName(

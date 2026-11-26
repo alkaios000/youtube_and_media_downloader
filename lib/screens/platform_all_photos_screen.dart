@@ -7,6 +7,7 @@ import 'package:flutter/services.dart';
 
 import '../models/managed_file.dart';
 import '../models/media_info.dart';
+import '../models/media_metadata.dart';
 import '../models/media_platform.dart';
 import '../services/download_manager.dart';
 import '../widgets/file_gallery_viewer.dart';
@@ -150,7 +151,14 @@ class _PlatformAllPhotosScreenState extends State<PlatformAllPhotosScreen> {
         child: ListenableBuilder(
           listenable: widget.manager,
           builder: (context, _) {
-            final photos = _resolvePhotos(widget.manager.managedFiles);
+            final photos = _resolvePhotos(widget.manager.visibleManagedFiles);
+            final hiddenByFilter = photos.isEmpty &&
+                widget.manager.managedFiles.any(
+                  (f) =>
+                      f.platformFolder == widget.platformFolder &&
+                      f.mediaKind == MediaKind.image &&
+                      f.savedPath.isNotEmpty,
+                );
 
             return RefreshIndicator(
               onRefresh: _refreshAndReshuffle,
@@ -206,11 +214,24 @@ class _PlatformAllPhotosScreenState extends State<PlatformAllPhotosScreen> {
                               ),
                               const SizedBox(height: 12),
                               Text(
-                                'Belum ada foto di ${widget.platformFolder}',
+                                hiddenByFilter
+                                    ? 'Semua foto disembunyikan oleh filter'
+                                    : 'Belum ada foto di ${widget.platformFolder}',
+                                textAlign: TextAlign.center,
                                 style: theme.textTheme.titleMedium?.copyWith(
                                   fontWeight: FontWeight.w700,
                                 ),
                               ),
+                              if (hiddenByFilter) ...[
+                                const SizedBox(height: 6),
+                                Text(
+                                  'Ubah checklist di Pengaturan → Visibilitas Konten untuk menampilkan kembali.',
+                                  textAlign: TextAlign.center,
+                                  style: theme.textTheme.bodySmall?.copyWith(
+                                    color: theme.colorScheme.onSurfaceVariant,
+                                  ),
+                                ),
+                              ],
                             ],
                           ),
                         ),
@@ -269,6 +290,17 @@ class _PlatformAllPhotosScreenState extends State<PlatformAllPhotosScreen> {
                                             size: 11,
                                             color: Color(0xFFFBBF24),
                                           ),
+                                        ),
+                                      ),
+                                    if (widget.manager.getPhotoRating(photo) !=
+                                        ContentRating.normal)
+                                      Positioned(
+                                        top: 5,
+                                        right: 5,
+                                        child: ContentRatingBadge(
+                                          rating: widget.manager
+                                              .getPhotoRating(photo),
+                                          compact: true,
                                         ),
                                       ),
                                     Positioned(
