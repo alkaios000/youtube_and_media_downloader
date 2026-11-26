@@ -1217,12 +1217,15 @@ class DownloadManager extends ChangeNotifier {
               );
               syncParent();
 
+              final isPixivPrivate = info.platform == MediaPlatform.pixiv;
               final saved = await _bridge.saveFileToDownloads(
                 sourcePath: tempPath,
                 fileName: fileName,
                 mimeType: _mimeForExtension(fileExt, option.kind),
                 platformFolder: info.platform.folderName,
                 creatorFolder: info.author,
+                albumFolder: isPixivPrivate ? info.title : null,
+                isPrivate: isPixivPrivate,
               );
 
               firstSaved ??= saved;
@@ -1573,6 +1576,24 @@ class DownloadManager extends ChangeNotifier {
     final deletedCount = await _bridge.deleteMultipleFiles(files);
     await refreshManagedFiles();
     return deletedCount;
+  }
+
+  /// Unlocks private Pixiv files into public Android Gallery & WhatsApp (`Pictures/all_download/...`).
+  Future<int> unlockManagedFiles(List<ManagedFile> files) async {
+    final targets = files.where((f) => f.isPrivate).toList(growable: false);
+    if (targets.isEmpty) return 0;
+    final count = await _bridge.unlockFiles(targets);
+    await refreshManagedFiles();
+    return count;
+  }
+
+  /// Locks public files back into the app-private vault (hidden from Gallery & WhatsApp).
+  Future<int> lockManagedFiles(List<ManagedFile> files) async {
+    final targets = files.where((f) => !f.isPrivate).toList(growable: false);
+    if (targets.isEmpty) return 0;
+    final count = await _bridge.lockFiles(targets);
+    await refreshManagedFiles();
+    return count;
   }
 
   Future<void> removeHistoryItem(DownloadItem item, {bool deleteFromDevice = false}) async {

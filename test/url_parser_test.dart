@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:linkdrop_downloader/models/managed_file.dart';
 import 'package:linkdrop_downloader/models/media_info.dart';
 import 'package:linkdrop_downloader/models/media_platform.dart';
 import 'package:linkdrop_downloader/services/media_extractor_service.dart';
@@ -196,6 +197,45 @@ void main() {
         canonicalMarkerKey('https://www.tiktok.com/@creator/video/7345678901234567890'),
         'tt:7345678901234567890',
       );
+    });
+  });
+
+  group('ManagedFile album grouping & natural page sorting', () {
+    test('derives album name from albumFolder or legacy page filename and sorts pages naturally', () {
+      final f1 = ManagedFile(
+        fileName: 'Sunset_1.jpg',
+        mimeType: 'image/jpeg',
+        mediaKind: MediaKind.image,
+        fileSize: 100,
+        modifiedAt: DateTime(2026),
+        relativePath: 'Privat/Pixiv/Artist/Sunset',
+        savedPath: '/tmp/Sunset_1.jpg',
+        contentUri: '',
+        platformFolder: 'Pixiv',
+        creatorFolder: 'Artist',
+        albumFolder: 'Sunset Album',
+        isPrivate: true,
+      );
+      final legacy = ManagedFile(
+        fileName: 'Moonlight_10.jpg',
+        mimeType: 'image/jpeg',
+        mediaKind: MediaKind.image,
+        fileSize: 100,
+        modifiedAt: DateTime(2026),
+        relativePath: 'Pictures/all_download/Pixiv/Artist',
+        savedPath: '/tmp/Moonlight_10.jpg',
+        contentUri: '',
+        platformFolder: 'Pixiv',
+        creatorFolder: 'Artist',
+      );
+      expect(f1.effectiveAlbumName, 'Sunset Album');
+      expect(f1.isPrivate, isTrue);
+      expect(legacy.effectiveAlbumName, 'Moonlight');
+      expect(legacy.isPrivate, isFalse);
+
+      final names = ['art_10.jpg', 'art_2.jpg', 'art_1.jpg', 'art_11.jpg'];
+      names.sort(naturalCompareFileNames);
+      expect(names, ['art_1.jpg', 'art_2.jpg', 'art_10.jpg', 'art_11.jpg']);
     });
   });
 }

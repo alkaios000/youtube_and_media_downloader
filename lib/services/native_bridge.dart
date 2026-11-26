@@ -46,6 +46,8 @@ class SavedFileResult {
   final String folderLabel;
   final String platformFolder;
   final String creatorFolder;
+  final String albumFolder;
+  final bool isPrivate;
 
   const SavedFileResult({
     required this.savedPath,
@@ -56,6 +58,8 @@ class SavedFileResult {
     required this.folderLabel,
     required this.platformFolder,
     required this.creatorFolder,
+    this.albumFolder = '',
+    this.isPrivate = false,
   });
 
   factory SavedFileResult.fromMap(Map<dynamic, dynamic> map) {
@@ -68,6 +72,8 @@ class SavedFileResult {
       folderLabel: map['folderLabel']?.toString() ?? 'Pictures/all_download',
       platformFolder: map['platformFolder']?.toString() ?? 'Lainnya',
       creatorFolder: map['creatorFolder']?.toString() ?? 'Umum',
+      albumFolder: map['albumFolder']?.toString() ?? '',
+      isPrivate: map['isPrivate'] as bool? ?? false,
     );
   }
 }
@@ -367,6 +373,8 @@ class NativeBridge {
     String? mimeType,
     required String platformFolder,
     required String creatorFolder,
+    String? albumFolder,
+    bool isPrivate = false,
   }) async {
     final result = await _channel.invokeMethod<Map<dynamic, dynamic>>(
       'saveFileToDownloads',
@@ -376,10 +384,12 @@ class NativeBridge {
         'mimeType': mimeType,
         'platformFolder': platformFolder,
         'creatorFolder': creatorFolder,
+        'albumFolder': albumFolder,
+        'isPrivate': isPrivate,
       },
     );
     if (result == null) {
-      throw Exception('Gagal menyimpan file ke penyimpanan publik.');
+      throw Exception('Gagal menyimpan file ke penyimpanan.');
     }
     return SavedFileResult.fromMap(result);
   }
@@ -457,6 +467,48 @@ class NativeBridge {
             })
         .toList(growable: false);
     final count = await _channel.invokeMethod<int>('deleteMultipleFiles', {
+      'items': payload,
+    });
+    return count ?? 0;
+  }
+
+  Future<int> unlockFiles(List<ManagedFile> files) async {
+    final targets = files.where((f) => f.isPrivate).toList(growable: false);
+    if (targets.isEmpty) return 0;
+    final payload = targets
+        .map((f) => <String, dynamic>{
+              'filePath': f.savedPath,
+              'contentUri': f.contentUri,
+              'fileName': f.fileName,
+              'mimeType': f.mimeType,
+              'platformFolder': f.platformFolder,
+              'creatorFolder': f.creatorFolder,
+              'albumFolder': f.effectiveAlbumName,
+              'isPrivate': true,
+            })
+        .toList(growable: false);
+    final count = await _channel.invokeMethod<int>('unlockFiles', {
+      'items': payload,
+    });
+    return count ?? 0;
+  }
+
+  Future<int> lockFiles(List<ManagedFile> files) async {
+    final targets = files.where((f) => !f.isPrivate).toList(growable: false);
+    if (targets.isEmpty) return 0;
+    final payload = targets
+        .map((f) => <String, dynamic>{
+              'filePath': f.savedPath,
+              'contentUri': f.contentUri,
+              'fileName': f.fileName,
+              'mimeType': f.mimeType,
+              'platformFolder': f.platformFolder,
+              'creatorFolder': f.creatorFolder,
+              'albumFolder': f.effectiveAlbumName,
+              'isPrivate': false,
+            })
+        .toList(growable: false);
+    final count = await _channel.invokeMethod<int>('lockFiles', {
       'items': payload,
     });
     return count ?? 0;

@@ -455,6 +455,8 @@ class MediaEngineBridge(private val context: Context) {
         mimeType: String?,
         platformFolder: String,
         creatorFolder: String,
+        albumFolder: String? = null,
+        isPrivate: Boolean = false,
         onSuccess: (Map<String, Any?>) -> Unit,
         onError: (String, String) -> Unit,
     ) {
@@ -467,7 +469,7 @@ class MediaEngineBridge(private val context: Context) {
                 }
                 val safeName = sanitizeFileName(fileName)
                 val resolvedMime = mimeType?.takeIf { it.isNotBlank() } ?: detectMimeType(safeName)
-                val fileToExport = if (resolvedMime.startsWith("video/", ignoreCase = true)) {
+                val fileToExport = if (!isPrivate && resolvedMime.startsWith("video/", ignoreCase = true)) {
                     runCatching { ensureInitialized() }
                     val stamped = stampFreshVideoMetadata(sourceFile, sourceFile.parentFile ?: context.cacheDir)
                     if (stamped.absolutePath != sourceFile.absolutePath) {
@@ -477,22 +479,111 @@ class MediaEngineBridge(private val context: Context) {
                 } else {
                     sourceFile
                 }
-                val exported = exportFileToPublicStorage(
-                    sourceFile = fileToExport,
-                    requestedName = safeName,
-                    mimeType = resolvedMime,
-                    platformFolder = platformFolder,
-                    creatorFolder = creatorFolder,
-                )
+                val exported = if (isPrivate) {
+                    exportFileToPrivateVault(
+                        sourceFile = fileToExport,
+                        requestedName = safeName,
+                        mimeType = resolvedMime,
+                        platformFolder = platformFolder,
+                        creatorFolder = creatorFolder,
+                        albumFolder = albumFolder,
+                    )
+                } else {
+                    exportFileToPublicStorage(
+                        sourceFile = fileToExport,
+                        requestedName = safeName,
+                        mimeType = resolvedMime,
+                        platformFolder = platformFolder,
+                        creatorFolder = creatorFolder,
+                        albumFolder = albumFolder,
+                    )
+                }
                 runCatching { sourceFile.delete() }
                 runCatching { stampedTemp?.delete() }
                 postToMain { onSuccess(exported) }
             } catch (t: Throwable) {
                 runCatching { stampedTemp?.delete() }
                 Log.e(TAG, "saveFileToDownloads failed", t)
-                postToMain { onError("SAVE_ERROR", t.message ?: "Gagal menyimpan file ke Galeri") }
+                postToMain { onError("SAVE_ERROR", t.message ?: "Gagal menyimpan file") }
             }
         }
+    }
+
+    private fun privateVaultRoot(): File {
+        val base = context.getExternalFilesDir(null) ?: context.filesDir
+        val root = File(base, "private_vault")
+        if (!root.exists()) root.mkdirs()
+        val nomedia = File(root, ".nomedia")
+        if (!nomedia.exists()) runCatching { nomedia.createNewFile() }
+        return root
+    }
+
+    private fun cleanupEmptyPrivateDirs(deletedFile: File) {
+        runCatching {
+            val vaultRoot = privateVaultRoot().canonicalFile
+            var current = deletedFile.parentFile?.canonicalFile
+            while (current != null && current != vaultRoot && current.path.startsWith(vaultRoot.path)) {
+                val children = current.listFiles()?.filter { it.name != ".nomedia" }
+                if (children.isNullOrEmpty()) {
+                    current.deleteRecursively()
+                    current = current.parentFile?.canonicalFile
+                } else {
+                    break
+                }
+            }
+        }
+    }
+
+    private fun exportFileToPrivateVault(
+        sourceFile: File,
+        requestedName: String,
+        mimeType: String,
+        platformFolder: String,
+        creatorFolder: String,
+        albumFolder: String?,
+    ): Map<String, Any?> {
+        val cleanName = sanitizeFileName(requestedName)
+        val safePlatform = sanitizeFolderSegment(platformFolder, "Pixiv")
+        val safeCreator = sanitizeFolderSegment(creatorFolder, "Umum")
+        val safeAlbum = albumFolder?.takeIf { it.isNotBlank() }?.let {
+            sanitizeFolderSegment(it, "")
+        }.orEmpty()
+
+        val vault = privateVaultRoot()
+        val targetDir = if (safeAlbum.isNotEmpty()) {
+            File(File(File(vault, safePlatform), safeCreator), safeAlbum)
+        } else {
+            File(File(vault, safePlatform), safeCreator)
+        }
+        targetDir.mkdirs()
+
+        val destFile = resolveUniqueFile(targetDir, cleanName)
+        FileInputStream(sourceFile).use { input ->
+            FileOutputStream(destFile).use { output ->
+                input.copyTo(output, bufferSize = 64 * 1024)
+            }
+        }
+        val nowMs = System.currentTimeMillis()
+        runCatching { destFile.setLastModified(nowMs) }
+
+        val folderLabel = if (safeAlbum.isNotEmpty()) {
+            "Privat/$safePlatform/$safeCreator/$safeAlbum"
+        } else {
+            "Privat/$safePlatform/$safeCreator"
+        }
+
+        return mapOf(
+            "savedPath" to destFile.absolutePath,
+            "contentUri" to "",
+            "fileName" to destFile.name,
+            "fileSize" to destFile.length(),
+            "mimeType" to mimeType,
+            "folderLabel" to folderLabel,
+            "platformFolder" to safePlatform,
+            "creatorFolder" to safeCreator,
+            "albumFolder" to safeAlbum,
+            "isPrivate" to true,
+        )
     }
 
     /**
@@ -612,11 +703,19 @@ class MediaEngineBridge(private val context: Context) {
         mimeType: String,
         platformFolder: String,
         creatorFolder: String,
+        albumFolder: String? = null,
     ): Map<String, Any?> {
         val cleanName = sanitizeFileName(requestedName)
         val safePlatform = sanitizeFolderSegment(platformFolder, "Lainnya")
         val safeCreator = sanitizeFolderSegment(creatorFolder, "Umum")
-        val subFolder = "all_download/$safePlatform/$safeCreator"
+        val safeAlbum = albumFolder?.takeIf { it.isNotBlank() }?.let {
+            sanitizeFolderSegment(it, "")
+        }.orEmpty()
+        val subFolder = if (safeAlbum.isNotEmpty()) {
+            "all_download/$safePlatform/$safeCreator/$safeAlbum"
+        } else {
+            "all_download/$safePlatform/$safeCreator"
+        }
 
         val fileSize = sourceFile.length()
         val nowMs = System.currentTimeMillis()
@@ -793,6 +892,8 @@ class MediaEngineBridge(private val context: Context) {
                     "folderLabel" to chosenFolderLabel,
                     "platformFolder" to safePlatform,
                     "creatorFolder" to safeCreator,
+                    "albumFolder" to safeAlbum,
+                    "isPrivate" to false,
                 )
             } catch (t: Throwable) {
                 runCatching { resolver.delete(uri, null, null) }
@@ -857,6 +958,8 @@ class MediaEngineBridge(private val context: Context) {
                 "folderLabel" to folderLabel,
                 "platformFolder" to safePlatform,
                 "creatorFolder" to safeCreator,
+                "albumFolder" to safeAlbum,
+                "isPrivate" to false,
             )
         }
     }
@@ -922,7 +1025,7 @@ class MediaEngineBridge(private val context: Context) {
                                     val dedupKey = dataPath.ifBlank { contentUri }
                                     if (!seenPaths.add(dedupKey)) continue
 
-                                    val (platformName, creatorName) = parseFolderHierarchy(relPath)
+                                    val (platformName, creatorName, albumName) = parseFolderHierarchy(relPath)
                                     results.add(
                                         mapOf(
                                             "fileName" to name,
@@ -935,6 +1038,8 @@ class MediaEngineBridge(private val context: Context) {
                                             "contentUri" to contentUri,
                                             "platformFolder" to platformName,
                                             "creatorFolder" to creatorName,
+                                            "albumFolder" to albumName,
+                                            "isPrivate" to false,
                                         ),
                                     )
                                 }
@@ -962,7 +1067,7 @@ class MediaEngineBridge(private val context: Context) {
                                 else -> "video"
                             }
                             val rel = f.parentFile?.absolutePath.orEmpty()
-                            val (platformName, creatorName) = parseFolderHierarchy(rel)
+                            val (platformName, creatorName, albumName) = parseFolderHierarchy(rel)
                             results.add(
                                 mapOf(
                                     "fileName" to f.name,
@@ -975,9 +1080,51 @@ class MediaEngineBridge(private val context: Context) {
                                     "contentUri" to "",
                                     "platformFolder" to platformName,
                                     "creatorFolder" to creatorName,
+                                    "albumFolder" to albumName,
+                                    "isPrivate" to false,
                                 ),
                             )
                         }
+                    }
+                }
+
+                // Also scan app-private vault (Pixiv default private storage, hidden from Gallery & WA!)
+                runCatching {
+                    val vault = privateVaultRoot()
+                    if (vault.exists()) {
+                        vault.walkTopDown()
+                            .filter { it.isFile && !it.name.startsWith(".") && it.length() > 0 }
+                            .forEach { f ->
+                                if (!seenPaths.add(f.absolutePath)) return@forEach
+                                val mime = detectMimeType(f.name)
+                                val kind = when {
+                                    mime.startsWith("video/") -> "video"
+                                    mime.startsWith("audio/") -> "audio"
+                                    mime.startsWith("image/") -> "image"
+                                    else -> "image"
+                                }
+                                val relDir = f.parentFile?.relativeTo(vault)?.path?.replace('\\', '/').orEmpty()
+                                val parts = relDir.split('/').filter { it.isNotBlank() }
+                                val platformName = parts.getOrNull(0) ?: "Pixiv"
+                                val creatorName = parts.getOrNull(1) ?: "Umum"
+                                val albumName = parts.getOrNull(2) ?: ""
+                                results.add(
+                                    mapOf(
+                                        "fileName" to f.name,
+                                        "mimeType" to mime,
+                                        "mediaKind" to kind,
+                                        "fileSize" to f.length(),
+                                        "modifiedMs" to f.lastModified(),
+                                        "relativePath" to "Privat/$relDir",
+                                        "savedPath" to f.absolutePath,
+                                        "contentUri" to "",
+                                        "platformFolder" to platformName,
+                                        "creatorFolder" to creatorName,
+                                        "albumFolder" to albumName,
+                                        "isPrivate" to true,
+                                    ),
+                                )
+                            }
                     }
                 }
 
@@ -990,14 +1137,15 @@ class MediaEngineBridge(private val context: Context) {
         }
     }
 
-    private fun parseFolderHierarchy(path: String): Pair<String, String> {
+    private fun parseFolderHierarchy(path: String): Triple<String, String, String> {
         val normalized = path.replace('\\', '/').trim('/')
         val parts = normalized.split('/').filter { it.isNotBlank() }
         val idx = parts.indexOfFirst { it.equals("all_download", ignoreCase = true) }
-        if (idx == -1) return "Lainnya" to "Umum"
+        if (idx == -1) return Triple("Lainnya", "Umum", "")
         val platform = parts.getOrNull(idx + 1)?.takeIf { it.isNotBlank() } ?: "Lainnya"
         val creator = parts.getOrNull(idx + 2)?.takeIf { it.isNotBlank() } ?: "Umum"
-        return platform to creator
+        val album = parts.getOrNull(idx + 3)?.takeIf { it.isNotBlank() } ?: ""
+        return Triple(platform, creator, album)
     }
 
     fun openFile(filePath: String?, contentUri: String?, mimeType: String?): Boolean {
@@ -1126,9 +1274,121 @@ class MediaEngineBridge(private val context: Context) {
             val file = File(filePath)
             if (file.exists()) {
                 deleted = runCatching { file.delete() }.getOrDefault(false)
+                if (deleted) {
+                    cleanupEmptyPrivateDirs(file)
+                }
             }
         }
         return deleted
+    }
+
+    /**
+     * Unlocks private vault files into public MediaStore (`Pictures/all_download/<Platform>/<Creator>/<Album>/`)
+     * with fresh timestamps so they immediately appear in Android Gallery and WhatsApp.
+     */
+    fun unlockFiles(
+        items: List<Map<String, Any?>>,
+        onDone: (Int) -> Unit,
+    ) {
+        scope.launch {
+            var count = 0
+            for (item in items) {
+                val isPrivate = item["isPrivate"] as? Boolean ?: true
+                if (!isPrivate) continue
+                val filePath = item["filePath"]?.toString().orEmpty()
+                if (filePath.isBlank()) continue
+                val src = File(filePath)
+                if (!src.exists() || !src.isFile || src.length() == 0L) continue
+
+                val fileName = item["fileName"]?.toString()?.takeIf { it.isNotBlank() } ?: src.name
+                val mimeType = item["mimeType"]?.toString()?.takeIf { it.isNotBlank() }
+                    ?: detectMimeType(fileName)
+                val platformFolder = item["platformFolder"]?.toString()?.takeIf { it.isNotBlank() } ?: "Pixiv"
+                val creatorFolder = item["creatorFolder"]?.toString()?.takeIf { it.isNotBlank() } ?: "Umum"
+                val albumFolder = item["albumFolder"]?.toString()?.takeIf { it.isNotBlank() }
+
+                val ok = runCatching {
+                    exportFileToPublicStorage(
+                        sourceFile = src,
+                        requestedName = fileName,
+                        mimeType = mimeType,
+                        platformFolder = platformFolder,
+                        creatorFolder = creatorFolder,
+                        albumFolder = albumFolder,
+                    )
+                    src.delete()
+                    cleanupEmptyPrivateDirs(src)
+                    true
+                }.getOrDefault(false)
+                if (ok) count++
+            }
+            postToMain { onDone(count) }
+        }
+    }
+
+    /**
+     * Locks public Gallery files back into the app-private vault and removes them from
+     * public MediaStore so they are hidden from Gallery & WhatsApp again.
+     */
+    fun lockFiles(
+        items: List<Map<String, Any?>>,
+        onDone: (Int) -> Unit,
+    ) {
+        scope.launch {
+            var count = 0
+            for (item in items) {
+                val isPrivate = item["isPrivate"] as? Boolean ?: false
+                if (isPrivate) continue
+
+                val filePath = item["filePath"]?.toString().orEmpty()
+                val contentUri = item["contentUri"]?.toString().orEmpty()
+                val fileName = item["fileName"]?.toString()?.takeIf { it.isNotBlank() }
+                    ?: File(filePath).name.ifBlank { "media_${System.currentTimeMillis()}.jpg" }
+                val mimeType = item["mimeType"]?.toString()?.takeIf { it.isNotBlank() }
+                    ?: detectMimeType(fileName)
+                val platformFolder = item["platformFolder"]?.toString()?.takeIf { it.isNotBlank() } ?: "Pixiv"
+                val creatorFolder = item["creatorFolder"]?.toString()?.takeIf { it.isNotBlank() } ?: "Umum"
+                val albumFolder = item["albumFolder"]?.toString()?.takeIf { it.isNotBlank() }
+
+                val ok = runCatching {
+                    val tempCopy = File(context.cacheDir, "lock_tmp_${System.nanoTime()}_${sanitizeFileName(fileName)}")
+                    try {
+                        var copied = false
+                        if (contentUri.startsWith("content://")) {
+                            context.contentResolver.openInputStream(Uri.parse(contentUri))?.use { input ->
+                                FileOutputStream(tempCopy).use { out ->
+                                    input.copyTo(out, bufferSize = 64 * 1024)
+                                }
+                                copied = tempCopy.exists() && tempCopy.length() > 0L
+                            }
+                        }
+                        if (!copied && filePath.isNotBlank()) {
+                            val srcFile = File(filePath)
+                            if (srcFile.exists() && srcFile.length() > 0L) {
+                                srcFile.copyTo(tempCopy, overwrite = true)
+                                copied = tempCopy.exists() && tempCopy.length() > 0L
+                            }
+                        }
+                        if (!copied) return@runCatching false
+
+                        exportFileToPrivateVault(
+                            sourceFile = tempCopy,
+                            requestedName = fileName,
+                            mimeType = mimeType,
+                            platformFolder = platformFolder,
+                            creatorFolder = creatorFolder,
+                            albumFolder = albumFolder,
+                        )
+                        deleteFile(filePath, contentUri)
+                        true
+                    } finally {
+                        runCatching { tempCopy.delete() }
+                    }
+                }.getOrDefault(false)
+                if (ok) count++
+            }
+            postToMain { onDone(count) }
+        }
     }
 
     fun fileExists(filePath: String?, contentUri: String?): Boolean {

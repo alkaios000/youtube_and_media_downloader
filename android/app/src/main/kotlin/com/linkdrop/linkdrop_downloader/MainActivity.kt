@@ -323,6 +323,8 @@ class MainActivity : FlutterActivity() {
                         val mimeType = call.argument<String>("mimeType")
                         val platformFolder = call.argument<String>("platformFolder") ?: "Lainnya"
                         val creatorFolder = call.argument<String>("creatorFolder") ?: "Umum"
+                        val albumFolder = call.argument<String>("albumFolder")
+                        val isPrivate = call.argument<Boolean>("isPrivate") ?: false
                         if (sourcePath.isNullOrBlank()) {
                             result.error("INVALID_ARGS", "sourcePath kosong", null)
                             return@setMethodCallHandler
@@ -333,6 +335,8 @@ class MainActivity : FlutterActivity() {
                             mimeType = mimeType,
                             platformFolder = platformFolder,
                             creatorFolder = creatorFolder,
+                            albumFolder = albumFolder,
+                            isPrivate = isPrivate,
                             onSuccess = { saved -> result.success(saved) },
                             onError = { code, message -> result.error(code, message, null) },
                         )
@@ -381,6 +385,20 @@ class MainActivity : FlutterActivity() {
                     "deleteMultipleFiles" -> {
                         val rawItems = call.argument<List<Map<String, Any?>>>("items").orEmpty()
                         bridge.deleteMultipleFiles(rawItems) { count ->
+                            result.success(count)
+                        }
+                    }
+
+                    "unlockFiles" -> {
+                        val rawItems = call.argument<List<Map<String, Any?>>>("items").orEmpty()
+                        bridge.unlockFiles(rawItems) { count ->
+                            result.success(count)
+                        }
+                    }
+
+                    "lockFiles" -> {
+                        val rawItems = call.argument<List<Map<String, Any?>>>("items").orEmpty()
+                        bridge.lockFiles(rawItems) { count ->
                             result.success(count)
                         }
                     }

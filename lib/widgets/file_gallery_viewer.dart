@@ -185,6 +185,16 @@ class _FileGalleryViewerState extends State<FileGalleryViewer> {
                     mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                     children: [
                       _ViewerActionBtn(
+                        icon: _current.isPrivate
+                            ? Icons.lock_open_rounded
+                            : Icons.lock_outline_rounded,
+                        label: _current.isPrivate ? 'Unlock' : 'Kunci',
+                        color: _current.isPrivate
+                            ? const Color(0xFF4ADE80)
+                            : const Color(0xFFFBBF24),
+                        onTap: _togglePrivacyCurrent,
+                      ),
+                      _ViewerActionBtn(
                         icon: Icons.share_rounded,
                         label: 'Bagikan',
                         onTap: () => widget.manager.shareManagedFile(_current),
@@ -207,6 +217,37 @@ class _FileGalleryViewerState extends State<FileGalleryViewer> {
             ),
           ),
         ],
+      ),
+    );
+  }
+
+  Future<void> _togglePrivacyCurrent() async {
+    final target = _current;
+    final wasPrivate = target.isPrivate;
+    final count = wasPrivate
+        ? await widget.manager.unlockManagedFiles([target])
+        : await widget.manager.lockManagedFiles([target]);
+    if (!mounted || count == 0) return;
+
+    // Refresh matching item reference from manager's updated list
+    final updated = widget.manager.managedFiles
+        .where((f) =>
+            f.platformFolder == target.platformFolder &&
+            f.creatorFolder == target.creatorFolder &&
+            f.fileName == target.fileName)
+        .firstOrNull;
+    setState(() {
+      if (updated != null) {
+        _images[_currentIndex] = updated;
+      }
+    });
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          wasPrivate
+              ? 'Foto dibuka ke Galeri & WhatsApp.'
+              : 'Foto dikunci kembali ke Privat.',
+        ),
       ),
     );
   }
