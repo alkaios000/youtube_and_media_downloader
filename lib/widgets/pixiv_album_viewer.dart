@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 import 'dart:math' as math;
 
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
@@ -22,30 +23,32 @@ class _PageHitMeta {
 }
 
 /// Effortless, buttery-smooth, critically-damped page physics (~120ms settle):
-/// - Requires only a tiny horizontal slide (~14% of screen width) or a gentle flick
-///   to switch to the adjacent album (instead of Flutter's default 50% drag!).
+/// - Uses the exact drag-start pixel offset so touching mid-glide NEVER bounces
+///   back accidentally.
+/// - Requires only a tiny horizontal slide (~14% of screen width) or gentle flick
+///   to switch to the adjacent album (instead of Flutter's default 50% drag).
 /// - Critically-damped spring settles cleanly with zero sluggish tail so vertical
-///   scrolling works immediately after switching albums.
+///   scrolling responds immediately after switching albums.
 class _SnappyAlbumPagePhysics extends PageScrollPhysics {
-  final int Function()? currentIndexProvider;
+  final double? Function()? dragStartPixelsProvider;
 
   const _SnappyAlbumPagePhysics({
-    this.currentIndexProvider,
+    this.dragStartPixelsProvider,
     super.parent,
   });
 
   @override
   _SnappyAlbumPagePhysics applyTo(ScrollPhysics? ancestor) {
     return _SnappyAlbumPagePhysics(
-      currentIndexProvider: currentIndexProvider,
+      dragStartPixelsProvider: dragStartPixelsProvider,
       parent: buildParent(ancestor),
     );
   }
 
   @override
   SpringDescription get spring => SpringDescription.withDampingRatio(
-        mass: 0.55,
-        stiffness: 620.0,
+        mass: 0.50,
+        stiffness: 680.0,
         ratio: 1.0,
       );
 
@@ -54,29 +57,36 @@ class _SnappyAlbumPagePhysics extends PageScrollPhysics {
     return const Tolerance(
       distance: 1.0,
       time: 0.01,
-      velocity: 25.0,
+      velocity: 20.0,
     );
   }
 
   @override
-  double get minFlingDistance => 8.0;
+  double get minFlingDistance => 4.0;
 
   @override
-  double get minFlingVelocity => 140.0;
+  double get minFlingVelocity => 45.0;
 
   double _resolveTargetPixels(ScrollMetrics position, double velocity) {
     final viewport = position.viewportDimension;
     if (viewport <= 0) return position.pixels;
     final page = position.pixels / viewport;
     final maxPage = (position.maxScrollExtent / viewport).roundToDouble();
-    final basePage = (currentIndexProvider?.call() ?? page.round()).toDouble();
-    final delta = page - basePage;
+    final startPx = dragStartPixelsProvider?.call();
+    final basePage = startPx != null
+        ? (startPx / viewport).roundToDouble()
+        : page.roundToDouble();
+    final dragDelta = startPx != null
+        ? (position.pixels - startPx) / viewport
+        : (page - basePage);
 
-    const double switchThreshold = 0.14;
-    const double flickVelocity = 140.0;
+    // Super responsive: a gentle thumb flick (45 px/s) OR just ~8% drag (~30px)
+    // immediately glides to the next/previous album!
+    const double switchThreshold = 0.08;
+    const double flickVelocity = 45.0;
 
     double targetPage;
-    if (delta.abs() >= 0.85) {
+    if (dragDelta.abs() >= 0.85) {
       if (velocity > flickVelocity) {
         targetPage = page.ceilToDouble();
       } else if (velocity < -flickVelocity) {
@@ -85,15 +95,15 @@ class _SnappyAlbumPagePhysics extends PageScrollPhysics {
         targetPage = page.roundToDouble();
       }
     } else if (velocity > flickVelocity) {
-      targetPage = (delta < -0.04) ? basePage : (basePage + 1.0);
+      targetPage = (dragDelta < -0.04) ? basePage : (basePage + 1.0);
     } else if (velocity < -flickVelocity) {
-      targetPage = (delta > 0.04) ? basePage : (basePage - 1.0);
-    } else if (delta >= switchThreshold) {
+      targetPage = (dragDelta > 0.04) ? basePage : (basePage - 1.0);
+    } else if (dragDelta >= switchThreshold) {
       targetPage = basePage + 1.0;
-    } else if (delta <= -switchThreshold) {
+    } else if (dragDelta <= -switchThreshold) {
       targetPage = basePage - 1.0;
     } else {
-      targetPage = basePage;
+      targetPage = page.roundToDouble();
     }
 
     return targetPage.clamp(0.0, maxPage) * viewport;
@@ -156,10 +166,17 @@ class PixivAlbumViewer extends StatefulWidget {
 class _PixivAlbumViewerState extends State<PixivAlbumViewer> {
   late final List<String> _albumOrder;
   late final PageController _pageController;
+  late final ValueNotifier<int> _currentAlbumIndexNotifier;
   late int _currentAlbumIndex;
+  double? _dragStartPixels;
 
   final Map<int, ScrollController> _scrollControllers = {};
   final Map<int, GlobalKey> _viewportKeys = {};
+
+  // Memoized grouping cache so horizontal album slides do ZERO O(N) scan/sort!
+  List<ManagedFile>? _cachedFilesRef;
+  Map<String, List<ManagedFile>> _cachedAlbumsMap = const {};
+  List<String> _cachedActiveAlbums = const [];
 
   _AlbumReaderMode _mode = _AlbumReaderMode.pixivScroll;
   bool _isSelectionMode = false;
@@ -187,12 +204,14 @@ class _PixivAlbumViewerState extends State<PixivAlbumViewer> {
       if (idx < 0) idx = 0;
     }
     _currentAlbumIndex = idx;
+    _currentAlbumIndexNotifier = ValueNotifier<int>(idx);
     _pageController = PageController(initialPage: _currentAlbumIndex);
   }
 
   @override
   void dispose() {
     _stopAutoScroll();
+    _currentAlbumIndexNotifier.dispose();
     _pageController.dispose();
     for (final c in _scrollControllers.values) {
       c.dispose();
@@ -208,8 +227,12 @@ class _PixivAlbumViewerState extends State<PixivAlbumViewer> {
       _viewportKeys.putIfAbsent(albumIdx, GlobalKey.new);
 
   Map<String, List<ManagedFile>> _resolveAllAlbumsMap() {
+    final allFiles = widget.manager.managedFiles;
+    if (identical(_cachedFilesRef, allFiles)) {
+      return _cachedAlbumsMap;
+    }
     final grouped = <String, List<ManagedFile>>{};
-    for (final f in widget.manager.managedFiles) {
+    for (final f in allFiles) {
       if (f.platformFolder == widget.platformFolder &&
           f.creatorFolder == widget.creatorFolder) {
         grouped.putIfAbsent(f.effectiveAlbumName, () => []).add(f);
@@ -218,6 +241,11 @@ class _PixivAlbumViewerState extends State<PixivAlbumViewer> {
     for (final pages in grouped.values) {
       pages.sort((a, b) => naturalCompareFileNames(a.fileName, b.fileName));
     }
+    _cachedFilesRef = allFiles;
+    _cachedAlbumsMap = grouped;
+    _cachedActiveAlbums = _albumOrder
+        .where((name) => (grouped[name]?.isNotEmpty ?? false))
+        .toList(growable: false);
     return grouped;
   }
 
@@ -377,13 +405,12 @@ class _PixivAlbumViewerState extends State<PixivAlbumViewer> {
       listenable: widget.manager,
       builder: (context, _) {
         final albumsMap = _resolveAllAlbumsMap();
-        final activeAlbums = _albumOrder
-            .where((name) => (albumsMap[name]?.isNotEmpty ?? false))
-            .toList(growable: false);
+        final activeAlbums = _cachedActiveAlbums;
 
         if (activeAlbums.isNotEmpty &&
             _currentAlbumIndex >= activeAlbums.length) {
           _currentAlbumIndex = activeAlbums.length - 1;
+          _currentAlbumIndexNotifier.value = _currentAlbumIndex;
           WidgetsBinding.instance.addPostFrameCallback((_) {
             if (mounted && _pageController.hasClients) {
               _pageController.jumpToPage(_currentAlbumIndex);
@@ -414,9 +441,6 @@ class _PixivAlbumViewerState extends State<PixivAlbumViewer> {
             pages.isNotEmpty && selectedPages.length == pages.length;
 
         final hasMultipleAlbums = activeAlbums.length > 1;
-        final subtitleText = hasMultipleAlbums
-            ? '${widget.creatorFolder} • ${_currentAlbumIndex + 1}/${activeAlbums.length} • ${pages.length} hal'
-            : '${widget.creatorFolder} • ${pages.length} halaman';
 
         return PopScope(
           canPop: !_isSelectionMode,
@@ -462,30 +486,47 @@ class _PixivAlbumViewerState extends State<PixivAlbumViewer> {
                     ],
                   )
                 : AppBar(
-                    title: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          currentAlbumName,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(
-                            fontSize: 15.5,
-                            fontWeight: FontWeight.w800,
-                          ),
-                        ),
-                        Text(
-                          subtitleText,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: theme.textTheme.labelSmall?.copyWith(
-                            color: theme.colorScheme.onSurfaceVariant,
-                          ),
-                        ),
-                      ],
+                    title: ValueListenableBuilder<int>(
+                      valueListenable: _currentAlbumIndexNotifier,
+                      builder: (context, idx, _) {
+                        final safeIdx = activeAlbums.isEmpty
+                            ? 0
+                            : idx.clamp(0, activeAlbums.length - 1);
+                        final title = activeAlbums.isNotEmpty
+                            ? activeAlbums[safeIdx]
+                            : widget.albumName;
+                        final albumPageCount = activeAlbums.isNotEmpty
+                            ? (albumsMap[title]?.length ?? 0)
+                            : 0;
+                        final sub = hasMultipleAlbums
+                            ? '${widget.creatorFolder} • ${safeIdx + 1}/${activeAlbums.length} • $albumPageCount hal'
+                            : '${widget.creatorFolder} • $albumPageCount halaman';
+                        return Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              title,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                fontSize: 15.5,
+                                fontWeight: FontWeight.w800,
+                              ),
+                            ),
+                            Text(
+                              sub,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: theme.textTheme.labelSmall?.copyWith(
+                                color: theme.colorScheme.onSurfaceVariant,
+                              ),
+                            ),
+                          ],
+                        );
+                      },
                     ),
                     actions: [
-                      if (pages.isNotEmpty)
+                      if (activeAlbums.isNotEmpty)
                         IconButton(
                           onPressed: () {
                             HapticFeedback.selectionClick();
@@ -500,42 +541,70 @@ class _PixivAlbumViewerState extends State<PixivAlbumViewer> {
                 ? const Center(child: Text('Album kosong atau sudah dihapus.'))
                 : Stack(
                     children: [
-                      PageView.builder(
-                        controller: _pageController,
-                        allowImplicitScrolling: true,
-                        itemCount: activeAlbums.length,
-                        physics: _isSelectionMode
-                            ? const NeverScrollableScrollPhysics()
-                            : _SnappyAlbumPagePhysics(
-                                currentIndexProvider: () => _currentAlbumIndex,
-                              ),
-                        onPageChanged: (newIndex) {
-                          _stopAutoScroll();
-                          setState(() {
+                      NotificationListener<ScrollNotification>(
+                        onNotification: (notification) {
+                          if (notification.depth == 0) {
+                            if (notification is ScrollStartNotification &&
+                                notification.dragDetails != null) {
+                              _dragStartPixels = notification.metrics.pixels;
+                            } else if (notification is ScrollEndNotification) {
+                              _dragStartPixels = null;
+                            }
+                          }
+                          return false;
+                        },
+                        child: PageView.builder(
+                          controller: _pageController,
+                          // Respond from touchdown so quick thumb flicks have zero dead-zone lag!
+                          dragStartBehavior: DragStartBehavior.down,
+                          // Strictly do NOT pre-render offscreen neighbor albums so
+                          // sliding stays buttery-smooth with minimal RAM & GPU load.
+                          allowImplicitScrolling: false,
+                          itemCount: activeAlbums.length,
+                          physics: _isSelectionMode
+                              ? const NeverScrollableScrollPhysics()
+                              : _SnappyAlbumPagePhysics(
+                                  dragStartPixelsProvider: () =>
+                                      _dragStartPixels,
+                                ),
+                          onPageChanged: (newIndex) {
+                            _stopAutoScroll();
                             _currentAlbumIndex = newIndex;
                             _dragStartIndex = null;
                             _dragLastIndex = null;
-                          });
-                        },
-                        itemBuilder: (context, albumIdx) {
-                          final albumTitle = activeAlbums[albumIdx];
-                          final albumPages =
-                              albumsMap[albumTitle] ?? const <ManagedFile>[];
-                          final privateCount =
-                              albumPages.where((p) => p.isPrivate).length;
-                          final publicCount = albumPages.length - privateCount;
+                            if (newIndex >= 0 && newIndex < activeAlbums.length) {
+                              _currentPages =
+                                  albumsMap[activeAlbums[newIndex]] ??
+                                      const <ManagedFile>[];
+                            }
+                            // Update ONLY the AppBar title via ValueNotifier —
+                            // ZERO setState rebuild of PageView mid-slide!
+                            _currentAlbumIndexNotifier.value = newIndex;
+                          },
+                          itemBuilder: (context, albumIdx) {
+                            final albumTitle = activeAlbums[albumIdx];
+                            final albumPages =
+                                albumsMap[albumTitle] ?? const <ManagedFile>[];
+                            final privateCount =
+                                albumPages.where((p) => p.isPrivate).length;
+                            final publicCount =
+                                albumPages.length - privateCount;
 
-                          return GestureDetector(
-                            key: _viewportKeyFor(albumIdx),
-                            behavior: HitTestBehavior.translucent,
-                            onLongPressStart: _onDragStart,
-                            onLongPressMoveUpdate: _onDragMove,
-                            onLongPressEnd: _onDragEnd,
-                            child: CustomScrollView(
-                              controller: _controllerFor(albumIdx),
-                              scrollCacheExtent:
-                                  const ScrollCacheExtent.pixels(600),
-                              slivers: [
+                            return RepaintBoundary(
+                              key: ValueKey<String>(albumTitle),
+                              child: GestureDetector(
+                                key: _viewportKeyFor(albumIdx),
+                                behavior: HitTestBehavior.translucent,
+                                onLongPressStart: _onDragStart,
+                                onLongPressMoveUpdate: _onDragMove,
+                                onLongPressEnd: _onDragEnd,
+                                child: CustomScrollView(
+                                  controller: _controllerFor(albumIdx),
+                                  // Strict zero off-screen pre-render: photos not yet
+                                  // visible on screen are NOT rendered or decoded!
+                                  scrollCacheExtent:
+                                      const ScrollCacheExtent.pixels(0),
+                                  slivers: [
                                 // Privacy Status + 3-Mode Reader Switcher Banner
                                 if (!_isSelectionMode)
                                   SliverToBoxAdapter(
@@ -609,11 +678,13 @@ class _PixivAlbumViewerState extends State<PixivAlbumViewer> {
                                   _buildGalleryGridSliver(albumPages)
                                 else
                                   _buildRowListSliver(albumPages),
-                              ],
+                                ],
+                              ),
                             ),
                           );
                         },
                       ),
+                    ),
 
                       // Floating Multi-Select Batch Bar (Unlock, Lock, Share, Delete)
                       AnimatedPositioned(
@@ -651,165 +722,183 @@ class _PixivAlbumViewerState extends State<PixivAlbumViewer> {
   Widget _buildPixivVerticalScrollSliver(List<ManagedFile> pages) {
     final theme = Theme.of(context);
     final bottomPad = _isSelectionMode ? 104.0 : 32.0;
+    final screenPxWidth =
+        (MediaQuery.sizeOf(context).width * MediaQuery.devicePixelRatioOf(context))
+            .round()
+            .clamp(540, 900);
 
     return SliverPadding(
       padding: EdgeInsets.fromLTRB(0, 2, 0, bottomPad),
-      sliver: SliverList.separated(
-        itemCount: pages.length,
-        separatorBuilder: (_, _) => const SizedBox(height: 8),
-        itemBuilder: (context, index) {
-          final page = pages[index];
-          final isSelected = _selectedKeys.contains(page.uniqueKey);
+      sliver: SliverList(
+        delegate: SliverChildBuilderDelegate(
+          (context, index) {
+            final page = pages[index];
+            final isSelected = _selectedKeys.contains(page.uniqueKey);
 
-          return MetaData(
-            metaData: _PageHitMeta(index),
-            behavior: HitTestBehavior.opaque,
-            child: GestureDetector(
-              onTap: () {
-                if (_isSelectionMode) {
-                  _togglePage(page);
-                } else if (page.mediaKind == MediaKind.video) {
-                  widget.manager.openManagedFile(page);
-                } else {
-                  _openFullscreenLightbox(pages, index);
-                }
-              },
-              child: Container(
-                margin: const EdgeInsets.symmetric(horizontal: 6),
-                decoration: BoxDecoration(
-                  borderRadius: BorderRadius.circular(12),
-                  border: Border.all(
-                    color: isSelected
-                        ? theme.colorScheme.primary
-                        : theme.colorScheme.outlineVariant.withValues(alpha: 0.25),
-                    width: isSelected ? 2.4 : 0.8,
-                  ),
-                ),
-                clipBehavior: Clip.antiAlias,
-                child: Stack(
-                  children: [
-                    page.mediaKind == MediaKind.video
-                        ? Container(
-                            height: 240,
-                            width: double.infinity,
-                            decoration: BoxDecoration(
-                              gradient: LinearGradient(
-                                begin: Alignment.topLeft,
-                                end: Alignment.bottomRight,
-                                colors: [
-                                  const Color(0xFF0096FA)
-                                      .withValues(alpha: 0.35),
-                                  const Color(0xFF0F172A),
-                                ],
-                              ),
-                            ),
-                            child: Column(
-                              mainAxisAlignment: MainAxisAlignment.center,
-                              children: [
-                                const Icon(
-                                  Icons.play_circle_filled_rounded,
-                                  size: 64,
-                                  color: Colors.white,
+            return Padding(
+              padding: EdgeInsets.only(bottom: index == pages.length - 1 ? 0 : 8),
+              child: MetaData(
+                metaData: _PageHitMeta(index),
+                behavior: HitTestBehavior.opaque,
+                child: GestureDetector(
+                  onTap: () {
+                    if (_isSelectionMode) {
+                      _togglePage(page);
+                    } else if (page.mediaKind == MediaKind.video) {
+                      widget.manager.openManagedFile(page);
+                    } else {
+                      _openFullscreenLightbox(pages, index);
+                    }
+                  },
+                  child: Container(
+                    margin: const EdgeInsets.symmetric(horizontal: 6),
+                    decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(
+                        color: isSelected
+                            ? theme.colorScheme.primary
+                            : theme.colorScheme.outlineVariant
+                                .withValues(alpha: 0.25),
+                        width: isSelected ? 2.4 : 0.8,
+                      ),
+                    ),
+                    clipBehavior: Clip.antiAlias,
+                    child: Stack(
+                      children: [
+                        page.mediaKind == MediaKind.video
+                            ? Container(
+                                height: 240,
+                                width: double.infinity,
+                                decoration: BoxDecoration(
+                                  gradient: LinearGradient(
+                                    begin: Alignment.topLeft,
+                                    end: Alignment.bottomRight,
+                                    colors: [
+                                      const Color(0xFF0096FA)
+                                          .withValues(alpha: 0.35),
+                                      const Color(0xFF0F172A),
+                                    ],
+                                  ),
                                 ),
-                                const SizedBox(height: 10),
-                                const Text(
-                                  'Animasi Ugoira (MP4)',
-                                  style: TextStyle(
+                                child: Column(
+                                  mainAxisAlignment: MainAxisAlignment.center,
+                                  children: [
+                                    const Icon(
+                                      Icons.play_circle_filled_rounded,
+                                      size: 64,
+                                      color: Colors.white,
+                                    ),
+                                    const SizedBox(height: 10),
+                                    const Text(
+                                      'Animasi Ugoira (MP4)',
+                                      style: TextStyle(
+                                        color: Colors.white,
+                                        fontSize: 15,
+                                        fontWeight: FontWeight.w800,
+                                      ),
+                                    ),
+                                    const SizedBox(height: 4),
+                                    Text(
+                                      'Ketuk untuk memutar • ${formatBytes(page.fileSize)}',
+                                      style: const TextStyle(
+                                        color: Colors.white70,
+                                        fontSize: 12,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              )
+                            : ConstrainedBox(
+                                constraints:
+                                    const BoxConstraints(minHeight: 180),
+                                child: Image.file(
+                                  File(page.savedPath),
+                                  width: double.infinity,
+                                  cacheWidth: screenPxWidth,
+                                  filterQuality: FilterQuality.low,
+                                  gaplessPlayback: true,
+                                  fit: BoxFit.fitWidth,
+                                  errorBuilder: (_, _, _) => Container(
+                                    height: 220,
+                                    color: theme
+                                        .colorScheme.surfaceContainerHighest,
+                                    alignment: Alignment.center,
+                                    child: const Icon(
+                                      Icons.broken_image_outlined,
+                                      size: 42,
+                                    ),
+                                  ),
+                                ),
+                              ),
+
+                        if (isSelected)
+                          Positioned.fill(
+                            child: Container(
+                              color: theme.colorScheme.primary
+                                  .withValues(alpha: 0.18),
+                            ),
+                          ),
+
+                        // Page Number + Privacy pill on top-left
+                        Positioned(
+                          top: 8,
+                          left: 8,
+                          child: Row(
+                            children: [
+                              Container(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 8,
+                                  vertical: 4,
+                                ),
+                                decoration: BoxDecoration(
+                                  color: Colors.black.withValues(alpha: 0.68),
+                                  borderRadius: BorderRadius.circular(8),
+                                ),
+                                child: Text(
+                                  '${index + 1} / ${pages.length}',
+                                  style: const TextStyle(
                                     color: Colors.white,
-                                    fontSize: 15,
+                                    fontSize: 11,
                                     fontWeight: FontWeight.w800,
                                   ),
                                 ),
-                                const SizedBox(height: 4),
-                                Text(
-                                  'Ketuk untuk memutar • ${formatBytes(page.fileSize)}',
-                                  style: const TextStyle(
-                                    color: Colors.white70,
-                                    fontSize: 12,
-                                  ),
-                                ),
-                              ],
-                            ),
+                              ),
+                              const SizedBox(width: 6),
+                              _PrivacyMiniBadge(isPrivate: page.isPrivate),
+                            ],
+                          ),
+                        ),
+
+                        // Top-right: selection circle or 3-dot menu
+                        if (_isSelectionMode)
+                          Positioned(
+                            top: 8,
+                            right: 8,
+                            child: _PageSelectCircle(selected: isSelected),
                           )
-                        : ConstrainedBox(
-                            constraints: const BoxConstraints(minHeight: 180),
-                            child: Image.file(
-                              File(page.savedPath),
-                              width: double.infinity,
-                              cacheWidth: 1200,
-                              fit: BoxFit.fitWidth,
-                              errorBuilder: (_, _, _) => Container(
-                                height: 220,
-                                color:
-                                    theme.colorScheme.surfaceContainerHighest,
-                                alignment: Alignment.center,
-                                child: const Icon(Icons.broken_image_outlined,
-                                    size: 42),
-                              ),
+                        else
+                          Positioned(
+                            top: 6,
+                            right: 6,
+                            child: _PagePopupMenu(
+                              isPrivate: page.isPrivate,
+                              isImage: page.mediaKind == MediaKind.image,
+                              overlay: true,
+                              onSelected: (act) =>
+                                  _handlePageAction(act, page, pages, index),
                             ),
                           ),
-
-                    if (isSelected)
-                      Positioned.fill(
-                        child: Container(
-                          color: theme.colorScheme.primary.withValues(alpha: 0.18),
-                        ),
-                      ),
-
-                    // Page Number + Privacy pill on top-left
-                    Positioned(
-                      top: 8,
-                      left: 8,
-                      child: Row(
-                        children: [
-                          Container(
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 8,
-                              vertical: 4,
-                            ),
-                            decoration: BoxDecoration(
-                              color: Colors.black.withValues(alpha: 0.68),
-                              borderRadius: BorderRadius.circular(8),
-                            ),
-                            child: Text(
-                              '${index + 1} / ${pages.length}',
-                              style: const TextStyle(
-                                color: Colors.white,
-                                fontSize: 11,
-                                fontWeight: FontWeight.w800,
-                              ),
-                            ),
-                          ),
-                          const SizedBox(width: 6),
-                          _PrivacyMiniBadge(isPrivate: page.isPrivate),
-                        ],
-                      ),
+                      ],
                     ),
-
-                    // Top-right: selection circle or 3-dot menu
-                    if (_isSelectionMode)
-                      Positioned(
-                        top: 8,
-                        right: 8,
-                        child: _PageSelectCircle(selected: isSelected),
-                      )
-                    else
-                      Positioned(
-                        top: 6,
-                        right: 6,
-                        child: _PagePopupMenu(
-                          isPrivate: page.isPrivate,
-                          isImage: page.mediaKind == MediaKind.image,
-                          overlay: true,
-                          onSelected: (act) => _handlePageAction(act, page, pages, index),
-                        ),
-                      ),
-                  ],
+                  ),
                 ),
               ),
-            ),
-          );
-        },
+            );
+          },
+          childCount: pages.length,
+          addAutomaticKeepAlives: false,
+          addRepaintBoundaries: true,
+        ),
       ),
     );
   }

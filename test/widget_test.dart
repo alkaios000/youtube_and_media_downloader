@@ -867,17 +867,26 @@ void main() {
     await tester.pump();
     expect(find.text('Album Satu'), findsOneWidget);
 
-    // Slow short drag of ONLY 20% of screen width (default Flutter PageView needs >50%!)
+    // Quick tiny flick of ONLY 10% of screen width ("slide dikit lalu lepas / lempar")
     final width = tester.getSize(find.byType(PageView)).width;
-    await tester.timedDrag(
+    await tester.fling(
       find.byType(PageView),
-      Offset(-width * 0.20, 0),
-      const Duration(milliseconds: 450),
+      Offset(-width * 0.10, 0),
+      260,
     );
     await tester.pumpAndSettle();
 
     // Must immediately land on Album Dua!
     expect(find.text('Album Dua'), findsOneWidget);
+
+    // And a slow tiny 10% drag back right also switches cleanly back to Album Satu!
+    await tester.timedDrag(
+      find.byType(PageView),
+      Offset(width * 0.11, 0),
+      const Duration(milliseconds: 350),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Album Satu'), findsOneWidget);
 
     manager.dispose();
   });

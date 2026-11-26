@@ -1,6 +1,7 @@
 import 'dart:io';
 import 'dart:math' as math;
 
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -37,6 +38,7 @@ class _FileGalleryViewerState extends State<FileGalleryViewer> {
   late final PageController _pageController;
   late List<ManagedFile> _images;
   late int _currentIndex;
+  double? _dragStartPixels;
   bool _showChrome = true;
   bool _isZoomed = false;
   bool _togglingPrivacy = false;
@@ -84,34 +86,51 @@ class _FileGalleryViewerState extends State<FileGalleryViewer> {
       body: Stack(
         children: [
           // Full-viewport swipeable & unclipped zoomable pager
-          PageView.builder(
-            controller: _pageController,
-            allowImplicitScrolling: true,
-            physics: _isZoomed
-                ? const NeverScrollableScrollPhysics()
-                : _SnappyPhotoPagePhysics(
-                    currentIndexProvider: () => _currentIndex,
+          NotificationListener<ScrollNotification>(
+            onNotification: (notification) {
+              if (notification.depth == 0) {
+                if (notification is ScrollStartNotification &&
+                    notification.dragDetails != null) {
+                  _dragStartPixels = notification.metrics.pixels;
+                } else if (notification is ScrollEndNotification) {
+                  _dragStartPixels = null;
+                }
+              }
+              return false;
+            },
+            child: PageView.builder(
+              controller: _pageController,
+              dragStartBehavior: DragStartBehavior.down,
+              // Do not eagerly decode offscreen neighbors so every swipe stays light & smooth
+              allowImplicitScrolling: false,
+              physics: _isZoomed
+                  ? const NeverScrollableScrollPhysics()
+                  : _SnappyPhotoPagePhysics(
+                      dragStartPixelsProvider: () => _dragStartPixels,
+                    ),
+              itemCount: _images.length,
+              onPageChanged: (idx) {
+                setState(() {
+                  _currentIndex = idx;
+                  _isZoomed = false;
+                });
+              },
+              itemBuilder: (context, index) {
+                final img = _images[index];
+                return RepaintBoundary(
+                  key: ValueKey(img.uniqueKey),
+                  child: _ZoomablePhotoPage(
+                    filePath: img.savedPath,
+                    onTap: () => setState(() => _showChrome = !_showChrome),
+                    onZoomStateChanged: (zoomed) {
+                      if (index == _currentIndex && zoomed != _isZoomed) {
+                        setState(() => _isZoomed = zoomed);
+                      }
+                    },
                   ),
-            itemCount: _images.length,
-            onPageChanged: (idx) {
-              setState(() {
-                _currentIndex = idx;
-                _isZoomed = false;
-              });
-            },
-            itemBuilder: (context, index) {
-              final img = _images[index];
-              return _ZoomablePhotoPage(
-                key: ValueKey(img.uniqueKey),
-                filePath: img.savedPath,
-                onTap: () => setState(() => _showChrome = !_showChrome),
-                onZoomStateChanged: (zoomed) {
-                  if (index == _currentIndex && zoomed != _isZoomed) {
-                    setState(() => _isZoomed = zoomed);
-                  }
-                },
-              );
-            },
+                );
+              },
+            ),
           ),
 
           // Top bar
@@ -403,7 +422,6 @@ class _ZoomablePhotoPage extends StatefulWidget {
   final ValueChanged<bool> onZoomStateChanged;
 
   const _ZoomablePhotoPage({
-    super.key,
     required this.filePath,
     required this.onTap,
     required this.onZoomStateChanged,
@@ -500,7 +518,9 @@ class _ZoomablePhotoPageState extends State<_ZoomablePhotoPage>
           child: Center(
             child: Image.file(
               File(widget.filePath),
-              cacheWidth: 2048,
+              cacheWidth: 1280,
+              filterQuality: FilterQuality.low,
+              gaplessPlayback: true,
               fit: BoxFit.contain,
               errorBuilder: (_, _, _) => const Column(
                 mainAxisSize: MainAxisSize.min,
@@ -591,25 +611,25 @@ class _ViewerActionBtn extends StatelessWidget {
 }
 
 class _SnappyPhotoPagePhysics extends PageScrollPhysics {
-  final int Function()? currentIndexProvider;
+  final double? Function()? dragStartPixelsProvider;
 
   const _SnappyPhotoPagePhysics({
-    this.currentIndexProvider,
+    this.dragStartPixelsProvider,
     super.parent,
   });
 
   @override
   _SnappyPhotoPagePhysics applyTo(ScrollPhysics? ancestor) {
     return _SnappyPhotoPagePhysics(
-      currentIndexProvider: currentIndexProvider,
+      dragStartPixelsProvider: dragStartPixelsProvider,
       parent: buildParent(ancestor),
     );
   }
 
   @override
   SpringDescription get spring => SpringDescription.withDampingRatio(
-        mass: 0.55,
-        stiffness: 620.0,
+        mass: 0.50,
+        stiffness: 680.0,
         ratio: 1.0,
       );
 
@@ -618,29 +638,34 @@ class _SnappyPhotoPagePhysics extends PageScrollPhysics {
     return const Tolerance(
       distance: 1.0,
       time: 0.01,
-      velocity: 25.0,
+      velocity: 20.0,
     );
   }
 
   @override
-  double get minFlingDistance => 8.0;
+  double get minFlingDistance => 4.0;
 
   @override
-  double get minFlingVelocity => 140.0;
+  double get minFlingVelocity => 45.0;
 
   double _resolveTargetPixels(ScrollMetrics position, double velocity) {
     final viewport = position.viewportDimension;
     if (viewport <= 0) return position.pixels;
     final page = position.pixels / viewport;
     final maxPage = (position.maxScrollExtent / viewport).roundToDouble();
-    final basePage = (currentIndexProvider?.call() ?? page.round()).toDouble();
-    final delta = page - basePage;
+    final startPx = dragStartPixelsProvider?.call();
+    final basePage = startPx != null
+        ? (startPx / viewport).roundToDouble()
+        : page.roundToDouble();
+    final dragDelta = startPx != null
+        ? (position.pixels - startPx) / viewport
+        : (page - basePage);
 
-    const double switchThreshold = 0.14;
-    const double flickVelocity = 140.0;
+    const double switchThreshold = 0.08;
+    const double flickVelocity = 45.0;
 
     double targetPage;
-    if (delta.abs() >= 0.85) {
+    if (dragDelta.abs() >= 0.85) {
       if (velocity > flickVelocity) {
         targetPage = page.ceilToDouble();
       } else if (velocity < -flickVelocity) {
@@ -649,15 +674,15 @@ class _SnappyPhotoPagePhysics extends PageScrollPhysics {
         targetPage = page.roundToDouble();
       }
     } else if (velocity > flickVelocity) {
-      targetPage = (delta < -0.04) ? basePage : (basePage + 1.0);
+      targetPage = (dragDelta < -0.04) ? basePage : (basePage + 1.0);
     } else if (velocity < -flickVelocity) {
-      targetPage = (delta > 0.04) ? basePage : (basePage - 1.0);
-    } else if (delta >= switchThreshold) {
+      targetPage = (dragDelta > 0.04) ? basePage : (basePage - 1.0);
+    } else if (dragDelta >= switchThreshold) {
       targetPage = basePage + 1.0;
-    } else if (delta <= -switchThreshold) {
+    } else if (dragDelta <= -switchThreshold) {
       targetPage = basePage - 1.0;
     } else {
-      targetPage = basePage;
+      targetPage = page.roundToDouble();
     }
 
     return targetPage.clamp(0.0, maxPage) * viewport;
