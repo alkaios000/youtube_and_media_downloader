@@ -388,6 +388,33 @@ class MainActivity : FlutterActivity() {
                         result.success(bridge.cancelDownload(taskId))
                     }
 
+                    "convertUgoiraZip" -> {
+                        val zipPath = call.argument<String>("zipPath")
+                        val rawFrames = call.argument<List<Map<String, Any?>>>("frames").orEmpty()
+                        val outputFormat = call.argument<String>("outputFormat") ?: "mp4"
+                        val fileName = call.argument<String>("fileName") ?: "ugoira.mp4"
+                        val platformFolder = call.argument<String>("platformFolder") ?: "Pixiv"
+                        val creatorFolder = call.argument<String>("creatorFolder") ?: "Umum"
+                        val albumFolder = call.argument<String>("albumFolder")
+                        val isPrivate = call.argument<Boolean>("isPrivate") ?: true
+                        if (zipPath.isNullOrBlank()) {
+                            result.error("INVALID_ARGS", "zipPath kosong", null)
+                            return@setMethodCallHandler
+                        }
+                        bridge.convertUgoiraZip(
+                            zipPath = zipPath,
+                            frames = rawFrames,
+                            outputFormat = outputFormat,
+                            fileName = fileName,
+                            platformFolder = platformFolder,
+                            creatorFolder = creatorFolder,
+                            albumFolder = albumFolder,
+                            isPrivate = isPrivate,
+                            onSuccess = { saved -> result.success(saved) },
+                            onError = { code, message -> result.error(code, message, null) },
+                        )
+                    }
+
                     "saveFileToDownloads" -> {
                         val sourcePath = call.argument<String>("sourcePath")
                         val fileName = call.argument<String>("fileName") ?: "media.mp4"
@@ -416,6 +443,19 @@ class MainActivity : FlutterActivity() {
                     "listManagedFiles" -> {
                         bridge.listManagedFiles(
                             onSuccess = { files -> result.success(files) },
+                            onError = { code, message -> result.error(code, message, null) },
+                        )
+                    }
+
+                    "setWallpaper" -> {
+                        val filePath = call.argument<String>("filePath")
+                        val contentUri = call.argument<String>("contentUri")
+                        val target = call.argument<String>("target") ?: "crop"
+                        bridge.setWallpaper(
+                            filePath = filePath,
+                            contentUri = contentUri,
+                            target = target,
+                            onSuccess = { ok -> result.success(ok) },
                             onError = { code, message -> result.error(code, message, null) },
                         )
                     }

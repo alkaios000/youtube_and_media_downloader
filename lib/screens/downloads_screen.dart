@@ -10,7 +10,9 @@ import '../widgets/download_tile.dart';
 enum _LibraryFilter { all, video, audio, image }
 
 /// Whether [item] belongs to the "Berjalan / Loading" section of Riwayat.
-bool isLoadingHistoryItem(DownloadItem item) => item.isActive || item.isPaused;
+/// Failed downloads stay at the very bottom of Loading (never inside Selesai).
+bool isLoadingHistoryItem(DownloadItem item) =>
+    item.isActive || item.isPaused || item.status == DownloadStatus.failed;
 
 int _loadingPriority(DownloadStatus status) {
   switch (status) {
@@ -22,10 +24,11 @@ int _loadingPriority(DownloadStatus status) {
       return 2;
     case DownloadStatus.paused:
       return 3;
-    case DownloadStatus.completed:
     case DownloadStatus.failed:
-    case DownloadStatus.cancelled:
       return 4;
+    case DownloadStatus.completed:
+    case DownloadStatus.cancelled:
+      return 5;
   }
 }
 
@@ -60,6 +63,7 @@ class DownloadsScreen extends StatefulWidget {
 }
 
 class _DownloadsScreenState extends State<DownloadsScreen> {
+  final ScrollController _scrollController = ScrollController();
   _LibraryFilter _filter = _LibraryFilter.all;
   String _search = '';
   late int _sectionIndex;
@@ -87,6 +91,7 @@ class _DownloadsScreenState extends State<DownloadsScreen> {
   @override
   void dispose() {
     widget.sectionNotifier?.removeListener(_onExternalSectionChanged);
+    _scrollController.dispose();
     super.dispose();
   }
 
@@ -97,12 +102,32 @@ class _DownloadsScreenState extends State<DownloadsScreen> {
     }
   }
 
+  void _scrollToTop({bool animate = true}) {
+    if (!_scrollController.hasClients) return;
+    if (_scrollController.offset <= 0) return;
+    if (animate) {
+      _scrollController.animateTo(
+        0,
+        duration: const Duration(milliseconds: 260),
+        curve: Curves.easeOutCubic,
+      );
+    } else {
+      _scrollController.jumpTo(0);
+    }
+  }
+
   void _selectSection(int next) {
-    if (_sectionIndex == next) return;
+    if (_sectionIndex == next) {
+      _scrollToTop(animate: true);
+      return;
+    }
     setState(() => _sectionIndex = next);
     if (widget.sectionNotifier != null && widget.sectionNotifier!.value != next) {
       widget.sectionNotifier!.value = next;
     }
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _scrollToTop(animate: false);
+    });
   }
 
   bool _matchesFilterAndSearch(DownloadItem item) {
@@ -146,6 +171,9 @@ class _DownloadsScreenState extends State<DownloadsScreen> {
     final pausedItems = filteredLoading
         .where((i) => i.status == DownloadStatus.paused)
         .toList(growable: false);
+    final failedItems = filteredLoading
+        .where((i) => i.status == DownloadStatus.failed)
+        .toList(growable: false);
 
     final activeCount = widget.manager.activeDownloads.length;
     final pausedCount = widget.manager.pausedDownloads.length;
@@ -154,9 +182,16 @@ class _DownloadsScreenState extends State<DownloadsScreen> {
     final currentEmpty =
         isLoadingTab ? filteredLoading.isEmpty : filteredFinished.isEmpty;
 
-    return CustomScrollView(
-      keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
-      slivers: [
+    return Scrollbar(
+      controller: _scrollController,
+      interactive: true,
+      thumbVisibility: true,
+      thickness: 4.5,
+      radius: const Radius.circular(8),
+      child: CustomScrollView(
+        controller: _scrollController,
+        keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
+        slivers: [
         SliverAppBar(
           floating: true,
           title: const Text('Riwayat Unduhan'),
@@ -184,31 +219,22 @@ class _DownloadsScreenState extends State<DownloadsScreen> {
               ),
           ],
         ),
+        SliverPersistentHeader(
+          pinned: true,
+          delegate: _StickyHistoryTabsDelegate(
+            backgroundColor: theme.scaffoldBackgroundColor,
+            loadingCount: allLoading.length,
+            finishedCount: allFinished.length,
+            selectedIndex: _sectionIndex,
+            onTapSection: _selectSection,
+          ),
+        ),
         SliverToBoxAdapter(
           child: Padding(
             padding: const EdgeInsets.fromLTRB(16, 4, 16, 12),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                // 2-Section Switcher: Loading/Berjalan vs Selesai
-                SegmentedButton<int>(
-                  showSelectedIcon: false,
-                  segments: [
-                    ButtonSegment<int>(
-                      value: 0,
-                      icon: const Icon(Icons.downloading_rounded, size: 18),
-                      label: Text('Berjalan (${allLoading.length})'),
-                    ),
-                    ButtonSegment<int>(
-                      value: 1,
-                      icon: const Icon(Icons.check_circle_outline_rounded, size: 18),
-                      label: Text('Selesai (${allFinished.length})'),
-                    ),
-                  ],
-                  selected: {_sectionIndex},
-                  onSelectionChanged: (s) => _selectSection(s.first),
-                ),
-                const SizedBox(height: 12),
                 TextField(
                   onChanged: (v) => setState(() => _search = v),
                   decoration: const InputDecoration(
@@ -351,8 +377,11 @@ class _DownloadsScreenState extends State<DownloadsScreen> {
             ),
             _buildItemsSliver(
               processingItems,
-              bottomPad:
-                  (queuedItems.isEmpty && pausedItems.isEmpty) ? 28.0 : 12.0,
+              bottomPad: (queuedItems.isEmpty &&
+                      pausedItems.isEmpty &&
+                      failedItems.isEmpty)
+                  ? 28.0
+                  : 12.0,
             ),
           ],
           if (queuedItems.isNotEmpty) ...[
@@ -364,7 +393,9 @@ class _DownloadsScreenState extends State<DownloadsScreen> {
             ),
             _buildItemsSliver(
               queuedItems,
-              bottomPad: pausedItems.isEmpty ? 28.0 : 12.0,
+              bottomPad: (pausedItems.isEmpty && failedItems.isEmpty)
+                  ? 28.0
+                  : 12.0,
             ),
           ],
           if (pausedItems.isNotEmpty) ...[
@@ -374,11 +405,33 @@ class _DownloadsScreenState extends State<DownloadsScreen> {
               color: const Color(0xFFF59E0B),
               icon: Icons.pause_circle_outline_rounded,
             ),
-            _buildItemsSliver(pausedItems, bottomPad: 28.0),
+            _buildItemsSliver(
+              pausedItems,
+              bottomPad: failedItems.isEmpty ? 28.0 : 12.0,
+            ),
+          ],
+          if (failedItems.isNotEmpty) ...[
+            _buildSectionHeaderSliver(
+              context,
+              title: 'Gagal (${failedItems.length})',
+              color: theme.colorScheme.error,
+              icon: Icons.error_outline_rounded,
+              trailingAction: TextButton.icon(
+                onPressed: widget.manager.retryAllFailed,
+                style: TextButton.styleFrom(
+                  visualDensity: VisualDensity.compact,
+                  padding: const EdgeInsets.symmetric(horizontal: 8),
+                ),
+                icon: const Icon(Icons.refresh_rounded, size: 15),
+                label: const Text('Coba Semua'),
+              ),
+            ),
+            _buildItemsSliver(failedItems, bottomPad: 28.0),
           ],
         ] else
           _buildItemsSliver(filteredFinished, bottomPad: 28.0),
       ],
+      ),
     );
   }
 
@@ -387,22 +440,26 @@ class _DownloadsScreenState extends State<DownloadsScreen> {
     required String title,
     required Color color,
     required IconData icon,
+    Widget? trailingAction,
   }) {
     return SliverToBoxAdapter(
       child: Padding(
-        padding: const EdgeInsets.fromLTRB(18, 4, 18, 6),
+        padding: const EdgeInsets.fromLTRB(18, 4, 14, 6),
         child: Row(
           children: [
             Icon(icon, size: 15, color: color),
             const SizedBox(width: 6),
-            Text(
-              title,
-              style: Theme.of(context).textTheme.labelMedium?.copyWith(
-                    color: color,
-                    fontWeight: FontWeight.w800,
-                    letterSpacing: 0.2,
-                  ),
+            Expanded(
+              child: Text(
+                title,
+                style: Theme.of(context).textTheme.labelMedium?.copyWith(
+                      color: color,
+                      fontWeight: FontWeight.w800,
+                      letterSpacing: 0.2,
+                    ),
+              ),
             ),
+            ?trailingAction,
           ],
         ),
       ),
@@ -519,6 +576,145 @@ class _DownloadsScreenState extends State<DownloadsScreen> {
     if (confirmed == true) {
       await widget.manager.clearAllHistory();
     }
+  }
+}
+
+class _StickyHistoryTabsDelegate extends SliverPersistentHeaderDelegate {
+  final Color backgroundColor;
+  final int loadingCount;
+  final int finishedCount;
+  final int selectedIndex;
+  final ValueChanged<int> onTapSection;
+
+  const _StickyHistoryTabsDelegate({
+    required this.backgroundColor,
+    required this.loadingCount,
+    required this.finishedCount,
+    required this.selectedIndex,
+    required this.onTapSection,
+  });
+
+  @override
+  double get minExtent => 56;
+
+  @override
+  double get maxExtent => 56;
+
+  @override
+  Widget build(
+    BuildContext context,
+    double shrinkOffset,
+    bool overlapsContent,
+  ) {
+    final theme = Theme.of(context);
+    final isDark = theme.brightness == Brightness.dark;
+    return Material(
+      color: backgroundColor,
+      elevation: overlapsContent ? 2 : 0,
+      shadowColor: Colors.black.withValues(alpha: 0.25),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 6, 16, 8),
+        child: Container(
+          padding: const EdgeInsets.all(3),
+          decoration: BoxDecoration(
+            color: isDark
+                ? const Color(0xFF172033)
+                : theme.colorScheme.surfaceContainerHighest
+                    .withValues(alpha: 0.75),
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(
+              color: theme.colorScheme.outlineVariant.withValues(alpha: 0.45),
+            ),
+          ),
+          child: Row(
+            children: [
+              Expanded(
+                child: _StickyTabButton(
+                  icon: Icons.downloading_rounded,
+                  label: 'Berjalan ($loadingCount)',
+                  selected: selectedIndex == 0,
+                  onTap: () => onTapSection(0),
+                ),
+              ),
+              const SizedBox(width: 4),
+              Expanded(
+                child: _StickyTabButton(
+                  icon: Icons.check_circle_outline_rounded,
+                  label: 'Selesai ($finishedCount)',
+                  selected: selectedIndex == 1,
+                  onTap: () => onTapSection(1),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  @override
+  bool shouldRebuild(covariant _StickyHistoryTabsDelegate oldDelegate) {
+    return backgroundColor != oldDelegate.backgroundColor ||
+        loadingCount != oldDelegate.loadingCount ||
+        finishedCount != oldDelegate.finishedCount ||
+        selectedIndex != oldDelegate.selectedIndex;
+  }
+}
+
+class _StickyTabButton extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final bool selected;
+  final VoidCallback onTap;
+
+  const _StickyTabButton({
+    required this.icon,
+    required this.label,
+    required this.selected,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Material(
+      color: selected ? theme.colorScheme.primary : Colors.transparent,
+      borderRadius: BorderRadius.circular(11),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(11),
+        child: Center(
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                icon,
+                size: 16,
+                color: selected
+                    ? Colors.white
+                    : theme.colorScheme.onSurfaceVariant,
+              ),
+              const SizedBox(width: 6),
+              Flexible(
+                child: Text(
+                  label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 13,
+                    fontWeight: selected ? FontWeight.w800 : FontWeight.w600,
+                    color: selected
+                        ? Colors.white
+                        : theme.colorScheme.onSurfaceVariant,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
   }
 }
 

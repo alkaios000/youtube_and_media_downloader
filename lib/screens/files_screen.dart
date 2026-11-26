@@ -13,11 +13,13 @@ import '../models/media_platform.dart';
 import '../services/download_manager.dart';
 import '../widgets/file_gallery_viewer.dart';
 import '../widgets/pixiv_album_viewer.dart';
+import '../widgets/wallpaper_sheet.dart';
 
 enum _FileViewMode { gallery, list }
 
 enum _FileMenuAction {
   view,
+  setWallpaper,
   toggleLock,
   openExternal,
   share,
@@ -1399,18 +1401,53 @@ class _FilesScreenState extends State<FilesScreen> {
                         child: Stack(
                           fit: StackFit.expand,
                           children: [
-                            Image.file(
-                              File(album.cover.savedPath),
-                              cacheWidth: 380,
-                              filterQuality: FilterQuality.low,
-                              fit: BoxFit.cover,
-                              errorBuilder: (_, _, _) => Container(
-                                color:
-                                    theme.colorScheme.surfaceContainerHighest,
-                                child: const Icon(Icons.collections_outlined,
-                                    size: 36),
-                              ),
-                            ),
+                            album.cover.mediaKind == MediaKind.video
+                                ? Container(
+                                    decoration: BoxDecoration(
+                                      gradient: LinearGradient(
+                                        begin: Alignment.topLeft,
+                                        end: Alignment.bottomRight,
+                                        colors: [
+                                          const Color(0xFF0096FA)
+                                              .withValues(alpha: 0.35),
+                                          const Color(0xFF1E293B),
+                                        ],
+                                      ),
+                                    ),
+                                    child: const Column(
+                                      mainAxisAlignment:
+                                          MainAxisAlignment.center,
+                                      children: [
+                                        Icon(
+                                          Icons.play_circle_filled_rounded,
+                                          size: 46,
+                                          color: Colors.white,
+                                        ),
+                                        SizedBox(height: 6),
+                                        Text(
+                                          'Ugoira MP4',
+                                          style: TextStyle(
+                                            color: Colors.white70,
+                                            fontSize: 11.5,
+                                            fontWeight: FontWeight.w800,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  )
+                                : Image.file(
+                                    File(album.cover.savedPath),
+                                    cacheWidth: 380,
+                                    filterQuality: FilterQuality.low,
+                                    fit: BoxFit.cover,
+                                    errorBuilder: (_, _, _) => Container(
+                                      color: theme
+                                          .colorScheme.surfaceContainerHighest,
+                                      child: const Icon(
+                                          Icons.collections_outlined,
+                                          size: 36),
+                                    ),
+                                  ),
                             if (isSelected)
                               Container(
                                 color: theme.colorScheme.primary
@@ -1438,14 +1475,19 @@ class _FilesScreenState extends State<FilesScreen> {
                                 child: Row(
                                   mainAxisSize: MainAxisSize.min,
                                   children: [
-                                    const Icon(
-                                      Icons.collections_rounded,
+                                    Icon(
+                                      album.cover.mediaKind == MediaKind.video
+                                          ? Icons.movie_creation_rounded
+                                          : Icons.collections_rounded,
                                       size: 11,
                                       color: Colors.white,
                                     ),
                                     const SizedBox(width: 4),
                                     Text(
-                                      '${album.pages.length} Hal',
+                                      album.cover.mediaKind == MediaKind.video &&
+                                              album.pages.length == 1
+                                          ? 'Ugoira'
+                                          : '${album.pages.length} Hal',
                                       style: const TextStyle(
                                         color: Colors.white,
                                         fontSize: 10.5,
@@ -1571,16 +1613,28 @@ class _FilesScreenState extends State<FilesScreen> {
                         child: SizedBox(
                           width: 60,
                           height: 60,
-                          child: Image.file(
-                            File(album.cover.savedPath),
-                            cacheWidth: 160,
-                            filterQuality: FilterQuality.low,
-                            fit: BoxFit.cover,
-                            errorBuilder: (_, _, _) => Container(
-                              color: theme.colorScheme.surfaceContainerHighest,
-                              child: const Icon(Icons.collections_outlined),
-                            ),
-                          ),
+                          child: album.cover.mediaKind == MediaKind.video
+                              ? Container(
+                                  color: const Color(0xFF0096FA)
+                                      .withValues(alpha: 0.2),
+                                  child: const Icon(
+                                    Icons.play_circle_filled_rounded,
+                                    color: Color(0xFF0096FA),
+                                    size: 30,
+                                  ),
+                                )
+                              : Image.file(
+                                  File(album.cover.savedPath),
+                                  cacheWidth: 160,
+                                  filterQuality: FilterQuality.low,
+                                  fit: BoxFit.cover,
+                                  errorBuilder: (_, _, _) => Container(
+                                    color: theme
+                                        .colorScheme.surfaceContainerHighest,
+                                    child:
+                                        const Icon(Icons.collections_outlined),
+                                  ),
+                                ),
                         ),
                       ),
                       const SizedBox(width: 12),
@@ -1864,6 +1918,13 @@ class _FilesScreenState extends State<FilesScreen> {
     switch (action) {
       case _FileMenuAction.view:
         await _openPrimaryView(file, folderFiles);
+        break;
+      case _FileMenuAction.setWallpaper:
+        await showSetWallpaperSheet(
+          context,
+          manager: widget.manager,
+          file: file,
+        );
         break;
       case _FileMenuAction.toggleLock:
         if (file.isPrivate) {
@@ -2438,6 +2499,17 @@ class _FilePopupMenu extends StatelessWidget {
             ],
           ),
         ),
+        if (isImage)
+          const PopupMenuItem(
+            value: _FileMenuAction.setWallpaper,
+            child: Row(
+              children: [
+                Icon(Icons.wallpaper_rounded, size: 19),
+                SizedBox(width: 10),
+                Text('Jadikan Wallpaper'),
+              ],
+            ),
+          ),
         PopupMenuItem(
           value: _FileMenuAction.toggleLock,
           child: Row(

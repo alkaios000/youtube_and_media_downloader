@@ -4,6 +4,18 @@ import 'package:dio/dio.dart';
 import '../models/media_info.dart';
 import '../models/media_platform.dart';
 
+class PixivUgoiraMeta {
+  final String zipUrl;
+  final List<PixivUgoiraFrame> frames;
+  final int totalDurationMs;
+
+  const PixivUgoiraMeta({
+    required this.zipUrl,
+    required this.frames,
+    required this.totalDurationMs,
+  });
+}
+
 class DirectExtractors {
   static const String _mobileSafariUa =
       'Mozilla/5.0 (iPhone; CPU iPhone OS 17_6 like Mac OS X) '
@@ -33,14 +45,94 @@ class DirectExtractors {
             );
 
   // ===========================================================================
-  // PIXIV: Single Artwork (multi-page selectable!) & User Profile / Username Bulk
+  // PIXIV: Single Artwork (R-18, Ugoira, multi-page!) & Profile / Bookmarks Bulk
   // ===========================================================================
 
-  Future<MediaInfo?> extractPixiv(String url, {String cookieHeader = ''}) async {
+  /// Extracts Pixiv cookies from a Netscape `cookies.txt` string or raw `PHPSESSID=...` input
+  /// and merges them with WebView's live cookie header.
+  static String mergePixivCookies({
+    String cookieHeader = '',
+    String customCookies = '',
+  }) {
+    final map = <String, String>{};
+
+    void parsePair(String raw) {
+      final eq = raw.indexOf('=');
+      if (eq <= 0) return;
+      final k = raw.substring(0, eq).trim();
+      final v = raw.substring(eq + 1).trim();
+      if (k.isNotEmpty && v.isNotEmpty) {
+        map[k] = v;
+      }
+    }
+
+    // 1. Parse optional custom cookies (Netscape format OR raw `PHPSESSID=...` pairs)
+    if (customCookies.trim().isNotEmpty) {
+      for (final rawLine in customCookies.split(RegExp(r'\r?\n'))) {
+        final line = rawLine.trim();
+        if (line.isEmpty || line.startsWith('#')) continue;
+        final cols = line.split('\t');
+        if (cols.length >= 7) {
+          final domain = cols[0].toLowerCase();
+          if (domain.contains('pixiv.net')) {
+            final name = cols[5].trim();
+            final value = cols[6].trim();
+            if (name.isNotEmpty && value.isNotEmpty) {
+              map[name] = value;
+            }
+          }
+        } else if (line.contains('PHPSESSID=') || line.contains('device_token=')) {
+          for (final part in line.split(';')) {
+            parsePair(part.trim());
+          }
+        }
+      }
+    }
+
+    // 2. Overlay live Android WebView cookies (most recent session wins!)
+    if (cookieHeader.trim().isNotEmpty) {
+      for (final part in cookieHeader.split(';')) {
+        parsePair(part.trim());
+      }
+    }
+
+    return map.entries.map((e) => '${e.key}=${e.value}').join('; ');
+  }
+
+  /// Builds full browser-equivalent Pixiv Ajax & CDN headers including `Cookie` and `x-user-id`.
+  static Map<String, String> buildPixivHeaders({
+    String cookieHeader = '',
+    String customCookies = '',
+  }) {
+    final mergedCookie = mergePixivCookies(
+      cookieHeader: cookieHeader,
+      customCookies: customCookies,
+    );
     final headers = <String, String>{
       ...pixivHeaders,
-      if (cookieHeader.isNotEmpty) 'Cookie': cookieHeader,
+      'Accept': 'application/json',
+      'Origin': 'https://www.pixiv.net',
     };
+    if (mergedCookie.isNotEmpty) {
+      headers['Cookie'] = mergedCookie;
+      final uidMatch =
+          RegExp(r'(?:^|;\s*)PHPSESSID=(\d+)_').firstMatch(mergedCookie);
+      if (uidMatch != null) {
+        headers['x-user-id'] = uidMatch.group(1)!;
+      }
+    }
+    return headers;
+  }
+
+  Future<MediaInfo?> extractPixiv(
+    String url, {
+    String cookieHeader = '',
+    String customCookies = '',
+  }) async {
+    final headers = buildPixivHeaders(
+      cookieHeader: cookieHeader,
+      customCookies: customCookies,
+    );
 
     // 1. Check if artwork link
     final illustId = _extractPixivIllustId(url);
@@ -112,14 +204,33 @@ class DirectExtractors {
     String illustId,
     Map<String, String> headers,
   ) async {
+    final hasSession =
+        (headers['Cookie'] ?? '').contains('PHPSESSID=');
     try {
       final infoRes = await _dio.get<dynamic>(
-        'https://www.pixiv.net/ajax/illust/$illustId',
+        'https://www.pixiv.net/ajax/illust/$illustId?lang=en',
         options: Options(headers: headers),
       );
       final infoBody =
           infoRes.data is String ? jsonDecode(infoRes.data as String) : infoRes.data;
-      if (infoBody is! Map || infoBody['error'] == true) return null;
+      if (infoBody is! Map) return null;
+      if (infoBody['error'] == true) {
+        final msg = infoBody['message']?.toString() ?? '';
+        if (!hasSession) {
+          throw Exception(
+            'Karya Pixiv ini khusus member / R-18. Tekan "Login Browser Pixiv" dulu lalu coba lagi.',
+          );
+        }
+        if (msg.toLowerCase().contains('r-18') ||
+            msg.toLowerCase().contains('restrict') ||
+            msg.toLowerCase().contains('age')) {
+          throw Exception(
+            'Akun Pixiv Anda belum mengaktifkan tampilan R-18. Buka Pengaturan Akun Pixiv → Viewing Restriction → aktifkan R-18, lalu ulangi.',
+          );
+        }
+        return null;
+      }
+
       final meta = infoBody['body'] as Map?;
       if (meta == null) return null;
 
@@ -134,9 +245,108 @@ class DirectExtractors {
       final userId = meta['userId']?.toString().trim() ?? '';
       final profileUrl =
           userId.isNotEmpty ? 'https://www.pixiv.net/users/$userId' : null;
+      final illustType = (meta['illustType'] as num?)?.toInt() ?? 0;
+      final xRestrict = (meta['xRestrict'] as num?)?.toInt() ?? 0;
+      final isR18 = xRestrict > 0;
+      final r18Tag = xRestrict == 2 ? 'R-18G' : (xRestrict == 1 ? 'R-18' : '');
 
+      // Check if Pixiv redacted original URLs because R-18 requires login / R-18 setting
+      final metaUrls = meta['urls'] as Map?;
+      final metaOrig = metaUrls?['original']?.toString() ?? '';
+      final metaReg = metaUrls?['regular']?.toString() ?? '';
+      final metaSmall = metaUrls?['small']?.toString() ??
+          metaUrls?['thumb']?.toString() ??
+          metaReg;
+
+      // -----------------------------------------------------------------------
+      // PIXIV UGOIRA (Animated illustration: illustType == 2)
+      // -----------------------------------------------------------------------
+      if (illustType == 2) {
+        final ugoira = await _fetchPixivUgoiraMetaWithHeaders(illustId, headers);
+        if (ugoira == null) {
+          if (isR18 && !hasSession) {
+            throw Exception(
+              'Ugoira $r18Tag ini memerlukan login Pixiv. Tekan "Login Browser Pixiv" dulu lalu coba lagi.',
+            );
+          }
+          if (isR18) {
+            throw Exception(
+              'Ugoira $r18Tag dibatasi akun Pixiv. Pastikan opsi R-18 sudah aktif di Pengaturan Akun Pixiv Anda.',
+            );
+          }
+          throw Exception('Gagal memuat data frame animasi Ugoira Pixiv.');
+        }
+
+        final frameCount = ugoira.frames.length;
+        final duration = ugoira.totalDurationMs > 0
+            ? Duration(milliseconds: ugoira.totalDurationMs)
+            : null;
+        final ugoiraOptions = <MediaFormatOption>[
+          MediaFormatOption(
+            id: 'pixiv_ugoira_mp4',
+            label: isR18 ? 'Video Ugoira HD ($r18Tag • MP4)' : 'Video Ugoira HD (MP4)',
+            subtitle: 'MP4 • $frameCount frame • Konversi FFmpeg mulus',
+            extension: 'mp4',
+            kind: MediaKind.video,
+            engine: DownloadEngine.directHttp,
+            directUrl: ugoira.zipUrl,
+            headers: headers,
+            isUgoira: true,
+            ugoiraFrames: ugoira.frames,
+          ),
+          MediaFormatOption(
+            id: 'pixiv_ugoira_gif',
+            label: 'Animasi Ugoira (GIF)',
+            subtitle: 'GIF Animasi • $frameCount frame',
+            extension: 'gif',
+            kind: MediaKind.image,
+            engine: DownloadEngine.directHttp,
+            directUrl: ugoira.zipUrl,
+            headers: headers,
+            isUgoira: true,
+            ugoiraFrames: ugoira.frames,
+          ),
+        ];
+
+        final coverOrig = metaOrig.startsWith('http')
+            ? metaOrig
+            : (metaReg.startsWith('http') ? metaReg : '');
+        if (coverOrig.isNotEmpty) {
+          final coverExt = _guessImageExt(coverOrig);
+          ugoiraOptions.add(
+            MediaFormatOption(
+              id: 'pixiv_ugoira_cover',
+              label: 'Cover Statis (${coverExt.toUpperCase()})',
+              subtitle: '1 gambar cover frame pertama',
+              extension: coverExt,
+              kind: MediaKind.image,
+              engine: DownloadEngine.directHttp,
+              directUrl: coverOrig,
+              galleryUrls: [coverOrig],
+              headers: headers,
+            ),
+          );
+        }
+
+        return MediaInfo(
+          originalUrl: originalUrl,
+          platform: MediaPlatform.pixiv,
+          title: title,
+          author: author,
+          thumbnailUrl: metaSmall.startsWith('http') ? metaSmall : (coverOrig.isNotEmpty ? coverOrig : null),
+          thumbnailHeaders: headers,
+          duration: duration,
+          extractorLabel: isR18 ? 'Pixiv Ugoira ($r18Tag)' : 'Pixiv Ugoira Engine',
+          options: ugoiraOptions,
+          creatorProfileUrl: profileUrl,
+        );
+      }
+
+      // -----------------------------------------------------------------------
+      // PIXIV ILLUSTRATION / MANGA (All ages, R-18 & R-18G)
+      // -----------------------------------------------------------------------
       final pagesRes = await _dio.get<dynamic>(
-        'https://www.pixiv.net/ajax/illust/$illustId/pages',
+        'https://www.pixiv.net/ajax/illust/$illustId/pages?lang=en',
         options: Options(headers: headers),
       );
       final pagesBody = pagesRes.data is String
@@ -171,7 +381,9 @@ class DirectExtractors {
               kind: MediaKind.image,
               engine: DownloadEngine.directHttp,
               headers: headers,
-              badgeLabel: 'Hal ${i + 1}',
+              badgeLabel: isR18 && pages.length == 1
+                  ? r18Tag
+                  : 'Hal ${i + 1}',
               author: author,
             ),
           );
@@ -180,10 +392,9 @@ class DirectExtractors {
 
       // Fallback to meta.urls.original if /pages returned empty
       if (items.isEmpty) {
-        final urls = meta['urls'] as Map?;
-        final orig = urls?['original']?.toString() ??
-            urls?['regular']?.toString() ??
-            '';
+        final orig = metaOrig.startsWith('http')
+            ? metaOrig
+            : (metaReg.startsWith('http') ? metaReg : '');
         if (orig.startsWith('http')) {
           fullUrls.add(orig);
           final ext = _guessImageExt(orig);
@@ -191,20 +402,32 @@ class DirectExtractors {
             SelectableMediaItem(
               id: 'pixiv_${illustId}_p0',
               title: title,
-              thumbnailUrl: urls?['small']?.toString() ?? orig,
+              thumbnailUrl: metaSmall.startsWith('http') ? metaSmall : orig,
               directUrl: orig,
               extension: ext,
               kind: MediaKind.image,
               engine: DownloadEngine.directHttp,
               headers: headers,
-              badgeLabel: 'Foto 1',
+              badgeLabel: isR18 ? r18Tag : 'Foto 1',
               author: author,
             ),
           );
         }
       }
 
-      if (items.isEmpty) return null;
+      if (items.isEmpty) {
+        if (isR18 && !hasSession) {
+          throw Exception(
+            'Karya $r18Tag Pixiv ini memerlukan login. Tekan "Login Browser Pixiv" di bawah lalu coba lagi.',
+          );
+        }
+        if (isR18) {
+          throw Exception(
+            'Karya $r18Tag disembunyikan oleh pengaturan akun Pixiv Anda. Aktifkan "Viewing Restriction → R-18" di profil Pixiv lalu ulangi.',
+          );
+        }
+        return null;
+      }
 
       final firstExt = items.first.extension;
       return MediaInfo(
@@ -214,15 +437,16 @@ class DirectExtractors {
         author: author,
         thumbnailUrl: items.first.thumbnailUrl,
         thumbnailHeaders: headers,
-        extractorLabel: 'Pixiv Original Engine',
+        extractorLabel:
+            isR18 ? 'Pixiv Original ($r18Tag)' : 'Pixiv Original Engine',
         selectableItems: items,
         creatorProfileUrl: profileUrl,
         options: [
           MediaFormatOption(
             id: 'pixiv_all',
             label: items.length > 1
-                ? 'Semua Halaman (${items.length} foto)'
-                : 'Gambar Original HD',
+                ? 'Semua Halaman (${items.length} foto${isR18 ? ' • $r18Tag' : ''})'
+                : (isR18 ? 'Gambar Original HD ($r18Tag)' : 'Gambar Original HD'),
             subtitle: '${firstExt.toUpperCase()} • Resolusi Asli Pixiv',
             extension: firstExt,
             kind: MediaKind.image,
@@ -233,6 +457,8 @@ class DirectExtractors {
           ),
         ],
       );
+    } on Exception {
+      rethrow;
     } catch (_) {
       return null;
     }
@@ -245,7 +471,7 @@ class DirectExtractors {
   ) async {
     try {
       final profileRes = await _dio.get<dynamic>(
-        'https://www.pixiv.net/ajax/user/$userId/profile/all',
+        'https://www.pixiv.net/ajax/user/$userId/profile/all?lang=en',
         options: Options(headers: headers),
       );
       final profileBody = profileRes.data is String
@@ -264,9 +490,6 @@ class DirectExtractors {
       }
 
       // Sort newest artwork ID first — ZERO limit anywhere!
-      // Pixiv's /profile/illusts accepts up to 100 IDs per request; we paginate
-      // through ALL IDs with retries + auto-split + zero-drop fallback so EVERY
-      // single artwork on the profile is returned without any cap.
       ids.sort((a, b) => (int.tryParse(b) ?? 0).compareTo(int.tryParse(a) ?? 0));
       if (ids.isEmpty) return null;
 
@@ -304,7 +527,7 @@ class DirectExtractors {
         }
       }
 
-      // Build items for 100% of IDs — NEVER drop any artwork even if metadata failed!
+      // Build items for 100% of IDs — includes normal, R-18, R-18G, AND Ugoira!
       final items = <SelectableMediaItem>[];
       for (final id in ids) {
         final work = allWorksMap[id];
@@ -312,9 +535,21 @@ class DirectExtractors {
             (work?['title']?.toString() ?? 'Pixiv_$id').trim();
         final thumb = work?['url']?.toString() ?? '';
         final pageCount = (work?['pageCount'] as num?)?.toInt() ?? 0;
-        final badge = pageCount > 1
-            ? '$pageCount Hal'
-            : (pageCount == 1 ? '1 Hal' : 'Pixiv');
+        final illustType = (work?['illustType'] as num?)?.toInt() ?? 0;
+        final xRestrict = (work?['xRestrict'] as num?)?.toInt() ?? 0;
+        final isUgoira = illustType == 2;
+        final isR18 = xRestrict > 0;
+
+        String badge;
+        if (isUgoira) {
+          badge = isR18 ? 'R-18 Ugoira' : 'Ugoira';
+        } else if (isR18) {
+          badge = pageCount > 1 ? 'R-18 • $pageCount Hal' : 'R-18';
+        } else {
+          badge = pageCount > 1
+              ? '$pageCount Hal'
+              : (pageCount == 1 ? '1 Hal' : 'Pixiv');
+        }
 
         items.add(
           SelectableMediaItem(
@@ -322,13 +557,14 @@ class DirectExtractors {
             title: workTitle.isNotEmpty ? workTitle : 'Pixiv_$id',
             thumbnailUrl: thumb.startsWith('http') ? thumb : null,
             sourcePostUrl: 'https://www.pixiv.net/artworks/$id',
-            extension: 'jpg',
-            kind: MediaKind.image,
+            extension: isUgoira ? 'mp4' : 'jpg',
+            kind: isUgoira ? MediaKind.video : MediaKind.image,
             engine: DownloadEngine.directHttp,
             headers: headers,
             badgeLabel: badge,
             author: creatorName,
             pixivIllustId: id,
+            isPixivUgoira: isUgoira,
           ),
         );
       }
@@ -345,7 +581,7 @@ class DirectExtractors {
             .whereType<String>()
             .firstOrNull,
         thumbnailHeaders: headers,
-        extractorLabel: 'Pixiv Profil Massal (Tanpa Batas)',
+        extractorLabel: 'Pixiv Profil Massal (R-18 & Ugoira)',
         options: const [],
         selectableItems: items,
         isBulkProfile: true,
@@ -367,7 +603,7 @@ class DirectExtractors {
     if (batch.isEmpty) return const {};
     final queryIds = batch.map((id) => 'ids[]=$id').join('&');
     final endpoint =
-        'https://www.pixiv.net/ajax/user/$userId/profile/illusts?$queryIds&work_category=illustManga&is_first_page=0';
+        'https://www.pixiv.net/ajax/user/$userId/profile/illusts?$queryIds&work_category=illustManga&is_first_page=0&lang=en';
 
     for (int attempt = 0; attempt < 3; attempt++) {
       try {
@@ -421,13 +657,17 @@ class DirectExtractors {
     return const {};
   }
 
-  /// Loads ALL bookmarks of a Pixiv user (no limit) by paginating until `offset >= total`.
+  /// Loads ALL bookmarks of a Pixiv user (public OR private `?rest=hide`, including R-18 & Ugoira!).
   Future<MediaInfo?> _extractPixivUserBookmarks(
     String originalUrl,
     String userId,
     Map<String, String> headers,
   ) async {
     try {
+      final restParam =
+          Uri.tryParse(originalUrl)?.queryParameters['rest']?.trim();
+      final rest = (restParam == 'hide') ? 'hide' : 'show';
+
       final items = <SelectableMediaItem>[];
       final seenIds = <String>{};
       int offset = 0;
@@ -444,7 +684,8 @@ class DirectExtractors {
                 'tag': '',
                 'offset': offset,
                 'limit': pageSize,
-                'rest': 'show',
+                'rest': rest,
+                'lang': 'en',
               },
               options: Options(headers: headers),
             );
@@ -484,19 +725,31 @@ class DirectExtractors {
           final artist = (w['userName']?.toString() ?? 'Pixiv').trim();
           final thumb = w['url']?.toString() ?? '';
           final pageCount = (w['pageCount'] as num?)?.toInt() ?? 1;
+          final illustType = (w['illustType'] as num?)?.toInt() ?? 0;
+          final xRestrict = (w['xRestrict'] as num?)?.toInt() ?? 0;
+          final isUgoira = illustType == 2;
+          final isR18 = xRestrict > 0;
+
+          final badge = isUgoira
+              ? (isR18 ? 'R-18 Ugoira' : 'Ugoira')
+              : (isR18
+                  ? (pageCount > 1 ? 'R-18 • $pageCount Hal' : 'R-18')
+                  : (pageCount > 1 ? '$pageCount Hal' : '1 Hal'));
+
           items.add(
             SelectableMediaItem(
               id: 'pixiv_bm_$id',
               title: title.isNotEmpty ? title : 'Pixiv_$id',
               thumbnailUrl: thumb.startsWith('http') ? thumb : null,
               sourcePostUrl: 'https://www.pixiv.net/artworks/$id',
-              extension: 'jpg',
-              kind: MediaKind.image,
+              extension: isUgoira ? 'mp4' : 'jpg',
+              kind: isUgoira ? MediaKind.video : MediaKind.image,
               engine: DownloadEngine.directHttp,
               headers: headers,
-              badgeLabel: pageCount > 1 ? '$pageCount Hal' : '1 Hal',
+              badgeLabel: badge,
               author: artist.isNotEmpty ? artist : 'Pixiv',
               pixivIllustId: id,
+              isPixivUgoira: isUgoira,
             ),
           );
           added++;
@@ -516,28 +769,84 @@ class DirectExtractors {
         author: 'Pixiv_Bookmarks_$userId',
         thumbnailUrl: items.first.thumbnailUrl,
         thumbnailHeaders: headers,
-        extractorLabel: 'Pixiv Bookmark (Tanpa Batas)',
+        extractorLabel: 'Pixiv Bookmark (R-18 & Ugoira)',
         options: const [],
         selectableItems: items,
         isBulkProfile: true,
+        creatorProfileUrl: originalUrl,
       );
     } catch (_) {
       return null;
     }
   }
 
-  /// Resolves all full-resolution page URLs for a Pixiv artwork ID (used during bulk downloads).
+  /// Resolves Ugoira ZIP archive URL & exact frame delays for a Pixiv animated artwork ID.
+  Future<PixivUgoiraMeta?> fetchPixivUgoiraMeta(
+    String illustId, {
+    String cookieHeader = '',
+    String customCookies = '',
+  }) {
+    final headers = buildPixivHeaders(
+      cookieHeader: cookieHeader,
+      customCookies: customCookies,
+    );
+    return _fetchPixivUgoiraMetaWithHeaders(illustId, headers);
+  }
+
+  Future<PixivUgoiraMeta?> _fetchPixivUgoiraMetaWithHeaders(
+    String illustId,
+    Map<String, String> headers,
+  ) async {
+    try {
+      final res = await _dio.get<dynamic>(
+        'https://www.pixiv.net/ajax/illust/$illustId/ugoira_meta?lang=en',
+        options: Options(headers: headers),
+      );
+      final body = res.data is String ? jsonDecode(res.data as String) : res.data;
+      if (body is! Map || body['error'] == true) return null;
+      final data = body['body'] as Map?;
+      if (data == null) return null;
+
+      final zipUrl = (data['originalSrc']?.toString().trim().isNotEmpty == true)
+          ? data['originalSrc'].toString().trim()
+          : (data['src']?.toString().trim() ?? '');
+      if (!zipUrl.startsWith('http')) return null;
+
+      final rawFrames = data['frames'] as List? ?? const [];
+      final frames = <PixivUgoiraFrame>[];
+      int totalMs = 0;
+      for (final f in rawFrames) {
+        if (f is! Map) continue;
+        final file = f['file']?.toString().trim() ?? '';
+        final delay = ((f['delay'] as num?)?.toInt() ?? 50).clamp(10, 10000);
+        if (file.isNotEmpty) {
+          frames.add(PixivUgoiraFrame(file: file, delayMs: delay));
+          totalMs += delay;
+        }
+      }
+      return PixivUgoiraMeta(
+        zipUrl: zipUrl,
+        frames: frames,
+        totalDurationMs: totalMs,
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Resolves all full-resolution page URLs for a Pixiv artwork ID (including R-18).
   Future<List<String>> fetchPixivIllustOriginalUrls(
     String illustId, {
     String cookieHeader = '',
+    String customCookies = '',
   }) async {
-    final headers = <String, String>{
-      ...pixivHeaders,
-      if (cookieHeader.isNotEmpty) 'Cookie': cookieHeader,
-    };
+    final headers = buildPixivHeaders(
+      cookieHeader: cookieHeader,
+      customCookies: customCookies,
+    );
     try {
       final res = await _dio.get<dynamic>(
-        'https://www.pixiv.net/ajax/illust/$illustId/pages',
+        'https://www.pixiv.net/ajax/illust/$illustId/pages?lang=en',
         options: Options(headers: headers),
       );
       final body = res.data is String ? jsonDecode(res.data as String) : res.data;
@@ -550,7 +859,22 @@ class DirectExtractors {
               '';
           if (u.startsWith('http')) urls.add(u);
         }
-        return urls;
+        if (urls.isNotEmpty) return urls;
+      }
+
+      // Fallback to single artwork metadata endpoint if /pages returned empty
+      final metaRes = await _dio.get<dynamic>(
+        'https://www.pixiv.net/ajax/illust/$illustId?lang=en',
+        options: Options(headers: headers),
+      );
+      final metaBody =
+          metaRes.data is String ? jsonDecode(metaRes.data as String) : metaRes.data;
+      if (metaBody is Map && metaBody['error'] != true && metaBody['body'] is Map) {
+        final urlsMap = metaBody['body']['urls'] as Map?;
+        final orig = urlsMap?['original']?.toString() ??
+            urlsMap?['regular']?.toString() ??
+            '';
+        if (orig.startsWith('http')) return [orig];
       }
     } catch (_) {}
     return const [];

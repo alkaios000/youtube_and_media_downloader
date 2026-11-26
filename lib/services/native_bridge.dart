@@ -456,6 +456,35 @@ class NativeBridge {
     return ok ?? false;
   }
 
+  Future<SavedFileResult> convertUgoiraZip({
+    required String zipPath,
+    required List<Map<String, dynamic>> frames,
+    required String outputFormat,
+    required String fileName,
+    required String platformFolder,
+    required String creatorFolder,
+    String? albumFolder,
+    bool isPrivate = true,
+  }) async {
+    final result = await _channel.invokeMethod<Map<dynamic, dynamic>>(
+      'convertUgoiraZip',
+      {
+        'zipPath': zipPath,
+        'frames': frames,
+        'outputFormat': outputFormat,
+        'fileName': fileName,
+        'platformFolder': platformFolder,
+        'creatorFolder': creatorFolder,
+        'albumFolder': albumFolder,
+        'isPrivate': isPrivate,
+      },
+    );
+    if (result == null) {
+      throw Exception('Gagal mengonversi animasi Ugoira.');
+    }
+    return SavedFileResult.fromMap(result);
+  }
+
   Future<SavedFileResult> saveFileToDownloads({
     required String sourcePath,
     required String fileName,
@@ -490,6 +519,19 @@ class NativeBridge {
         .whereType<Map>()
         .map(ManagedFile.fromMap)
         .toList(growable: false);
+  }
+
+  Future<bool> setWallpaper({
+    String? filePath,
+    String? contentUri,
+    String target = 'crop',
+  }) async {
+    final ok = await _channel.invokeMethod<bool>('setWallpaper', {
+      'filePath': filePath,
+      'contentUri': contentUri,
+      'target': target,
+    });
+    return ok ?? false;
   }
 
   Future<bool> openFile({

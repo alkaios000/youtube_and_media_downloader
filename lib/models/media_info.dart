@@ -11,6 +11,29 @@ enum MediaKind {
   image,
 }
 
+/// Frame timing entry for a Pixiv Ugoira animation archive.
+class PixivUgoiraFrame {
+  final String file;
+  final int delayMs;
+
+  const PixivUgoiraFrame({
+    required this.file,
+    required this.delayMs,
+  });
+
+  Map<String, dynamic> toJson() => {
+        'file': file,
+        'delay': delayMs,
+      };
+
+  factory PixivUgoiraFrame.fromJson(Map<String, dynamic> json) {
+    return PixivUgoiraFrame(
+      file: json['file']?.toString() ?? '',
+      delayMs: (json['delay'] as num?)?.toInt() ?? 50,
+    );
+  }
+}
+
 /// Represents a single selectable photo (in a multi-photo post) OR a single
 /// post/artwork inside a profile/playlist bulk collection.
 class SelectableMediaItem {
@@ -28,6 +51,9 @@ class SelectableMediaItem {
 
   /// If non-null, downloading this item resolves all full-resolution pages of the Pixiv illust ID.
   final String? pixivIllustId;
+
+  /// True when this Pixiv work is an animated Ugoira (illustType == 2).
+  final bool isPixivUgoira;
 
   /// Stable canonical key used to remember & display "Sudah diunduh" badges across sessions.
   String get markerKey {
@@ -50,6 +76,7 @@ class SelectableMediaItem {
     this.badgeLabel = '',
     this.author,
     this.pixivIllustId,
+    this.isPixivUgoira = false,
   });
 
   String get mimeType {
@@ -98,6 +125,10 @@ class MediaFormatOption {
   final List<String> galleryUrls;
   final Map<String, String> headers;
 
+  /// True when [directUrl] points to a Pixiv Ugoira `.zip` archive converted via FFmpeg.
+  final bool isUgoira;
+  final List<PixivUgoiraFrame> ugoiraFrames;
+
   const MediaFormatOption({
     required this.id,
     required this.label,
@@ -111,6 +142,8 @@ class MediaFormatOption {
     this.directUrl,
     this.galleryUrls = const [],
     this.headers = const {},
+    this.isUgoira = false,
+    this.ugoiraFrames = const [],
   });
 
   bool get isAudio => kind == MediaKind.audio;

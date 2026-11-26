@@ -10,10 +10,11 @@ import '../models/managed_file.dart';
 import '../models/media_info.dart';
 import '../services/download_manager.dart';
 import 'file_gallery_viewer.dart';
+import 'wallpaper_sheet.dart';
 
 enum _AlbumReaderMode { pixivScroll, galleryGrid, rowList }
 
-enum _PageMenuAction { view, toggleLock, share, select, openExternal, info, delete }
+enum _PageMenuAction { view, setWallpaper, toggleLock, share, select, openExternal, info, delete }
 
 class _PageHitMeta {
   final int index;
@@ -560,6 +561,8 @@ class _PixivAlbumViewerState extends State<PixivAlbumViewer> {
               onTap: () {
                 if (_isSelectionMode) {
                   _togglePage(page);
+                } else if (page.mediaKind == MediaKind.video) {
+                  widget.manager.openManagedFile(page);
                 } else {
                   _openFullscreenLightbox(pages, index);
                 }
@@ -578,21 +581,66 @@ class _PixivAlbumViewerState extends State<PixivAlbumViewer> {
                 clipBehavior: Clip.antiAlias,
                 child: Stack(
                   children: [
-                    ConstrainedBox(
-                      constraints: const BoxConstraints(minHeight: 180),
-                      child: Image.file(
-                        File(page.savedPath),
-                        width: double.infinity,
-                        cacheWidth: 1200,
-                        fit: BoxFit.fitWidth,
-                        errorBuilder: (_, _, _) => Container(
-                          height: 220,
-                          color: theme.colorScheme.surfaceContainerHighest,
-                          alignment: Alignment.center,
-                          child: const Icon(Icons.broken_image_outlined, size: 42),
-                        ),
-                      ),
-                    ),
+                    page.mediaKind == MediaKind.video
+                        ? Container(
+                            height: 240,
+                            width: double.infinity,
+                            decoration: BoxDecoration(
+                              gradient: LinearGradient(
+                                begin: Alignment.topLeft,
+                                end: Alignment.bottomRight,
+                                colors: [
+                                  const Color(0xFF0096FA)
+                                      .withValues(alpha: 0.35),
+                                  const Color(0xFF0F172A),
+                                ],
+                              ),
+                            ),
+                            child: Column(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
+                                const Icon(
+                                  Icons.play_circle_filled_rounded,
+                                  size: 64,
+                                  color: Colors.white,
+                                ),
+                                const SizedBox(height: 10),
+                                const Text(
+                                  'Animasi Ugoira (MP4)',
+                                  style: TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 15,
+                                    fontWeight: FontWeight.w800,
+                                  ),
+                                ),
+                                const SizedBox(height: 4),
+                                Text(
+                                  'Ketuk untuk memutar • ${formatBytes(page.fileSize)}',
+                                  style: const TextStyle(
+                                    color: Colors.white70,
+                                    fontSize: 12,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          )
+                        : ConstrainedBox(
+                            constraints: const BoxConstraints(minHeight: 180),
+                            child: Image.file(
+                              File(page.savedPath),
+                              width: double.infinity,
+                              cacheWidth: 1200,
+                              fit: BoxFit.fitWidth,
+                              errorBuilder: (_, _, _) => Container(
+                                height: 220,
+                                color:
+                                    theme.colorScheme.surfaceContainerHighest,
+                                alignment: Alignment.center,
+                                child: const Icon(Icons.broken_image_outlined,
+                                    size: 42),
+                              ),
+                            ),
+                          ),
 
                     if (isSelected)
                       Positioned.fill(
@@ -644,6 +692,7 @@ class _PixivAlbumViewerState extends State<PixivAlbumViewer> {
                         right: 6,
                         child: _PagePopupMenu(
                           isPrivate: page.isPrivate,
+                          isImage: page.mediaKind == MediaKind.image,
                           overlay: true,
                           onSelected: (act) => _handlePageAction(act, page, pages, index),
                         ),
@@ -711,16 +760,41 @@ class _PixivAlbumViewerState extends State<PixivAlbumViewer> {
                     child: Stack(
                       fit: StackFit.expand,
                       children: [
-                        Image.file(
-                          File(page.savedPath),
-                          cacheWidth: 320,
-                          filterQuality: FilterQuality.low,
-                          fit: BoxFit.cover,
-                          errorBuilder: (_, _, _) => Container(
-                            color: theme.colorScheme.surfaceContainerHighest,
-                            child: const Icon(Icons.image_outlined),
-                          ),
-                        ),
+                        page.mediaKind == MediaKind.video
+                            ? Container(
+                                color: const Color(0xFF0096FA)
+                                    .withValues(alpha: 0.22),
+                                child: const Column(
+                                  mainAxisAlignment: MainAxisAlignment.center,
+                                  children: [
+                                    Icon(
+                                      Icons.play_circle_filled_rounded,
+                                      size: 34,
+                                      color: Colors.white,
+                                    ),
+                                    SizedBox(height: 3),
+                                    Text(
+                                      'Ugoira',
+                                      style: TextStyle(
+                                        color: Colors.white,
+                                        fontSize: 10.5,
+                                        fontWeight: FontWeight.w800,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              )
+                            : Image.file(
+                                File(page.savedPath),
+                                cacheWidth: 320,
+                                filterQuality: FilterQuality.low,
+                                fit: BoxFit.cover,
+                                errorBuilder: (_, _, _) => Container(
+                                  color:
+                                      theme.colorScheme.surfaceContainerHighest,
+                                  child: const Icon(Icons.image_outlined),
+                                ),
+                              ),
                         if (isSelected)
                           Container(
                             color:
@@ -768,6 +842,7 @@ class _PixivAlbumViewerState extends State<PixivAlbumViewer> {
                             right: 2,
                             child: _PagePopupMenu(
                               isPrivate: page.isPrivate,
+                              isImage: page.mediaKind == MediaKind.image,
                               overlay: true,
                               onSelected: (act) =>
                                   _handlePageAction(act, page, pages, index),
@@ -842,16 +917,27 @@ class _PixivAlbumViewerState extends State<PixivAlbumViewer> {
                         child: SizedBox(
                           width: 56,
                           height: 56,
-                          child: Image.file(
-                            File(page.savedPath),
-                            cacheWidth: 160,
-                            filterQuality: FilterQuality.low,
-                            fit: BoxFit.cover,
-                            errorBuilder: (_, _, _) => Container(
-                              color: theme.colorScheme.surfaceContainerHighest,
-                              child: const Icon(Icons.image_outlined),
-                            ),
-                          ),
+                          child: page.mediaKind == MediaKind.video
+                              ? Container(
+                                  color: const Color(0xFF0096FA)
+                                      .withValues(alpha: 0.2),
+                                  child: const Icon(
+                                    Icons.play_circle_filled_rounded,
+                                    color: Color(0xFF0096FA),
+                                    size: 28,
+                                  ),
+                                )
+                              : Image.file(
+                                  File(page.savedPath),
+                                  cacheWidth: 160,
+                                  filterQuality: FilterQuality.low,
+                                  fit: BoxFit.cover,
+                                  errorBuilder: (_, _, _) => Container(
+                                    color: theme
+                                        .colorScheme.surfaceContainerHighest,
+                                    child: const Icon(Icons.image_outlined),
+                                  ),
+                                ),
                         ),
                       ),
                       const SizedBox(width: 12),
@@ -895,6 +981,7 @@ class _PixivAlbumViewerState extends State<PixivAlbumViewer> {
                       if (!_isSelectionMode)
                         _PagePopupMenu(
                           isPrivate: page.isPrivate,
+                          isImage: page.mediaKind == MediaKind.image,
                           onSelected: (act) =>
                               _handlePageAction(act, page, pages, index),
                         ),
@@ -913,12 +1000,24 @@ class _PixivAlbumViewerState extends State<PixivAlbumViewer> {
   // ACTIONS
   // ===========================================================================
   Future<void> _openFullscreenLightbox(List<ManagedFile> pages, int index) async {
+    final target = (index >= 0 && index < pages.length) ? pages[index] : null;
+    if (target != null && target.mediaKind == MediaKind.video) {
+      await widget.manager.openManagedFile(target);
+      return;
+    }
+    final imagesOnly = pages
+        .where((p) => p.mediaKind == MediaKind.image)
+        .toList(growable: false);
+    if (imagesOnly.isEmpty) return;
+    final imgIdx = target != null
+        ? imagesOnly.indexWhere((p) => p.uniqueKey == target.uniqueKey)
+        : 0;
     await Navigator.of(context).push(
       MaterialPageRoute<void>(
         builder: (_) => FileGalleryViewer(
           manager: widget.manager,
-          images: pages,
-          initialIndex: index,
+          images: imagesOnly,
+          initialIndex: imgIdx >= 0 ? imgIdx : 0,
         ),
       ),
     );
@@ -933,6 +1032,13 @@ class _PixivAlbumViewerState extends State<PixivAlbumViewer> {
     switch (action) {
       case _PageMenuAction.view:
         await _openFullscreenLightbox(pages, index);
+        break;
+      case _PageMenuAction.setWallpaper:
+        await showSetWallpaperSheet(
+          context,
+          manager: widget.manager,
+          file: page,
+        );
         break;
       case _PageMenuAction.toggleLock:
         if (page.isPrivate) {
@@ -1316,12 +1422,14 @@ class _PageSelectCircle extends StatelessWidget {
 
 class _PagePopupMenu extends StatelessWidget {
   final bool isPrivate;
+  final bool isImage;
   final bool overlay;
   final ValueChanged<_PageMenuAction> onSelected;
 
   const _PagePopupMenu({
     required this.isPrivate,
     required this.onSelected,
+    this.isImage = true,
     this.overlay = false,
   });
 
@@ -1361,6 +1469,17 @@ class _PagePopupMenu extends StatelessWidget {
             ],
           ),
         ),
+        if (isImage)
+          const PopupMenuItem(
+            value: _PageMenuAction.setWallpaper,
+            child: Row(
+              children: [
+                Icon(Icons.wallpaper_rounded, size: 19),
+                SizedBox(width: 10),
+                Text('Jadikan Wallpaper'),
+              ],
+            ),
+          ),
         PopupMenuItem(
           value: _PageMenuAction.toggleLock,
           child: Row(

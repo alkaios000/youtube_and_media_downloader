@@ -179,6 +179,9 @@ class DownloadItem {
       subFiles.where((f) => f.status == DownloadStatus.completed).length;
 
   DownloadItem copyWith({
+    String? formatLabel,
+    String? extension,
+    MediaKind? mediaKind,
     DownloadStatus? status,
     double? progress,
     String? statusText,
@@ -201,9 +204,9 @@ class DownloadItem {
       title: title,
       author: author,
       thumbnailUrl: thumbnailUrl,
-      formatLabel: formatLabel,
-      extension: extension,
-      mediaKind: mediaKind,
+      formatLabel: formatLabel ?? this.formatLabel,
+      extension: extension ?? this.extension,
+      mediaKind: mediaKind ?? this.mediaKind,
       status: status ?? this.status,
       progress: progress ?? this.progress,
       statusText: statusText ?? this.statusText,

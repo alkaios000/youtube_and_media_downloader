@@ -1,10 +1,12 @@
 package com.linkdrop.linkdrop_downloader
 
+import android.app.WallpaperManager
 import android.content.ClipData
 import android.content.ContentUris
 import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
+import android.graphics.BitmapFactory
 import android.media.MediaScannerConnection
 import android.net.Uri
 import android.os.Build
@@ -27,6 +29,7 @@ import java.util.Date
 import java.util.Locale
 import java.util.TimeZone
 import java.util.concurrent.TimeUnit
+import java.util.zip.ZipInputStream
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -476,6 +479,242 @@ class MediaEngineBridge(private val context: Context) {
             runCatching { File(context.cacheDir, "ytdl_task_$taskId").deleteRecursively() }
         }
         return ok
+    }
+
+    /**
+     * Converts a downloaded Pixiv Ugoira `.zip` archive + frame delay metadata into a smooth
+     * playable H.264 `.mp4` video (or animated `.gif`) using the bundled native `libffmpeg.so`,
+     * then exports directly to Private Vault (default for Pixiv) or Public Gallery.
+     */
+    fun convertUgoiraZip(
+        zipPath: String,
+        frames: List<Map<String, Any?>>,
+        outputFormat: String,
+        fileName: String,
+        platformFolder: String,
+        creatorFolder: String,
+        albumFolder: String? = null,
+        isPrivate: Boolean = true,
+        onSuccess: (Map<String, Any?>) -> Unit,
+        onError: (String, String) -> Unit,
+    ) {
+        scope.launch {
+            val zipFile = File(zipPath)
+            val workDir = File(context.cacheDir, "ugoira_${System.currentTimeMillis()}_${zipFile.name.hashCode()}")
+            val framesDir = File(workDir, "frames")
+            try {
+                if (!zipFile.exists() || zipFile.length() == 0L) {
+                    throw IllegalArgumentException("File ZIP Ugoira tidak ditemukan atau kosong.")
+                }
+                ensureInitialized()
+                ensureCppSharedLibCopied()
+
+                val nativeLibDir = File(context.applicationInfo.nativeLibraryDir)
+                val ffmpegBin = File(nativeLibDir, "libffmpeg.so")
+                if (!ffmpegBin.exists()) {
+                    throw IllegalStateException("Engine FFmpeg tidak ditemukan untuk mengonversi Ugoira.")
+                }
+
+                framesDir.mkdirs()
+                val canonicalFramesRoot = framesDir.canonicalPath
+                val extractedFiles = mutableListOf<String>()
+
+                ZipInputStream(FileInputStream(zipFile).buffered()).use { zis ->
+                    val buffer = ByteArray(32 * 1024)
+                    var entry = zis.nextEntry
+                    while (entry != null) {
+                        if (!entry.isDirectory) {
+                            val entryName = File(entry.name).name
+                            if (entryName.isNotBlank() && !entryName.startsWith(".")) {
+                                val outTarget = File(framesDir, entryName)
+                                if (outTarget.canonicalPath.startsWith(canonicalFramesRoot)) {
+                                    FileOutputStream(outTarget).use { fos ->
+                                        var read = zis.read(buffer)
+                                        while (read > 0) {
+                                            fos.write(buffer, 0, read)
+                                            read = zis.read(buffer)
+                                        }
+                                    }
+                                    extractedFiles.add(entryName)
+                                }
+                            }
+                        }
+                        zis.closeEntry()
+                        entry = zis.nextEntry
+                    }
+                }
+
+                if (extractedFiles.isEmpty()) {
+                    throw IllegalStateException("Arsip ZIP Ugoira tidak berisi frame gambar.")
+                }
+
+                val orderedFrames = mutableListOf<Pair<String, Int>>()
+                for (f in frames) {
+                    val fName = File(f["file"]?.toString().orEmpty()).name
+                    val delayMs = ((f["delay"] as? Number)?.toInt() ?: 50).coerceIn(10, 10000)
+                    if (fName.isNotEmpty() && File(framesDir, fName).exists()) {
+                        orderedFrames.add(fName to delayMs)
+                    }
+                }
+                if (orderedFrames.isEmpty()) {
+                    extractedFiles.sorted().forEach { name ->
+                        orderedFrames.add(name to 50)
+                    }
+                }
+
+                // Write FFmpeg concat demuxer script with exact Pixiv per-frame durations
+                val concatFile = File(framesDir, "concat.txt")
+                val sb = StringBuilder("ffconcat version 1.0\n")
+                for ((fName, delayMs) in orderedFrames) {
+                    val escaped = fName.replace("'", "'\\''")
+                    val sec = String.format(Locale.US, "%.4f", delayMs / 1000.0)
+                    sb.append("file '").append(escaped).append("'\n")
+                    sb.append("duration ").append(sec).append('\n')
+                }
+                // FFmpeg concat demuxer requires repeating the final frame once to keep its duration
+                val lastEscaped = orderedFrames.last().first.replace("'", "'\\''")
+                sb.append("file '").append(lastEscaped).append("'\n")
+                concatFile.writeText(sb.toString())
+
+                val isGif = outputFormat.equals("gif", ignoreCase = true)
+                val outExt = if (isGif) "gif" else "mp4"
+                val outFile = File(workDir, "ugoira_out.$outExt")
+
+                val ffmpegLibDir = File(context.noBackupFilesDir, "youtubedl-android/packages/ffmpeg/usr/lib")
+                val ldParts = listOfNotNull(
+                    ffmpegLibDir.takeIf { it.exists() }?.absolutePath,
+                    nativeLibDir.absolutePath,
+                )
+
+                fun runFfmpeg(args: List<String>): Pair<Int, String> {
+                    if (outFile.exists()) runCatching { outFile.delete() }
+                    val cmd = mutableListOf(ffmpegBin.absolutePath)
+                    cmd.addAll(args)
+                    val pb = ProcessBuilder(cmd)
+                    pb.directory(framesDir)
+                    pb.redirectErrorStream(true)
+                    val existingLd = pb.environment()["LD_LIBRARY_PATH"].orEmpty()
+                    val fullLd = (ldParts + listOfNotNull(existingLd.takeIf { it.isNotBlank() })).joinToString(":")
+                    pb.environment()["LD_LIBRARY_PATH"] = fullLd
+
+                    val proc = pb.start()
+                    val logBuf = StringBuilder()
+                    val drain = Thread {
+                        runCatching {
+                            proc.inputStream.bufferedReader().use { r ->
+                                logBuf.append(r.readText().takeLast(600))
+                            }
+                        }
+                    }
+                    drain.start()
+                    val finished = proc.waitFor(180, TimeUnit.SECONDS)
+                    if (!finished) {
+                        proc.destroyForcibly()
+                        return -1 to "FFmpeg timeout"
+                    }
+                    drain.join(1500)
+                    return proc.exitValue() to logBuf.toString()
+                }
+
+                var ok = false
+                var lastLog = ""
+                if (isGif) {
+                    val (code1, log1) = runFfmpeg(
+                        listOf(
+                            "-y", "-f", "concat", "-safe", "0", "-i", "concat.txt",
+                            "-vf", "scale='min(720,iw)':-1:flags=lanczos,split[s0][s1];[s0]palettegen=stats_mode=diff[p];[s1][p]paletteuse=dither=bayer:bayer_scale=3",
+                            "-loop", "0",
+                            outFile.absolutePath,
+                        ),
+                    )
+                    if (code1 == 0 && outFile.exists() && outFile.length() > 512L) {
+                        ok = true
+                    } else {
+                        lastLog = log1
+                        val (code2, log2) = runFfmpeg(
+                            listOf(
+                                "-y", "-f", "concat", "-safe", "0", "-i", "concat.txt",
+                                "-loop", "0",
+                                outFile.absolutePath,
+                            ),
+                        )
+                        if (code2 == 0 && outFile.exists() && outFile.length() > 512L) {
+                            ok = true
+                        } else {
+                            lastLog = log2
+                        }
+                    }
+                } else {
+                    val (code1, log1) = runFfmpeg(
+                        listOf(
+                            "-y", "-f", "concat", "-safe", "0", "-i", "concat.txt",
+                            "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2",
+                            "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                            "-vsync", "vfr", "-crf", "18", "-preset", "veryfast",
+                            "-movflags", "+faststart",
+                            outFile.absolutePath,
+                        ),
+                    )
+                    if (code1 == 0 && outFile.exists() && outFile.length() > 512L) {
+                        ok = true
+                    } else {
+                        lastLog = log1
+                        val (code2, log2) = runFfmpeg(
+                            listOf(
+                                "-y", "-f", "concat", "-safe", "0", "-i", "concat.txt",
+                                "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2",
+                                "-c:v", "mpeg4", "-q:v", "3", "-pix_fmt", "yuv420p",
+                                "-vsync", "vfr", "-movflags", "+faststart",
+                                outFile.absolutePath,
+                            ),
+                        )
+                        if (code2 == 0 && outFile.exists() && outFile.length() > 512L) {
+                            ok = true
+                        } else {
+                            lastLog = log2
+                        }
+                    }
+                    if (ok) {
+                        Mp4TimestampPatcher.patchToNow(outFile)
+                    }
+                }
+
+                if (!ok) {
+                    Log.e(TAG, "convertUgoiraZip FFmpeg failed: $lastLog")
+                    throw IllegalStateException("Gagal mengonversi Ugoira dengan FFmpeg.")
+                }
+
+                val safeName = sanitizeFileName(fileName)
+                val mimeType = if (isGif) "image/gif" else "video/mp4"
+                val exported = if (isPrivate) {
+                    exportFileToPrivateVault(
+                        sourceFile = outFile,
+                        requestedName = safeName,
+                        mimeType = mimeType,
+                        platformFolder = platformFolder,
+                        creatorFolder = creatorFolder,
+                        albumFolder = albumFolder,
+                    )
+                } else {
+                    exportFileToPublicStorage(
+                        sourceFile = outFile,
+                        requestedName = safeName,
+                        mimeType = mimeType,
+                        platformFolder = platformFolder,
+                        creatorFolder = creatorFolder,
+                        albumFolder = albumFolder,
+                    )
+                }
+
+                postToMain { onSuccess(exported) }
+            } catch (t: Throwable) {
+                Log.e(TAG, "convertUgoiraZip failed", t)
+                postToMain { onError("UGOIRA_ERROR", t.message ?: "Gagal mengonversi Ugoira") }
+            } finally {
+                runCatching { zipFile.delete() }
+                runCatching { workDir.deleteRecursively() }
+            }
+        }
     }
 
     fun saveFileToDownloads(
@@ -1449,6 +1688,103 @@ class MediaEngineBridge(private val context: Context) {
         val creator = parts.getOrNull(idx + 2)?.takeIf { it.isNotBlank() } ?: "Umum"
         val album = parts.getOrNull(idx + 3)?.takeIf { it.isNotBlank() } ?: ""
         return Triple(platform, creator, album)
+    }
+
+    fun setWallpaper(
+        filePath: String?,
+        contentUri: String?,
+        target: String,
+        onSuccess: (Boolean) -> Unit,
+        onError: (String, String) -> Unit,
+    ) {
+        scope.launch {
+            try {
+                val wm = WallpaperManager.getInstance(context)
+                if (target.equals("crop", ignoreCase = true)) {
+                    val uri = resolveReadableUri(filePath, contentUri)
+                        ?: throw IllegalArgumentException("File gambar tidak ditemukan.")
+                    val launched = runCatching {
+                        val cropIntent = wm.getCropAndSetWallpaperIntent(uri).apply {
+                            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        }
+                        context.startActivity(cropIntent)
+                        true
+                    }.getOrElse {
+                        runCatching {
+                            val attachIntent = Intent(Intent.ACTION_ATTACH_DATA).apply {
+                                setDataAndType(uri, "image/*")
+                                putExtra("mimeType", "image/*")
+                                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            }
+                            context.startActivity(
+                                Intent.createChooser(attachIntent, "Jadikan Wallpaper").apply {
+                                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                },
+                            )
+                            true
+                        }.getOrDefault(false)
+                    }
+                    postToMain { onSuccess(launched) }
+                    return@launch
+                }
+
+                fun openImageStream(): java.io.InputStream? {
+                    if (!filePath.isNullOrBlank()) {
+                        val f = File(filePath)
+                        if (f.exists() && f.isFile && f.length() > 0L) {
+                            return FileInputStream(f)
+                        }
+                    }
+                    if (!contentUri.isNullOrBlank() && contentUri.startsWith("content://")) {
+                        return context.contentResolver.openInputStream(Uri.parse(contentUri))
+                    }
+                    return null
+                }
+
+                val flags = when (target.lowercase(Locale.US)) {
+                    "lock" -> if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) WallpaperManager.FLAG_LOCK else 0
+                    "both" -> if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                        WallpaperManager.FLAG_SYSTEM or WallpaperManager.FLAG_LOCK
+                    } else {
+                        0
+                    }
+                    else -> if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) WallpaperManager.FLAG_SYSTEM else 0
+                }
+
+                val appliedByStream = runCatching {
+                    openImageStream()?.use { stream ->
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N && flags != 0) {
+                            wm.setStream(stream, null, true, flags)
+                        } else {
+                            wm.setStream(stream)
+                        }
+                        true
+                    } ?: false
+                }.getOrDefault(false)
+
+                if (!appliedByStream) {
+                    val bitmap = openImageStream()?.use { BitmapFactory.decodeStream(it) }
+                        ?: throw IllegalStateException("Gagal membaca gambar untuk wallpaper.")
+                    try {
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N && flags != 0) {
+                            wm.setBitmap(bitmap, null, true, flags)
+                        } else {
+                            wm.setBitmap(bitmap)
+                        }
+                    } finally {
+                        bitmap.recycle()
+                    }
+                }
+
+                postToMain { onSuccess(true) }
+            } catch (t: Throwable) {
+                Log.e(TAG, "setWallpaper failed", t)
+                postToMain { onError("WALLPAPER_ERROR", t.message ?: "Gagal memasang wallpaper") }
+            }
+        }
     }
 
     fun openFile(filePath: String?, contentUri: String?, mimeType: String?): Boolean {

@@ -237,7 +237,35 @@ class _DownloadDetailSheet extends StatelessWidget {
                               TextButton(
                                 onPressed: () async {
                                   if (isMarked) {
-                                    await manager.unmarkDownloaded(markerKey);
+                                    final ok = await showDialog<bool>(
+                                      context: context,
+                                      builder: (ctx) => AlertDialog(
+                                        title: const Text('Hapus Penandaan?'),
+                                        content: Text(
+                                          'Hapus tanda "Sudah diunduh" untuk "${item.title}"? File yang sudah tersimpan di HP tidak ikut terhapus.',
+                                        ),
+                                        actions: [
+                                          TextButton(
+                                            onPressed: () =>
+                                                Navigator.pop(ctx, false),
+                                            child: const Text('Batal'),
+                                          ),
+                                          FilledButton(
+                                            onPressed: () =>
+                                                Navigator.pop(ctx, true),
+                                            style: FilledButton.styleFrom(
+                                              backgroundColor: Theme.of(ctx)
+                                                  .colorScheme
+                                                  .error,
+                                            ),
+                                            child: const Text('Hapus Tanda'),
+                                          ),
+                                        ],
+                                      ),
+                                    );
+                                    if (ok == true) {
+                                      await manager.unmarkDownloaded(markerKey);
+                                    }
                                   } else {
                                     await manager.markDownloaded(markerKey);
                                   }

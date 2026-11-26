@@ -624,7 +624,7 @@ class WebViewMediaSniffer(private val context: Context) {
                 "douyin" -> "Login Douyin"
                 "tiktok" -> "Login TikTok"
                 "facebook" -> "Login Facebook"
-                "pixiv" -> "Login Pixiv"
+                "pixiv" -> "Login Pixiv (R-18 & Member)"
                 else -> "Login Instagram"
             }
 
@@ -732,7 +732,11 @@ class WebViewMediaSniffer(private val context: Context) {
             }
             "facebook" -> cm.getCookie("https://www.facebook.com").orEmpty().contains("c_user=") ||
                 cm.getCookie("https://m.facebook.com").orEmpty().contains("c_user=")
-            "pixiv" -> cm.getCookie("https://www.pixiv.net").orEmpty().contains("PHPSESSID=")
+            "pixiv" -> {
+                val c = cm.getCookie("https://www.pixiv.net").orEmpty() + "; " +
+                    cm.getCookie("https://pixiv.net").orEmpty()
+                c.contains("PHPSESSID=")
+            }
             "tiktok" -> {
                 val c = cm.getCookie("https://www.tiktok.com").orEmpty()
                 c.contains("sessionid=") || c.contains("sid_tt=") || c.contains("tt_chain_token=")
@@ -742,7 +746,32 @@ class WebViewMediaSniffer(private val context: Context) {
     }
 
     fun getCookieHeaderForUrl(url: String): String {
-        return runCatching { CookieManager.getInstance().getCookie(url).orEmpty() }.getOrDefault("")
+        return runCatching {
+            val cm = CookieManager.getInstance()
+            if (url.contains("pixiv.net", ignoreCase = true)) {
+                val merged = LinkedHashMap<String, String>()
+                val sources = listOf(
+                    "https://accounts.pixiv.net",
+                    "https://pixiv.net",
+                    "https://www.pixiv.net",
+                    url,
+                )
+                for (src in sources) {
+                    val raw = cm.getCookie(src).orEmpty()
+                    if (raw.isBlank()) continue
+                    for (pair in raw.split(";")) {
+                        val eq = pair.indexOf('=')
+                        if (eq <= 0) continue
+                        val k = pair.substring(0, eq).trim()
+                        val v = pair.substring(eq + 1).trim()
+                        if (k.isNotEmpty()) merged[k] = v
+                    }
+                }
+                merged.entries.joinToString("; ") { "${it.key}=${it.value}" }
+            } else {
+                cm.getCookie(url).orEmpty()
+            }
+        }.getOrDefault("")
     }
 
     fun clearWebViewCookies(onDone: () -> Unit) {

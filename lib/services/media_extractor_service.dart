@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:io';
 
 import '../models/media_info.dart';
 import '../models/media_platform.dart';
@@ -42,16 +43,26 @@ class MediaExtractorService {
     final cleanUrl = detection.cleanUrl;
     final platform = detection.platform;
 
-    // 1. Pixiv (single artwork OR user profile / username bulk!)
+    // 1. Pixiv (single artwork, R-18, Ugoira OR user profile / bookmarks / username bulk!)
     if (platform == MediaPlatform.pixiv) {
       final cookieHeader = await _safeCookieHeader('https://www.pixiv.net/');
+      String customCookies = '';
+      if (cookiesPath != null && cookiesPath.isNotEmpty) {
+        try {
+          final f = File(cookiesPath);
+          if (await f.exists()) {
+            customCookies = await f.readAsString();
+          }
+        } catch (_) {}
+      }
       final pixivInfo = await _direct.extractPixiv(
         cleanUrl,
         cookieHeader: cookieHeader,
+        customCookies: customCookies,
       );
       if (pixivInfo != null) return pixivInfo;
       throw Exception(
-        'Gagal memuat karya/profil Pixiv. Untuk karya khusus member/R-18, login dulu lewat Pengaturan -> Login Browser (Pixiv).',
+        'Gagal memuat karya/profil Pixiv. Untuk karya R-18 / khusus member, login dulu lewat Login Browser Pixiv (dan pastikan opsi R-18 aktif di akun Pixiv).',
       );
     }
 

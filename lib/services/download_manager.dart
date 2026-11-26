@@ -14,6 +14,7 @@ import '../models/download_item.dart';
 import '../models/managed_file.dart';
 import '../models/media_info.dart';
 import '../models/media_platform.dart';
+import 'direct_extractors.dart';
 import 'media_extractor_service.dart';
 import 'native_bridge.dart';
 import 'storage_service.dart';
@@ -666,6 +667,7 @@ class DownloadManager extends ChangeNotifier {
   Map<String, dynamic> _encodeResumePayload({
     required MediaFormatOption option,
     String? pixivIllustId,
+    bool isPixivUgoira = false,
     List<String> extraMarkerKeys = const [],
     bool markAlbumKey = true,
   }) {
@@ -678,8 +680,13 @@ class DownloadManager extends ChangeNotifier {
       'audioOnly': option.isAudio,
       'extension': option.extension,
       'mediaKind': option.kind.name,
+      if (option.isUgoira) 'isUgoira': true,
+      if (option.ugoiraFrames.isNotEmpty)
+        'ugoiraFrames':
+            option.ugoiraFrames.map((f) => f.toJson()).toList(growable: false),
       if (pixivIllustId != null && pixivIllustId.isNotEmpty)
         'pixivIllustId': pixivIllustId,
+      if (isPixivUgoira) 'isPixivUgoira': true,
       if (extraMarkerKeys.isNotEmpty) 'extraMarkerKeys': extraMarkerKeys,
       'markAlbumKey': markAlbumKey,
     };
@@ -890,6 +897,7 @@ class DownloadManager extends ChangeNotifier {
         'engine': isDirect ? DownloadEngine.directHttp.name : DownloadEngine.ytDlp.name,
         if (sel.pixivIllustId != null && sel.pixivIllustId!.isNotEmpty)
           'pixivIllustId': sel.pixivIllustId,
+        if (sel.isPixivUgoira) 'isPixivUgoira': true,
         if (sel.directUrl != null) 'directUrl': sel.directUrl,
         'galleryUrls': sel.kind == MediaKind.image && sel.directUrl != null
             ? [sel.directUrl!]
@@ -965,7 +973,7 @@ class DownloadManager extends ChangeNotifier {
     List<(String, SelectableMediaItem)> queue,
   ) async {
     final pixivCookie = collectionInfo.platform == MediaPlatform.pixiv
-        ? await _safeCookieHeader('https://www.pixiv.net/')
+        ? await _resolvePixivCookieHeader()
         : '';
 
     int cursor = 0;
@@ -999,6 +1007,7 @@ class DownloadManager extends ChangeNotifier {
             info: singleInfo,
             headers: sel.headers,
             pixivCookie: pixivCookie,
+            isUgoiraHint: sel.isPixivUgoira,
             extraMarkerKeys: [sel.markerKey],
           );
           continue;
@@ -1036,9 +1045,82 @@ class DownloadManager extends ChangeNotifier {
     required MediaInfo info,
     required Map<String, String> headers,
     required String pixivCookie,
+    bool isUgoiraHint = false,
     required List<String> extraMarkerKeys,
   }) async {
     if (_isTaskStopped(taskId)) return;
+
+    final effectiveHeaders = {
+      ...headers,
+      ...DirectExtractors.buildPixivHeaders(
+        cookieHeader: pixivCookie,
+        customCookies: _settings.customCookies,
+      ),
+    };
+
+    Future<bool> tryRunUgoira() async {
+      _updateItem(
+        taskId,
+        (item) => item.copyWith(
+          status: DownloadStatus.downloading,
+          statusText: 'Memuat metadata animasi Ugoira...',
+        ),
+      );
+      final ugoira = await _extractor.directExtractors.fetchPixivUgoiraMeta(
+        illustId,
+        cookieHeader: pixivCookie,
+        customCookies: _settings.customCookies,
+      );
+      if (_isTaskStopped(taskId)) return true;
+      if (ugoira == null) return false;
+
+      final opt = MediaFormatOption(
+        id: 'px_ugoira_$illustId',
+        label: 'Ugoira MP4',
+        subtitle: 'Pixiv Ugoira',
+        extension: 'mp4',
+        kind: MediaKind.video,
+        engine: DownloadEngine.directHttp,
+        directUrl: ugoira.zipUrl,
+        headers: effectiveHeaders,
+        isUgoira: true,
+        ugoiraFrames: ugoira.frames,
+      );
+      final safeBase = _sanitizeBaseName(info.title);
+      _updateItem(
+        taskId,
+        (item) => item.copyWith(
+          extension: 'mp4',
+          mediaKind: MediaKind.video,
+          formatLabel: 'Ugoira MP4',
+          subFiles: [
+            SubFileTask(
+              id: '${taskId}_0',
+              fileName: '$safeBase.mp4',
+              status: DownloadStatus.queued,
+            ),
+          ],
+          resumePayload: _encodeResumePayload(
+            option: opt,
+            pixivIllustId: illustId,
+            isPixivUgoira: true,
+            extraMarkerKeys: extraMarkerKeys,
+          ),
+        ),
+      );
+      await _runDirectHttpDownload(
+        taskId,
+        info,
+        opt,
+        extraMarkerKeys: extraMarkerKeys,
+      );
+      return true;
+    }
+
+    if (isUgoiraHint) {
+      final ran = await tryRunUgoira();
+      if (ran) return;
+    }
 
     _updateItem(
       taskId,
@@ -1054,12 +1136,22 @@ class DownloadManager extends ChangeNotifier {
         : await _extractor.directExtractors.fetchPixivIllustOriginalUrls(
             illustId,
             cookieHeader: pixivCookie,
+            customCookies: _settings.customCookies,
           );
+
+    if (_isTaskStopped(taskId)) return;
+
+    // Auto-detect Ugoira even if bulk metadata wasn't available (Pixiv Ugoira cover contains `_ugoira`)!
+    final looksLikeUgoira = origUrls.length == 1 &&
+        origUrls.first.toLowerCase().contains('_ugoira');
+    if (origUrls.isEmpty || looksLikeUgoira) {
+      final ran = await tryRunUgoira();
+      if (ran) return;
+    }
+
     if (origUrls.isNotEmpty) {
       _pixivPagesCache[illustId] = origUrls;
     }
-
-    if (_isTaskStopped(taskId)) return;
 
     if (origUrls.isEmpty) {
       _updateItem(
@@ -1068,7 +1160,7 @@ class DownloadManager extends ChangeNotifier {
           status: DownloadStatus.failed,
           statusText: 'Gagal mengambil halaman Pixiv',
           errorMessage:
-              'Karya mungkin khusus member/R-18 (login Pixiv di Pengaturan).',
+              'Karya R-18 / member Pixiv memerlukan login di Pengaturan (dan aktifkan tampilan R-18 di akun Pixiv).',
           subFiles: item.subFiles
               .map((s) => s.copyWith(
                     status: DownloadStatus.failed,
@@ -1091,7 +1183,7 @@ class DownloadManager extends ChangeNotifier {
       engine: DownloadEngine.directHttp,
       directUrl: origUrls.first,
       galleryUrls: origUrls,
-      headers: headers,
+      headers: effectiveHeaders,
     );
 
     // Save resolved galleryUrls into resumePayload so Pause/Resume skips /pages API!
@@ -1269,6 +1361,13 @@ class DownloadManager extends ChangeNotifier {
     }
 
     final pixivIllustId = payload['pixivIllustId']?.toString();
+    final isPixivUgoira = payload['isPixivUgoira'] as bool? ?? false;
+    final isUgoira = payload['isUgoira'] as bool? ?? false;
+    final ugoiraFrames = (payload['ugoiraFrames'] as List?)
+            ?.whereType<Map>()
+            .map((e) => PixivUgoiraFrame.fromJson(Map<String, dynamic>.from(e)))
+            .toList(growable: false) ??
+        const <PixivUgoiraFrame>[];
     final galleryUrls = (payload['galleryUrls'] as List?)
             ?.map((e) => e.toString())
             .where((u) => u.startsWith('http'))
@@ -1277,10 +1376,21 @@ class DownloadManager extends ChangeNotifier {
     final directUrl = payload['directUrl']?.toString();
     final engineStr = payload['engine']?.toString() ?? '';
 
+    if (item.platform == MediaPlatform.pixiv) {
+      final freshCookie = await _resolvePixivCookieHeader();
+      headers.addAll(
+        DirectExtractors.buildPixivHeaders(
+          cookieHeader: freshCookie,
+          customCookies: _settings.customCookies,
+        ),
+      );
+    }
+
     if (pixivIllustId != null &&
         pixivIllustId.isNotEmpty &&
-        galleryUrls.isEmpty) {
-      final pixivCookie = await _safeCookieHeader('https://www.pixiv.net/');
+        galleryUrls.isEmpty &&
+        !isUgoira) {
+      final pixivCookie = await _resolvePixivCookieHeader();
       unawaited(
         _executePixivArtworkTask(
           taskId: taskId,
@@ -1288,6 +1398,7 @@ class DownloadManager extends ChangeNotifier {
           info: info,
           headers: headers,
           pixivCookie: pixivCookie,
+          isUgoiraHint: isPixivUgoira,
           extraMarkerKeys: extraKeys,
         ),
       );
@@ -1310,6 +1421,8 @@ class DownloadManager extends ChangeNotifier {
                 : galleryUrls.first,
         galleryUrls: galleryUrls,
         headers: headers,
+        isUgoira: isUgoira,
+        ugoiraFrames: ugoiraFrames,
       );
       unawaited(
         _runDirectHttpDownload(
@@ -1356,6 +1469,15 @@ class DownloadManager extends ChangeNotifier {
     }
   }
 
+  Future<void> retryAllFailed() async {
+    final failed = _items
+        .where((i) => i.status == DownloadStatus.failed && i.canResume)
+        .toList(growable: false);
+    for (final item in failed) {
+      await resumeDownload(item.id);
+    }
+  }
+
   Future<void> cancelDownload(String taskId) async {
     _pausedTaskIds.remove(taskId);
     _cancelledTaskIds.add(taskId);
@@ -1388,6 +1510,14 @@ class DownloadManager extends ChangeNotifier {
     } catch (_) {
       return '';
     }
+  }
+
+  Future<String> _resolvePixivCookieHeader() async {
+    final webViewCookie = await _safeCookieHeader('https://www.pixiv.net/');
+    return DirectExtractors.mergePixivCookies(
+      cookieHeader: webViewCookie,
+      customCookies: _settings.customCookies,
+    );
   }
 
   Future<void> _runYtDlpDownload(
@@ -1634,7 +1764,9 @@ class DownloadManager extends ChangeNotifier {
         } else {
           final single = subTasks.first;
           if (single.status == DownloadStatus.saving) {
-            statusLabel = 'Menyimpan ke folder ${info.platform.folderName}...';
+            statusLabel = option.isUgoira
+                ? 'Mengonversi Ugoira ke ${option.extension.toUpperCase()} (FFmpeg)...'
+                : 'Menyimpan ke folder ${info.platform.folderName}...';
           } else if (single.totalBytes > 0) {
             statusLabel =
                 '${formatBytes(single.downloadedBytes)} / ${formatBytes(single.totalBytes)}$speedLabel';
@@ -1856,15 +1988,30 @@ class DownloadManager extends ChangeNotifier {
               );
               syncParent();
 
-              final saved = await _bridge.saveFileToDownloads(
-                sourcePath: partPath,
-                fileName: fileName,
-                mimeType: mime,
-                platformFolder: info.platform.folderName,
-                creatorFolder: info.author,
-                albumFolder: isPixivPrivate ? info.title : null,
-                isPrivate: isPixivPrivate,
-              );
+              final saved = option.isUgoira
+                  ? await _ytDlpPool.run(
+                      () => _bridge.convertUgoiraZip(
+                        zipPath: partPath,
+                        frames: option.ugoiraFrames
+                            .map((f) => f.toJson())
+                            .toList(growable: false),
+                        outputFormat: option.extension,
+                        fileName: fileName,
+                        platformFolder: info.platform.folderName,
+                        creatorFolder: info.author,
+                        albumFolder: isPixivPrivate ? info.title : null,
+                        isPrivate: isPixivPrivate,
+                      ),
+                    )
+                  : await _bridge.saveFileToDownloads(
+                      sourcePath: partPath,
+                      fileName: fileName,
+                      mimeType: mime,
+                      platformFolder: info.platform.folderName,
+                      creatorFolder: info.author,
+                      albumFolder: isPixivPrivate ? info.title : null,
+                      isPrivate: isPixivPrivate,
+                    );
               if (saved.skipped) skippedCount++;
 
               firstSaved ??= saved;
@@ -2211,6 +2358,17 @@ class DownloadManager extends ChangeNotifier {
     );
   }
 
+  Future<bool> setManagedFileAsWallpaper(
+    ManagedFile file, {
+    String target = 'crop',
+  }) async {
+    return _bridge.setWallpaper(
+      filePath: file.savedPath,
+      contentUri: file.contentUri,
+      target: target,
+    );
+  }
+
   Future<bool> openManagedFile(ManagedFile file) async {
     return _bridge.openFile(
       filePath: file.savedPath,
@@ -2297,7 +2455,10 @@ class DownloadManager extends ChangeNotifier {
   }
 
   Future<void> clearAllHistory() async {
-    _items = _items.where((i) => i.isActive || i.isPaused).toList();
+    _items = _items
+        .where((i) =>
+            i.isActive || i.isPaused || i.status == DownloadStatus.failed)
+        .toList();
     _notifyImmediate();
     await _storage.saveHistory(_items);
   }

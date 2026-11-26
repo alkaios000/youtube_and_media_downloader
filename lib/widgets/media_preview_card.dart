@@ -127,7 +127,47 @@ class _MediaPreviewCardState extends State<MediaPreviewCard> {
     }
   }
 
-  Future<void> _unmarkSingleItem(SelectableMediaItem item) async {
+  Future<bool> _confirmUnmarkDialog(
+    BuildContext context, {
+    required String title,
+    required String message,
+    String confirmLabel = 'Hapus Tanda',
+  }) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(title),
+        content: Text(message),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Batal'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            style: FilledButton.styleFrom(
+              backgroundColor: Theme.of(ctx).colorScheme.error,
+            ),
+            child: Text(confirmLabel),
+          ),
+        ],
+      ),
+    );
+    return ok == true;
+  }
+
+  Future<void> _unmarkSingleItem(
+    BuildContext context,
+    SelectableMediaItem item,
+  ) async {
+    final confirmed = await _confirmUnmarkDialog(
+      context,
+      title: 'Hapus Penandaan?',
+      message:
+          'Hapus tanda "Sudah diunduh" untuk "${item.title}" agar bisa diunduh ulang? File yang sudah tersimpan di HP tidak ikut terhapus.',
+    );
+    if (!confirmed) return;
+
     if (widget.info.isBulkProfile) {
       await widget.onUnmarkKey?.call(item.markerKey);
       return;
@@ -149,11 +189,36 @@ class _MediaPreviewCardState extends State<MediaPreviewCard> {
     }
   }
 
-  Future<void> _executeBulkUnmarkSelected(List<SelectableMediaItem> items) async {
+  Future<void> _confirmUnmarkSingleCard(
+    BuildContext context,
+    MediaInfo info,
+  ) async {
+    final confirmed = await _confirmUnmarkDialog(
+      context,
+      title: 'Hapus Penandaan?',
+      message:
+          'Hapus tanda "Sudah diunduh" untuk "${info.title}" agar bisa diunduh ulang? File yang sudah tersimpan di HP tidak ikut terhapus.',
+    );
+    if (!confirmed) return;
+    await widget.onUnmarkKey?.call(info.markerKey);
+  }
+
+  Future<void> _executeBulkUnmarkSelected(
+    BuildContext context,
+    List<SelectableMediaItem> items,
+  ) async {
     if (_unmarkSelectedIds.isEmpty) return;
     final chosenItems =
         items.where((e) => _unmarkSelectedIds.contains(e.id)).toList();
     if (chosenItems.isEmpty) return;
+
+    final confirmed = await _confirmUnmarkDialog(
+      context,
+      title: 'Hapus Penandaan?',
+      message:
+          'Hapus tanda "Sudah diunduh" dari ${chosenItems.length} media terpilih? File yang sudah tersimpan di HP tidak ikut terhapus.',
+    );
+    if (!confirmed) return;
 
     if (widget.info.isBulkProfile) {
       final keys = chosenItems.map((e) => e.markerKey).toList();
@@ -194,40 +259,18 @@ class _MediaPreviewCardState extends State<MediaPreviewCard> {
     ];
     if (keysToRemove.isEmpty) return;
 
-    if (downloadedCount == 1) {
-      await widget.onUnmarkKeys?.call(keysToRemove);
-      if (mounted) {
-        setState(() {
-          _unmarkSelectedIds.clear();
-          _isUnmarkMode = false;
-        });
-      }
-      return;
-    }
-
-    final ok = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Hapus Semua Penandaan?'),
-        content: Text(
-          'Hapus tanda "Sudah diunduh" dari semua $downloadedCount media di daftar ini? File yang sudah tersimpan di HP tidak ikut terhapus.',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, false),
-            child: const Text('Batal'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(ctx, true),
-            style: FilledButton.styleFrom(
-              backgroundColor: Theme.of(ctx).colorScheme.error,
-            ),
-            child: const Text('Hapus Semua Tanda'),
-          ),
-        ],
-      ),
+    final confirmed = await _confirmUnmarkDialog(
+      context,
+      title: downloadedCount == 1
+          ? 'Hapus Penandaan?'
+          : 'Hapus Semua Penandaan?',
+      message: downloadedCount == 1
+          ? 'Hapus tanda "Sudah diunduh" dari media ini? File yang sudah tersimpan di HP tidak ikut terhapus.'
+          : 'Hapus tanda "Sudah diunduh" dari semua $downloadedCount media di daftar ini? File yang sudah tersimpan di HP tidak ikut terhapus.',
+      confirmLabel:
+          downloadedCount == 1 ? 'Hapus Tanda' : 'Hapus Semua Tanda',
     );
-    if (ok == true) {
+    if (confirmed) {
       await widget.onUnmarkKeys?.call(keysToRemove);
       if (mounted) {
         setState(() {
@@ -509,7 +552,7 @@ class _MediaPreviewCardState extends State<MediaPreviewCard> {
                       child: FilledButton.icon(
                         onPressed: _unmarkSelectedIds.isEmpty
                             ? null
-                            : () => _executeBulkUnmarkSelected(allItems),
+                            : () => _executeBulkUnmarkSelected(context, allItems),
                         style: FilledButton.styleFrom(
                           backgroundColor: theme.colorScheme.error,
                           foregroundColor: Colors.white,
@@ -745,7 +788,7 @@ class _MediaPreviewCardState extends State<MediaPreviewCard> {
                       child: FilledButton.icon(
                         onPressed: _unmarkSelectedIds.isEmpty
                             ? null
-                            : () => _executeBulkUnmarkSelected(items),
+                            : () => _executeBulkUnmarkSelected(context, items),
                         style: FilledButton.styleFrom(
                           backgroundColor: theme.colorScheme.error,
                           foregroundColor: Colors.white,
@@ -948,7 +991,7 @@ class _MediaPreviewCardState extends State<MediaPreviewCard> {
                         : 'Media ini sudah pernah diunduh',
                     showBulkPickBtn: false,
                     onClearAll: widget.onUnmarkKey != null
-                        ? () => widget.onUnmarkKey!(info.markerKey)
+                        ? () => _confirmUnmarkSingleCard(context, info)
                         : null,
                   ),
                   const SizedBox(height: 12),
@@ -1145,7 +1188,7 @@ class _MediaPreviewCardState extends State<MediaPreviewCard> {
           unmarkMode: _isUnmarkMode,
           pickedForUnmark: isPickedForUnmark,
           onUnmark: !_isUnmarkMode && isDone && widget.onUnmarkKey != null
-              ? () => _unmarkSingleItem(item)
+              ? () => _unmarkSingleItem(context, item)
               : null,
           onTap: () {
             if (_isUnmarkMode) {

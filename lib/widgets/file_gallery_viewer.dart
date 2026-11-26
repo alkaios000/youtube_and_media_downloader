@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 import '../models/managed_file.dart';
 import '../models/media_info.dart';
 import '../services/download_manager.dart';
+import 'wallpaper_sheet.dart';
 
 /// Full-screen, swipeable, unclipped pinch-to-zoom & double-tap-to-zoom gallery viewer
 /// for downloaded images with Unlock/Lock, Share, Open Externally, Info, and Delete controls.
@@ -140,6 +141,11 @@ class _FileGalleryViewerState extends State<FileGalleryViewer> {
                         ),
                       ),
                       IconButton(
+                        onPressed: () => widget.manager.openManagedFile(_current),
+                        icon: const Icon(Icons.open_in_new_rounded, color: Colors.white),
+                        tooltip: 'Buka di App Lain',
+                      ),
+                      IconButton(
                         onPressed: _showInfoSheet,
                         icon: const Icon(Icons.info_outline_rounded, color: Colors.white),
                         tooltip: 'Detail File',
@@ -188,14 +194,18 @@ class _FileGalleryViewerState extends State<FileGalleryViewer> {
                         onTap: _togglingPrivacy ? () {} : _togglePrivacyCurrent,
                       ),
                       _ViewerActionBtn(
+                        icon: Icons.wallpaper_rounded,
+                        label: 'Wallpaper',
+                        onTap: () => showSetWallpaperSheet(
+                          context,
+                          manager: widget.manager,
+                          file: _current,
+                        ),
+                      ),
+                      _ViewerActionBtn(
                         icon: Icons.share_rounded,
                         label: 'Bagikan',
                         onTap: () => widget.manager.shareManagedFile(_current),
-                      ),
-                      _ViewerActionBtn(
-                        icon: Icons.open_in_new_rounded,
-                        label: 'Buka App',
-                        onTap: () => widget.manager.openManagedFile(_current),
                       ),
                       _ViewerActionBtn(
                         icon: Icons.delete_outline_rounded,

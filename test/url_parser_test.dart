@@ -8,6 +8,7 @@ import 'package:linkdrop_downloader/models/download_item.dart';
 import 'package:linkdrop_downloader/models/managed_file.dart';
 import 'package:linkdrop_downloader/models/media_info.dart';
 import 'package:linkdrop_downloader/models/media_platform.dart';
+import 'package:linkdrop_downloader/services/direct_extractors.dart';
 import 'package:linkdrop_downloader/services/media_extractor_service.dart';
 import 'package:linkdrop_downloader/services/native_bridge.dart';
 import 'package:linkdrop_downloader/services/storage_service.dart';
@@ -301,6 +302,34 @@ void main() {
       expect(restored.history.single.status, DownloadStatus.paused);
       expect(restored.history.single.canResume, isTrue);
       expect(restored.history.single.resumePayload?['engine'], 'ytDlp');
+    });
+  });
+
+  group('Pixiv R-18 cookie headers & Ugoira frames', () {
+    test('merges Netscape & WebView Pixiv cookies and extracts x-user-id from PHPSESSID', () {
+      const netscape = '''
+# Netscape HTTP Cookie File
+.pixiv.net\tTRUE\t/\tTRUE\t1999999999\tPHPSESSID\t98765432_secretTokenXYZ
+.pixiv.net\tTRUE\t/\tTRUE\t1999999999\tdevice_token\tabcdef012345
+.instagram.com\tTRUE\t/\tTRUE\t1999999999\tsessionid\tignored
+''';
+      final headers = DirectExtractors.buildPixivHeaders(
+        cookieHeader: 'p_ab_id=3',
+        customCookies: netscape,
+      );
+      expect(headers['Referer'], 'https://www.pixiv.net/');
+      expect(headers['x-user-id'], '98765432');
+      expect(headers['Cookie'], contains('PHPSESSID=98765432_secretTokenXYZ'));
+      expect(headers['Cookie'], contains('device_token=abcdef012345'));
+      expect(headers['Cookie'], contains('p_ab_id=3'));
+      expect(headers['Cookie'], isNot(contains('sessionid=')));
+    });
+
+    test('round-trips PixivUgoiraFrame JSON', () {
+      const frame = PixivUgoiraFrame(file: '000001.jpg', delayMs: 67);
+      final restored = PixivUgoiraFrame.fromJson(frame.toJson());
+      expect(restored.file, '000001.jpg');
+      expect(restored.delayMs, 67);
     });
   });
 }

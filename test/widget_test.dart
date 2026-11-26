@@ -162,8 +162,15 @@ void main() {
     await tester.pump();
     expect(find.text('Hapus 2 Penanda'), findsOneWidget);
 
+    // Tapping "Hapus 2 Penanda" MUST show a confirmation dialog before deleting markers!
     await tester.tap(find.text('Hapus 2 Penanda'));
-    await tester.pump();
+    await tester.pumpAndSettle();
+    expect(find.text('Hapus Penandaan?'), findsOneWidget);
+    expect(markers.length, 2);
+
+    // Confirm deletion
+    await tester.tap(find.text('Hapus Tanda'));
+    await tester.pumpAndSettle();
     expect(markers, isEmpty);
 
     // Now all 3 items are unlocked and can be selected & downloaded!
@@ -234,7 +241,7 @@ void main() {
     expect(find.text('Unduh Massal (1 Media)'), findsOneWidget);
   });
 
-  test('sortLoadingDownloads puts actively processing (saving/downloading) above queued & paused', () {
+  test('sortLoadingDownloads puts actively processing first and failed at bottom of loading', () {
     DownloadItem makeItem(String id, DownloadStatus status) => DownloadItem(
           id: id,
           title: id,
@@ -248,7 +255,13 @@ void main() {
           createdAt: DateTime(2026),
         );
 
+    final failedItem = makeItem('f1', DownloadStatus.failed);
+    final completedItem = makeItem('c1', DownloadStatus.completed);
+    expect(isLoadingHistoryItem(failedItem), isTrue);
+    expect(isLoadingHistoryItem(completedItem), isFalse);
+
     final raw = [
+      failedItem,
       makeItem('q1', DownloadStatus.queued),
       makeItem('p1', DownloadStatus.paused),
       makeItem('d1', DownloadStatus.downloading),
@@ -260,7 +273,7 @@ void main() {
     final sorted = sortLoadingDownloads(raw);
     expect(
       sorted.map((e) => e.id).toList(),
-      ['s1', 'd1', 'd2', 'q1', 'q2', 'p1'],
+      ['s1', 'd1', 'd2', 'q1', 'q2', 'p1', 'f1'],
     );
   });
 }
