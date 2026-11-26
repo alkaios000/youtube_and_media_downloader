@@ -48,6 +48,12 @@ void main() {
     expect(find.text('Terdeteksi: Pixiv'), findsOneWidget);
     expect(find.text('Muat Media Profil (Massal)'), findsOneWidget);
 
+    // Switching to File tab renders cleanly
+    await tester.tap(find.text('File'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(find.text('File Unduhan'), findsOneWidget);
+
     manager.dispose();
   });
 }

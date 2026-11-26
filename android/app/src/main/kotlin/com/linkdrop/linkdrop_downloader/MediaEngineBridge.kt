@@ -1,5 +1,6 @@
 package com.linkdrop.linkdrop_downloader
 
+import android.content.ClipData
 import android.content.ContentUris
 import android.content.ContentValues
 import android.content.Context
@@ -1039,6 +1040,83 @@ class MediaEngineBridge(private val context: Context) {
             context.startActivity(chooser)
             true
         }.getOrDefault(false)
+    }
+
+    fun shareMultipleFiles(items: List<Map<String, Any?>>): Boolean {
+        if (items.isEmpty()) return false
+        if (items.size == 1) {
+            val single = items.first()
+            return shareFile(
+                filePath = single["filePath"]?.toString(),
+                contentUri = single["contentUri"]?.toString(),
+                mimeType = single["mimeType"]?.toString(),
+                title = single["title"]?.toString(),
+            )
+        }
+
+        val uris = ArrayList<Uri>(items.size)
+        val mimeFamilies = HashSet<String>()
+        var clipData: ClipData? = null
+
+        for (item in items) {
+            val filePath = item["filePath"]?.toString()
+            val contentUri = item["contentUri"]?.toString()
+            val resolved = resolveReadableUri(filePath, contentUri) ?: continue
+            uris.add(resolved)
+
+            val mime = item["mimeType"]?.toString()?.takeIf { it.isNotBlank() }
+                ?: detectMimeType(filePath ?: contentUri ?: "")
+            val family = mime.substringBefore('/').lowercase(Locale.US)
+            if (family.isNotBlank()) mimeFamilies.add(family)
+
+            if (clipData == null) {
+                clipData = ClipData.newRawUri("all_download_media", resolved)
+            } else {
+                clipData.addItem(ClipData.Item(resolved))
+            }
+        }
+
+        if (uris.isEmpty()) return false
+
+        val combinedMime = when {
+            mimeFamilies.size == 1 -> "${mimeFamilies.first()}/*"
+            else -> "*/*"
+        }
+
+        val sendIntent = Intent(Intent.ACTION_SEND_MULTIPLE).apply {
+            type = combinedMime
+            putParcelableArrayListExtra(Intent.EXTRA_STREAM, uris)
+            if (clipData != null) {
+                this.clipData = clipData
+            }
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+
+        val chooser = Intent.createChooser(sendIntent, "Bagikan ${uris.size} Media").apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        return runCatching {
+            context.startActivity(chooser)
+            true
+        }.getOrDefault(false)
+    }
+
+    fun deleteMultipleFiles(
+        items: List<Map<String, Any?>>,
+        onDone: (Int) -> Unit,
+    ) {
+        scope.launch {
+            var deletedCount = 0
+            for (item in items) {
+                val ok = deleteFile(
+                    filePath = item["filePath"]?.toString(),
+                    contentUri = item["contentUri"]?.toString(),
+                )
+                if (ok) deletedCount++
+            }
+            postToMain { onDone(deletedCount) }
+        }
     }
 
     fun deleteFile(filePath: String?, contentUri: String?): Boolean {

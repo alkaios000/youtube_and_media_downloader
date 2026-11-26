@@ -62,12 +62,17 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   void _handleSharedLink(String rawText) {
     final clean = UrlParser.extractUrl(rawText);
     if (clean == null) return;
-    setState(() {
-      _tabIndex = 0;
-      _detectedClipboardUrl = null;
-      _urlController.text = clean;
-    });
-    widget.manager.analyzeLink(clean);
+    _urlController.value = TextEditingValue(
+      text: clean,
+      selection: TextSelection.collapsed(offset: clean.length),
+    );
+    if (mounted) {
+      setState(() {
+        _tabIndex = 0;
+        _detectedClipboardUrl = null;
+      });
+    }
+    Future<void>.microtask(() => widget.manager.analyzeLink(clean));
   }
 
   Future<void> _checkClipboard() async {
@@ -151,6 +156,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
                 widget.manager.refreshManagedFiles();
               } else if (index == 3) {
                 widget.manager.refreshStorageInfo();
+                widget.manager.refreshBrowserSessions();
               }
             },
             destinations: [

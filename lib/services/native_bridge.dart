@@ -423,6 +423,22 @@ class NativeBridge {
     return ok ?? false;
   }
 
+  Future<bool> shareMultipleFiles(List<ManagedFile> files) async {
+    if (files.isEmpty) return false;
+    final payload = files
+        .map((f) => <String, String>{
+              'filePath': f.savedPath,
+              'contentUri': f.contentUri,
+              'mimeType': f.mimeType,
+              'title': f.fileName,
+            })
+        .toList(growable: false);
+    final ok = await _channel.invokeMethod<bool>('shareMultipleFiles', {
+      'items': payload,
+    });
+    return ok ?? false;
+  }
+
   Future<bool> deleteFile({
     String? filePath,
     String? contentUri,
@@ -432,6 +448,20 @@ class NativeBridge {
       'contentUri': contentUri,
     });
     return ok ?? false;
+  }
+
+  Future<int> deleteMultipleFiles(List<ManagedFile> files) async {
+    if (files.isEmpty) return 0;
+    final payload = files
+        .map((f) => <String, String>{
+              'filePath': f.savedPath,
+              'contentUri': f.contentUri,
+            })
+        .toList(growable: false);
+    final count = await _channel.invokeMethod<int>('deleteMultipleFiles', {
+      'items': payload,
+    });
+    return count ?? 0;
   }
 
   Future<bool> fileExists({

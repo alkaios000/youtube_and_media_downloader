@@ -104,7 +104,33 @@ class DownloadManager extends ChangeNotifier {
   DateTime _lastHistoryFlush = DateTime.fromMillisecondsSinceEpoch(0);
   int _taskSeq = 0;
 
-  void Function(String sharedText)? onIncomingSharedLink;
+  void Function(String sharedText)? _onIncomingSharedLink;
+  String? _pendingSharedText;
+
+  void Function(String sharedText)? get onIncomingSharedLink => _onIncomingSharedLink;
+  set onIncomingSharedLink(void Function(String sharedText)? handler) {
+    _onIncomingSharedLink = handler;
+    if (handler != null && _pendingSharedText != null) {
+      final pending = _pendingSharedText!;
+      _pendingSharedText = null;
+      Future<void>.microtask(() {
+        if (!_isDisposed && _onIncomingSharedLink == handler) {
+          handler(pending);
+        }
+      });
+    }
+  }
+
+  void _dispatchIncomingSharedLink(String rawText) {
+    final trimmed = rawText.trim();
+    if (trimmed.isEmpty) return;
+    final handler = _onIncomingSharedLink;
+    if (handler != null) {
+      handler(trimmed);
+    } else {
+      _pendingSharedText = trimmed;
+    }
+  }
 
   DownloadManager({
     NativeBridge? bridge,
@@ -229,77 +255,85 @@ class DownloadManager extends ChangeNotifier {
   }
 
   Future<void> bootstrap() async {
-    try {
-      _settings = await _storage.loadSettings();
-    } catch (_) {
-      _settings = const AppSettings();
-    }
-    themeNotifier.value = _settings.themeMode;
-
-    try {
-      _items = await _storage.loadHistory();
-    } catch (_) {
-      _items = [];
-    }
-
-    try {
-      final savedMarkers = await _storage.loadDownloadedMarkers();
-      if (savedMarkers != null) {
-        _downloadedMarkers = savedMarkers;
-      } else {
-        // First run after upgrade: seed markers from existing completed history once.
-        final seeded = <String>{};
-        for (final it in _items) {
-          if (it.status == DownloadStatus.completed) {
-            final key = it.markerKey.isNotEmpty
-                ? it.markerKey
-                : canonicalMarkerKey(it.sourceUrl);
-            if (key.isNotEmpty) seeded.add(key);
-          }
-        }
-        _downloadedMarkers = seeded;
-        await _storage.saveDownloadedMarkers(_downloadedMarkers);
-      }
-    } catch (_) {
-      _downloadedMarkers = <String>{};
-    }
-
-    _notifyImmediate();
-
+    // 1. PRIORITY 0: Attach share stream & fetch any initial shared intent IMMEDIATELY
+    // BEFORE waiting on preferences, permissions, WebView cookies, or yt-dlp/Python init!
     try {
       _progressSub = _bridge.progressStream.listen(
         _handleNativeProgress,
         onError: (_) {},
       );
       _shareSub = _bridge.shareStream.listen(
-        (sharedText) {
-          onIncomingSharedLink?.call(sharedText);
-        },
+        _dispatchIncomingSharedLink,
         onError: (_) {},
       );
     } catch (_) {}
 
-    await refreshPermissions();
-    await refreshBrowserSessions();
-    unawaited(refreshManagedFiles());
+    unawaited(_checkInitialSharedLink());
 
+    // 2. Load lightweight local SharedPreferences in parallel
+    final localData = await Future.wait<dynamic>([
+      _storage.loadSettings().catchError((_) => const AppSettings()),
+      _storage.loadHistory().catchError((_) => <DownloadItem>[]),
+      _storage.loadDownloadedMarkers().catchError((_) => null),
+    ]);
+
+    _settings = localData[0] as AppSettings;
+    themeNotifier.value = _settings.themeMode;
+    _items = localData[1] as List<DownloadItem>;
+
+    final savedMarkers = localData[2] as Set<String>?;
+    if (savedMarkers != null) {
+      _downloadedMarkers = savedMarkers;
+    } else {
+      final seeded = <String>{};
+      for (final it in _items) {
+        if (it.status == DownloadStatus.completed) {
+          final key = it.markerKey.isNotEmpty
+              ? it.markerKey
+              : canonicalMarkerKey(it.sourceUrl);
+          if (key.isNotEmpty) seeded.add(key);
+        }
+      }
+      _downloadedMarkers = seeded;
+      unawaited(_storage.saveDownloadedMarkers(_downloadedMarkers));
+    }
+
+    _notifyImmediate();
+
+    // 3. Fast permission check (< 2ms)
+    await refreshPermissions();
+
+    // 4. Warm up heavy native components strictly in the background so UI & Share stay instant!
+    unawaited(_initEngineInBackground());
+    unawaited(
+      Future<void>.delayed(const Duration(milliseconds: 900), () {
+        if (_isDisposed) return;
+        unawaited(refreshManagedFiles());
+        unawaited(refreshBrowserSessions());
+      }),
+    );
+  }
+
+  Future<void> _checkInitialSharedLink() async {
+    try {
+      final initialShared = await _bridge.getInitialSharedText();
+      if (initialShared != null && initialShared.trim().isNotEmpty) {
+        _dispatchIncomingSharedLink(initialShared);
+      }
+    } catch (_) {}
+  }
+
+  Future<void> _initEngineInBackground() async {
     try {
       _engineStatus = await _bridge.initEngine();
       _engineError = null;
-      await refreshStorageInfo();
+      unawaited(refreshStorageInfo());
     } catch (e) {
       _engineError = e.toString();
     } finally {
       _isInitializing = false;
       _notifyImmediate();
     }
-
-    try {
-      final initialShared = await _bridge.getInitialSharedText();
-      if (initialShared != null && initialShared.trim().isNotEmpty) {
-        onIncomingSharedLink?.call(initialShared);
-      }
-    } catch (_) {}
   }
 
   Future<PermissionStatusInfo> refreshPermissions() async {
@@ -1478,6 +1512,14 @@ class DownloadManager extends ChangeNotifier {
     );
   }
 
+  Future<bool> shareMultipleManagedFiles(List<ManagedFile> files) async {
+    if (files.isEmpty) return false;
+    if (files.length == 1) {
+      return shareManagedFile(files.first);
+    }
+    return _bridge.shareMultipleFiles(files);
+  }
+
   Future<bool> deleteManagedFile(ManagedFile file) async {
     final ok = await _bridge.deleteFile(
       filePath: file.savedPath,
@@ -1485,6 +1527,13 @@ class DownloadManager extends ChangeNotifier {
     );
     await refreshManagedFiles();
     return ok;
+  }
+
+  Future<int> deleteMultipleManagedFiles(List<ManagedFile> files) async {
+    if (files.isEmpty) return 0;
+    final deletedCount = await _bridge.deleteMultipleFiles(files);
+    await refreshManagedFiles();
+    return deletedCount;
   }
 
   Future<void> removeHistoryItem(DownloadItem item, {bool deleteFromDevice = false}) async {

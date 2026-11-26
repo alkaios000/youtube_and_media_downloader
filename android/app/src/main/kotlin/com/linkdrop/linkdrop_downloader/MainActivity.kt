@@ -42,11 +42,19 @@ class MainActivity : FlutterActivity() {
 
     private fun handleIncomingIntent(intent: Intent?, isLaunch: Boolean) {
         if (intent == null) return
-        if (Intent.ACTION_SEND == intent.action && intent.type?.startsWith("text/") == true) {
-            val shared = intent.getStringExtra(Intent.EXTRA_TEXT)?.trim()
-            if (!shared.isNullOrEmpty()) {
-                if (!isLaunch && shareEventSink != null) {
-                    shareEventSink?.success(shared)
+        if (Intent.ACTION_SEND == intent.action) {
+            val extraText = intent.getStringExtra(Intent.EXTRA_TEXT)?.trim().orEmpty()
+            val extraSubject = intent.getStringExtra(Intent.EXTRA_SUBJECT)?.trim().orEmpty()
+            val shared = when {
+                extraText.contains("http", ignoreCase = true) -> extraText
+                extraSubject.contains("http", ignoreCase = true) -> extraSubject
+                extraText.isNotEmpty() -> extraText
+                else -> extraSubject
+            }
+            if (shared.isNotEmpty()) {
+                val sink = shareEventSink
+                if (sink != null) {
+                    runOnUiThread { sink.success(shared) }
                 } else {
                     initialSharedText = shared
                 }
@@ -127,6 +135,11 @@ class MainActivity : FlutterActivity() {
                 object : EventChannel.StreamHandler {
                     override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
                         shareEventSink = events
+                        val pending = initialSharedText
+                        if (!pending.isNullOrEmpty() && events != null) {
+                            initialSharedText = null
+                            runOnUiThread { events.success(pending) }
+                        }
                     }
 
                     override fun onCancel(arguments: Any?) {
@@ -353,12 +366,25 @@ class MainActivity : FlutterActivity() {
                         result.success(ok)
                     }
 
+                    "shareMultipleFiles" -> {
+                        val rawItems = call.argument<List<Map<String, Any?>>>("items").orEmpty()
+                        val ok = bridge.shareMultipleFiles(rawItems)
+                        result.success(ok)
+                    }
+
                     "deleteFile" -> {
                         val ok = bridge.deleteFile(
                             filePath = call.argument<String>("filePath"),
                             contentUri = call.argument<String>("contentUri"),
                         )
                         result.success(ok)
+                    }
+
+                    "deleteMultipleFiles" -> {
+                        val rawItems = call.argument<List<Map<String, Any?>>>("items").orEmpty()
+                        bridge.deleteMultipleFiles(rawItems) { count ->
+                            result.success(count)
+                        }
                     }
 
                     "fileExists" -> {
