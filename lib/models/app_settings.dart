@@ -26,12 +26,23 @@ extension DefaultQualityPresetMeta on DefaultQualityPreset {
 }
 
 class AppSettings {
+  static const int minConcurrentAlbums = 1;
+  static const int maxConcurrentAlbumsLimit = 6;
+  static const List<int> rateLimitPresetsMs = [0, 300, 600, 1000, 2000];
+
   final ThemeMode themeMode;
   final DefaultQualityPreset defaultQuality;
   final bool useAria2c;
   final bool clipboardAutoDetect;
   final String updateChannel; // stable | nightly
   final String customCookies;
+
+  /// Maximum number of albums/download tasks processed simultaneously (1..6).
+  final int maxConcurrentAlbums;
+
+  /// Optional cooldown delay in milliseconds between album/file requests
+  /// to prevent HTTP 429 rate limits on Pixiv, TikTok, Instagram, etc.
+  final int downloadRateLimitMs;
 
   const AppSettings({
     this.themeMode = ThemeMode.dark,
@@ -40,9 +51,22 @@ class AppSettings {
     this.clipboardAutoDetect = true,
     this.updateChannel = 'stable',
     this.customCookies = '',
+    this.maxConcurrentAlbums = 3,
+    this.downloadRateLimitMs = 0,
   });
 
   bool get hasCookies => customCookies.trim().isNotEmpty;
+
+  String get rateLimitLabel {
+    if (downloadRateLimitMs <= 0) return 'Tanpa jeda (Maksimal)';
+    if (downloadRateLimitMs >= 1000) {
+      final sec = downloadRateLimitMs / 1000.0;
+      return sec == sec.roundToDouble()
+          ? '${sec.toInt()} detik / tugas'
+          : '${sec.toStringAsFixed(1)} detik / tugas';
+    }
+    return '$downloadRateLimitMs ms / tugas';
+  }
 
   AppSettings copyWith({
     ThemeMode? themeMode,
@@ -51,6 +75,8 @@ class AppSettings {
     bool? clipboardAutoDetect,
     String? updateChannel,
     String? customCookies,
+    int? maxConcurrentAlbums,
+    int? downloadRateLimitMs,
   }) {
     return AppSettings(
       themeMode: themeMode ?? this.themeMode,
@@ -59,6 +85,10 @@ class AppSettings {
       clipboardAutoDetect: clipboardAutoDetect ?? this.clipboardAutoDetect,
       updateChannel: updateChannel ?? this.updateChannel,
       customCookies: customCookies ?? this.customCookies,
+      maxConcurrentAlbums: (maxConcurrentAlbums ?? this.maxConcurrentAlbums)
+          .clamp(minConcurrentAlbums, maxConcurrentAlbumsLimit),
+      downloadRateLimitMs: (downloadRateLimitMs ?? this.downloadRateLimitMs)
+          .clamp(0, 10000),
     );
   }
 
@@ -70,10 +100,14 @@ class AppSettings {
       'clipboardAutoDetect': clipboardAutoDetect,
       'updateChannel': updateChannel,
       'customCookies': customCookies,
+      'maxConcurrentAlbums': maxConcurrentAlbums,
+      'downloadRateLimitMs': downloadRateLimitMs,
     };
   }
 
   factory AppSettings.fromJson(Map<String, dynamic> json) {
+    final parsedConcurrent = (json['maxConcurrentAlbums'] as num?)?.toInt() ?? 3;
+    final parsedDelay = (json['downloadRateLimitMs'] as num?)?.toInt() ?? 0;
     return AppSettings(
       themeMode: ThemeMode.values.firstWhere(
         (m) => m.name == json['themeMode'],
@@ -87,6 +121,11 @@ class AppSettings {
       clipboardAutoDetect: json['clipboardAutoDetect'] as bool? ?? true,
       updateChannel: json['updateChannel']?.toString() ?? 'stable',
       customCookies: json['customCookies']?.toString() ?? '',
+      maxConcurrentAlbums: parsedConcurrent.clamp(
+        minConcurrentAlbums,
+        maxConcurrentAlbumsLimit,
+      ),
+      downloadRateLimitMs: parsedDelay.clamp(0, 10000),
     );
   }
 }

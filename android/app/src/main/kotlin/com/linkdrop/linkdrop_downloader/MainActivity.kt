@@ -280,20 +280,24 @@ class MainActivity : FlutterActivity() {
                     }
 
                     "getBrowserSessionStatus" -> {
-                        result.success(
-                            mapOf(
+                        Thread {
+                            val status = mapOf(
                                 "instagram" to sniffer.hasPlatformCookies("instagram"),
                                 "douyin" to sniffer.hasPlatformCookies("douyin"),
                                 "facebook" to sniffer.hasPlatformCookies("facebook"),
                                 "pixiv" to sniffer.hasPlatformCookies("pixiv"),
                                 "tiktok" to sniffer.hasPlatformCookies("tiktok"),
-                            ),
-                        )
+                            )
+                            runOnUiThread { result.success(status) }
+                        }.start()
                     }
 
                     "getCookieHeader" -> {
                         val url = call.argument<String>("url") ?: ""
-                        result.success(sniffer.getCookieHeaderForUrl(url))
+                        Thread {
+                            val header = sniffer.getCookieHeaderForUrl(url)
+                            runOnUiThread { result.success(header) }
+                        }.start()
                     }
 
                     "clearBrowserSessions" -> {
@@ -450,12 +454,20 @@ class MainActivity : FlutterActivity() {
                     "setWallpaper" -> {
                         val filePath = call.argument<String>("filePath")
                         val contentUri = call.argument<String>("contentUri")
-                        val target = call.argument<String>("target") ?: "crop"
+                        val target = call.argument<String>("target") ?: "home"
+                        val cropLeft = (call.argument<Number>("cropLeft"))?.toFloat()
+                        val cropTop = (call.argument<Number>("cropTop"))?.toFloat()
+                        val cropWidth = (call.argument<Number>("cropWidth"))?.toFloat()
+                        val cropHeight = (call.argument<Number>("cropHeight"))?.toFloat()
                         bridge.setWallpaper(
                             activity = this,
                             filePath = filePath,
                             contentUri = contentUri,
                             target = target,
+                            cropLeft = cropLeft,
+                            cropTop = cropTop,
+                            cropWidth = cropWidth,
+                            cropHeight = cropHeight,
                             onSuccess = { ok -> result.success(ok) },
                             onError = { code, message -> result.error(code, message, null) },
                         )

@@ -65,7 +65,7 @@ class _FileGalleryViewerState extends State<FileGalleryViewer> {
             controller: _pageController,
             physics: _isZoomed
                 ? const NeverScrollableScrollPhysics()
-                : const BouncingScrollPhysics(),
+                : const _SnappyPhotoPagePhysics(),
             itemCount: _images.length,
             onPageChanged: (idx) {
               setState(() {
@@ -549,6 +549,37 @@ class _ViewerActionBtn extends StatelessWidget {
       ),
     );
   }
+}
+
+class _SnappyPhotoPagePhysics extends PageScrollPhysics {
+  const _SnappyPhotoPagePhysics({super.parent});
+
+  @override
+  _SnappyPhotoPagePhysics applyTo(ScrollPhysics? ancestor) {
+    return _SnappyPhotoPagePhysics(parent: buildParent(ancestor));
+  }
+
+  @override
+  SpringDescription get spring => SpringDescription.withDampingRatio(
+        mass: 0.6,
+        stiffness: 720.0,
+        ratio: 1.05,
+      );
+
+  @override
+  Tolerance toleranceFor(ScrollMetrics metrics) {
+    return const Tolerance(
+      distance: 1.5,
+      time: 0.01,
+      velocity: 30.0,
+    );
+  }
+
+  @override
+  double get minFlingDistance => 12.0;
+
+  @override
+  double get minFlingVelocity => 180.0;
 }
 
 class _DetailRow extends StatelessWidget {

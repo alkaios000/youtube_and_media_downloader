@@ -19,16 +19,31 @@ import 'media_extractor_service.dart';
 import 'native_bridge.dart';
 import 'storage_service.dart';
 
-/// Lightweight async semaphore to load-balance concurrent network & CPU-heavy downloads.
+/// Dynamic async semaphore to load-balance concurrent albums & HTTP streams.
+/// Supports live concurrency resizing from Settings even mid-download!
 class _AsyncSemaphore {
-  final int maxConcurrent;
+  int _maxConcurrent;
   int _current = 0;
   final Queue<Completer<void>> _waiters = Queue<Completer<void>>();
 
-  _AsyncSemaphore(this.maxConcurrent);
+  _AsyncSemaphore(this._maxConcurrent);
+
+  int get maxConcurrent => _maxConcurrent;
+
+  void setMaxConcurrent(int next) {
+    final clamped = next < 1 ? 1 : next;
+    _maxConcurrent = clamped;
+    while (_current < _maxConcurrent && _waiters.isNotEmpty) {
+      _current++;
+      final waiter = _waiters.removeFirst();
+      if (!waiter.isCompleted) {
+        waiter.complete();
+      }
+    }
+  }
 
   Future<void> acquire() {
-    if (_current < maxConcurrent) {
+    if (_current < _maxConcurrent) {
       _current++;
       return Future.value();
     }
@@ -38,13 +53,20 @@ class _AsyncSemaphore {
   }
 
   void release() {
-    if (_waiters.isNotEmpty) {
+    if (_current <= _maxConcurrent && _waiters.isNotEmpty) {
       final next = _waiters.removeFirst();
       if (!next.isCompleted) {
         next.complete();
       }
-    } else if (_current > 0) {
-      _current--;
+    } else {
+      if (_current > 0) _current--;
+      while (_current < _maxConcurrent && _waiters.isNotEmpty) {
+        _current++;
+        final next = _waiters.removeFirst();
+        if (!next.isCompleted) {
+          next.complete();
+        }
+      }
     }
   }
 
@@ -59,9 +81,8 @@ class _AsyncSemaphore {
 }
 
 class DownloadManager extends ChangeNotifier {
-  static const int _directFileMaxConcurrency = 5;
+  static const int _directFileMaxConcurrency = 4;
   static const int _ytDlpMaxConcurrency = 1;
-  static const int _bulkDirectTaskConcurrency = 4;
 
   final NativeBridge _bridge;
   final StorageService _storage;
@@ -72,6 +93,7 @@ class DownloadManager extends ChangeNotifier {
   final ValueNotifier<ThemeMode> themeNotifier =
       ValueNotifier<ThemeMode>(ThemeMode.dark);
 
+  final _AsyncSemaphore _albumTaskPool = _AsyncSemaphore(3);
   final _AsyncSemaphore _directFilePool =
       _AsyncSemaphore(_directFileMaxConcurrency);
   final _AsyncSemaphore _ytDlpPool = _AsyncSemaphore(_ytDlpMaxConcurrency);
@@ -89,7 +111,8 @@ class DownloadManager extends ChangeNotifier {
   final Map<String, CreatorProfileRecord> _creatorProfiles = {};
   final Map<String, List<String>> _pixivPagesCache = {};
 
-  bool _isInitializing = true;
+  bool _isInitializing = false;
+  bool _engineInitStarted = false;
   bool _isAnalyzing = false;
   bool _isUpdatingEngine = false;
   bool _isLoadingFiles = false;
@@ -427,6 +450,7 @@ class DownloadManager extends ChangeNotifier {
   }) async {
     _settings = bundle.settings;
     themeNotifier.value = _settings.themeMode;
+    _applyRateLimitSettings();
 
     if (merge) {
       _downloadedMarkers = {..._downloadedMarkers, ...bundle.downloadedMarkers};
@@ -459,8 +483,23 @@ class DownloadManager extends ChangeNotifier {
     ]);
   }
 
+  void _applyRateLimitSettings() {
+    final maxAlbums = _settings.maxConcurrentAlbums.clamp(
+      AppSettings.minConcurrentAlbums,
+      AppSettings.maxConcurrentAlbumsLimit,
+    );
+    _albumTaskPool.setMaxConcurrent(maxAlbums);
+    _directFilePool.setMaxConcurrent((maxAlbums + 1).clamp(2, 6));
+  }
+
+  Future<void> _applyRateLimitDelay(String taskId) async {
+    final ms = _settings.downloadRateLimitMs;
+    if (ms <= 0 || _isDisposed || _isTaskStopped(taskId)) return;
+    await Future<void>.delayed(Duration(milliseconds: ms));
+  }
+
   // ===========================================================================
-  // BOOTSTRAP (NON-BLOCKING INSTANT SHARE & STARTUP)
+  // BOOTSTRAP (INSTANT LAUNCH — ZERO EAGER PYTHON / WEBVIEW / MEDIASTORE BLOCK)
   // ===========================================================================
   Future<void> bootstrap() async {
     try {
@@ -476,20 +515,30 @@ class DownloadManager extends ChangeNotifier {
 
     unawaited(_checkInitialSharedLink());
 
+    // Phase 1 (< 5ms): load tiny settings first so theme & Home screen render immediately!
+    _settings =
+        await _storage.loadSettings().catchError((_) => const AppSettings());
+    themeNotifier.value = _settings.themeMode;
+    _applyRateLimitSettings();
+    _notifyImmediate();
+
+    // Phase 2 (background): load history/markers/profiles via off-thread isolate + permissions
+    unawaited(_finishBootstrapAsync());
+  }
+
+  Future<void> _finishBootstrapAsync() async {
     final localData = await Future.wait<dynamic>([
-      _storage.loadSettings().catchError((_) => const AppSettings()),
       _storage.loadHistory().catchError((_) => <DownloadItem>[]),
       _storage.loadDownloadedMarkers().catchError((_) => null),
       _storage
           .loadCreatorProfiles()
           .catchError((_) => <CreatorProfileRecord>[]),
     ]);
+    if (_isDisposed) return;
 
-    _settings = localData[0] as AppSettings;
-    themeNotifier.value = _settings.themeMode;
-    _setItems(localData[1] as List<DownloadItem>);
+    _setItems(localData[0] as List<DownloadItem>);
 
-    final savedMarkers = localData[2] as Set<String>?;
+    final savedMarkers = localData[1] as Set<String>?;
     if (savedMarkers != null) {
       _downloadedMarkers = savedMarkers;
     } else {
@@ -506,7 +555,7 @@ class DownloadManager extends ChangeNotifier {
       unawaited(_storage.saveDownloadedMarkers(_downloadedMarkers));
     }
 
-    final loadedProfiles = localData[3] as List<CreatorProfileRecord>;
+    final loadedProfiles = localData[2] as List<CreatorProfileRecord>;
     _creatorProfiles
       ..clear()
       ..addEntries(loadedProfiles.map((r) => MapEntry(r.lookupKey, r)));
@@ -515,14 +564,20 @@ class DownloadManager extends ChangeNotifier {
 
     await refreshPermissions();
 
-    unawaited(_initEngineInBackground());
+    // Defer yt-dlp/FFmpeg native init so app startup stays completely snappy.
+    // Files & Browser sessions load lazily when user opens File / Settings tabs!
     unawaited(
-      Future<void>.delayed(const Duration(milliseconds: 800), () {
+      Future<void>.delayed(const Duration(seconds: 3), () {
         if (_isDisposed) return;
-        unawaited(refreshManagedFiles());
-        unawaited(refreshBrowserSessions());
+        unawaited(ensureEngineInitialized());
       }),
     );
+  }
+
+  Future<void> ensureEngineInitialized() async {
+    if (_engineInitStarted || _isDisposed) return;
+    _engineInitStarted = true;
+    await _initEngineInBackground();
   }
 
   Future<void> _checkInitialSharedLink() async {
@@ -535,10 +590,10 @@ class DownloadManager extends ChangeNotifier {
   }
 
   Future<void> _initEngineInBackground() async {
+    _isInitializing = true;
     try {
       _engineStatus = await _bridge.initEngine();
       _engineError = null;
-      unawaited(refreshStorageInfo());
     } catch (e) {
       _engineError = e.toString();
     } finally {
@@ -1016,7 +1071,8 @@ class DownloadManager extends ChangeNotifier {
     return eligible.length;
   }
 
-  /// High-throughput load-balanced worker pool (4 tasks sharing 5 HTTP streams).
+  /// Rate-limited & dynamically resizable worker pool controlled by
+  /// `AppSettings.maxConcurrentAlbums` (1..6) and `downloadRateLimitMs`.
   Future<void> _processDirectBulkPool(
     MediaInfo collectionInfo,
     List<(String, SelectableMediaItem)> queue,
@@ -1026,62 +1082,71 @@ class DownloadManager extends ChangeNotifier {
         : '';
 
     int cursor = 0;
-    final workerCount = queue.length < _bulkDirectTaskConcurrency
+    final workerCount = queue.length < AppSettings.maxConcurrentAlbumsLimit
         ? queue.length
-        : _bulkDirectTaskConcurrency;
+        : AppSettings.maxConcurrentAlbumsLimit;
 
     Future<void> worker() async {
       while (true) {
         if (_isDisposed || cursor >= queue.length) return;
-        final (taskId, sel) = queue[cursor++];
+        final done = await _albumTaskPool.run(() async {
+          if (_isDisposed || cursor >= queue.length) return true;
+          final (taskId, sel) = queue[cursor++];
 
-        if (_isTaskStopped(taskId)) continue;
+          if (_isTaskStopped(taskId)) return false;
 
-        final itemAuthor = sel.author ?? collectionInfo.author;
-        final singleInfo = MediaInfo(
-          originalUrl:
-              sel.sourcePostUrl ?? sel.directUrl ?? collectionInfo.originalUrl,
-          platform: collectionInfo.platform,
-          title: sel.title,
-          author: itemAuthor,
-          thumbnailUrl: sel.thumbnailUrl,
-          extractorLabel: collectionInfo.extractorLabel,
-          options: const [],
-        );
-
-        if (sel.pixivIllustId != null && sel.pixivIllustId!.isNotEmpty) {
-          await _executePixivArtworkTask(
-            taskId: taskId,
-            illustId: sel.pixivIllustId!,
-            info: singleInfo,
-            headers: sel.headers,
-            pixivCookie: pixivCookie,
-            isUgoiraHint: sel.isPixivUgoira,
-            extraMarkerKeys: [sel.markerKey],
+          final itemAuthor = sel.author ?? collectionInfo.author;
+          final singleInfo = MediaInfo(
+            originalUrl:
+                sel.sourcePostUrl ?? sel.directUrl ?? collectionInfo.originalUrl,
+            platform: collectionInfo.platform,
+            title: sel.title,
+            author: itemAuthor,
+            thumbnailUrl: sel.thumbnailUrl,
+            extractorLabel: collectionInfo.extractorLabel,
+            options: const [],
           );
-          continue;
-        }
 
-        if (sel.directUrl != null && sel.directUrl!.startsWith('http')) {
-          final opt = MediaFormatOption(
-            id: 'bulk_direct_${sel.id}',
-            label: sel.extension.toUpperCase(),
-            subtitle: 'Direct',
-            extension: sel.extension,
-            kind: sel.kind,
-            engine: DownloadEngine.directHttp,
-            directUrl: sel.directUrl,
-            galleryUrls:
-                sel.kind == MediaKind.image ? [sel.directUrl!] : const [],
-            headers: sel.headers,
-          );
-          await _runDirectHttpDownload(
-            taskId,
-            singleInfo,
-            opt,
-            extraMarkerKeys: [sel.markerKey],
-          );
-        }
+          if (sel.pixivIllustId != null && sel.pixivIllustId!.isNotEmpty) {
+            await _executePixivArtworkTask(
+              taskId: taskId,
+              illustId: sel.pixivIllustId!,
+              info: singleInfo,
+              headers: sel.headers,
+              pixivCookie: pixivCookie,
+              isUgoiraHint: sel.isPixivUgoira,
+              extraMarkerKeys: [sel.markerKey],
+              acquireAlbumSlot: false,
+            );
+            await _applyRateLimitDelay(taskId);
+            return false;
+          }
+
+          if (sel.directUrl != null && sel.directUrl!.startsWith('http')) {
+            final opt = MediaFormatOption(
+              id: 'bulk_direct_${sel.id}',
+              label: sel.extension.toUpperCase(),
+              subtitle: 'Direct',
+              extension: sel.extension,
+              kind: sel.kind,
+              engine: DownloadEngine.directHttp,
+              directUrl: sel.directUrl,
+              galleryUrls:
+                  sel.kind == MediaKind.image ? [sel.directUrl!] : const [],
+              headers: sel.headers,
+            );
+            await _runDirectHttpDownload(
+              taskId,
+              singleInfo,
+              opt,
+              extraMarkerKeys: [sel.markerKey],
+              acquireAlbumSlot: false,
+            );
+            await _applyRateLimitDelay(taskId);
+          }
+          return false;
+        });
+        if (done) return;
       }
     }
 
@@ -1096,7 +1161,24 @@ class DownloadManager extends ChangeNotifier {
     required String pixivCookie,
     bool isUgoiraHint = false,
     required List<String> extraMarkerKeys,
+    bool acquireAlbumSlot = true,
   }) async {
+    if (acquireAlbumSlot) {
+      await _albumTaskPool.run(() async {
+        await _executePixivArtworkTask(
+          taskId: taskId,
+          illustId: illustId,
+          info: info,
+          headers: headers,
+          pixivCookie: pixivCookie,
+          isUgoiraHint: isUgoiraHint,
+          extraMarkerKeys: extraMarkerKeys,
+          acquireAlbumSlot: false,
+        );
+        await _applyRateLimitDelay(taskId);
+      });
+      return;
+    }
     if (_isTaskStopped(taskId)) return;
 
     final effectiveHeaders = {
@@ -1162,6 +1244,7 @@ class DownloadManager extends ChangeNotifier {
         info,
         opt,
         extraMarkerKeys: extraMarkerKeys,
+        acquireAlbumSlot: false,
       );
       return true;
     }
@@ -1252,6 +1335,7 @@ class DownloadManager extends ChangeNotifier {
       info,
       opt,
       extraMarkerKeys: extraMarkerKeys,
+      acquireAlbumSlot: false,
     );
   }
 
@@ -1709,7 +1793,22 @@ class DownloadManager extends ChangeNotifier {
     MediaFormatOption option, {
     List<String> extraMarkerKeys = const [],
     bool markAlbumKey = true,
+    bool acquireAlbumSlot = true,
   }) async {
+    if (acquireAlbumSlot) {
+      await _albumTaskPool.run(() async {
+        await _runDirectHttpDownload(
+          taskId,
+          info,
+          option,
+          extraMarkerKeys: extraMarkerKeys,
+          markAlbumKey: markAlbumKey,
+          acquireAlbumSlot: false,
+        );
+        await _applyRateLimitDelay(taskId);
+      });
+      return;
+    }
     if (_isDisposed || _isTaskStopped(taskId)) return;
 
     final cancelToken = CancelToken();
@@ -2412,12 +2511,17 @@ class DownloadManager extends ChangeNotifier {
 
   Future<bool> setManagedFileAsWallpaper(
     ManagedFile file, {
-    String target = 'crop',
+    String target = 'home',
+    Rect? cropRect,
   }) async {
     return _bridge.setWallpaper(
       filePath: file.savedPath,
       contentUri: file.contentUri,
       target: target,
+      cropLeft: cropRect?.left,
+      cropTop: cropRect?.top,
+      cropWidth: cropRect?.width,
+      cropHeight: cropRect?.height,
     );
   }
 
@@ -2520,6 +2624,7 @@ class DownloadManager extends ChangeNotifier {
   Future<void> updateSettings(AppSettings updated) async {
     _settings = updated;
     themeNotifier.value = updated.themeMode;
+    _applyRateLimitSettings();
     _notifyImmediate();
     await _storage.saveSettings(updated);
   }
@@ -2547,6 +2652,17 @@ class DownloadManager extends ChangeNotifier {
     try {
       final info = await _bridge.getStorageInfo();
       _cacheBytes = (info['cacheBytes'] as num?)?.toInt() ?? 0;
+      final version = info['version']?.toString();
+      if (version != null && version.isNotEmpty && version != 'memuat...') {
+        _engineStatus = EngineStatus(
+          initialized: true,
+          version: version,
+          ffmpegReady: info['ffmpegReady'] as bool? ?? _engineStatus.ffmpegReady,
+          aria2cReady: info['aria2cReady'] as bool? ?? _engineStatus.aria2cReady,
+          downloadFolder:
+              info['downloadFolder']?.toString() ?? _engineStatus.downloadFolder,
+        );
+      }
       _notifyImmediate();
     } catch (_) {}
   }

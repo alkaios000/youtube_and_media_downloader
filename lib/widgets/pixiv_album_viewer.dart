@@ -21,6 +21,40 @@ class _PageHitMeta {
   const _PageHitMeta(this.index);
 }
 
+/// Ultra-snappy critically-damped page physics (~120ms settle with zero slow
+/// ballistic tail) so immediately scrolling vertically after sliding to another
+/// album NEVER gets stuck inside the horizontal slide threshold.
+class _SnappyAlbumPagePhysics extends PageScrollPhysics {
+  const _SnappyAlbumPagePhysics({super.parent});
+
+  @override
+  _SnappyAlbumPagePhysics applyTo(ScrollPhysics? ancestor) {
+    return _SnappyAlbumPagePhysics(parent: buildParent(ancestor));
+  }
+
+  @override
+  SpringDescription get spring => SpringDescription.withDampingRatio(
+        mass: 0.6,
+        stiffness: 720.0,
+        ratio: 1.05,
+      );
+
+  @override
+  Tolerance toleranceFor(ScrollMetrics metrics) {
+    return const Tolerance(
+      distance: 1.5,
+      time: 0.01,
+      velocity: 30.0,
+    );
+  }
+
+  @override
+  double get minFlingDistance => 12.0;
+
+  @override
+  double get minFlingVelocity => 180.0;
+}
+
 /// Dedicated Pixiv Album Reader opened when clicking a Pixiv artwork/album in File tab.
 /// Supports horizontal sliding between adjacent albums of the same artist (Pixiv-like UX)
 /// plus 3 vertical viewing modes inside each album:
@@ -403,7 +437,7 @@ class _PixivAlbumViewerState extends State<PixivAlbumViewer> {
                         itemCount: activeAlbums.length,
                         physics: _isSelectionMode
                             ? const NeverScrollableScrollPhysics()
-                            : const PageScrollPhysics(),
+                            : const _SnappyAlbumPagePhysics(),
                         onPageChanged: (newIndex) {
                           _stopAutoScroll();
                           setState(() {

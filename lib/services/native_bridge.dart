@@ -524,12 +524,20 @@ class NativeBridge {
   Future<bool> setWallpaper({
     String? filePath,
     String? contentUri,
-    String target = 'crop',
+    String target = 'home',
+    double? cropLeft,
+    double? cropTop,
+    double? cropWidth,
+    double? cropHeight,
   }) async {
     final ok = await _channel.invokeMethod<bool>('setWallpaper', {
       'filePath': filePath,
       'contentUri': contentUri,
       'target': target,
+      'cropLeft': ?cropLeft,
+      'cropTop': ?cropTop,
+      'cropWidth': ?cropWidth,
+      'cropHeight': ?cropHeight,
     });
     return ok ?? false;
   }

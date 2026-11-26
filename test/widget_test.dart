@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:linkdrop_downloader/models/app_settings.dart';
 import 'package:linkdrop_downloader/models/creator_profile.dart';
 import 'package:linkdrop_downloader/models/download_item.dart';
 import 'package:linkdrop_downloader/models/managed_file.dart';
@@ -8,6 +9,7 @@ import 'package:linkdrop_downloader/models/media_platform.dart';
 import 'package:linkdrop_downloader/screens/downloads_screen.dart';
 import 'package:linkdrop_downloader/screens/files_screen.dart';
 import 'package:linkdrop_downloader/screens/home_shell.dart';
+import 'package:linkdrop_downloader/screens/settings_screen.dart';
 import 'package:linkdrop_downloader/services/download_manager.dart';
 import 'package:linkdrop_downloader/theme/app_theme.dart';
 import 'package:linkdrop_downloader/widgets/media_preview_card.dart';
@@ -511,6 +513,53 @@ void main() {
       find.text('Load Balancer Aktif • menampilkan 60 dari 800 item'),
       findsOneWidget,
     );
+
+    manager.dispose();
+  });
+
+  testWidgets(
+      'SettingsScreen displays clean main menu + submenus and persists rate-limit settings',
+      (WidgetTester tester) async {
+    final original = const AppSettings(
+      maxConcurrentAlbums: 2,
+      downloadRateLimitMs: 600,
+    );
+    final roundTrip = AppSettings.fromJson(original.toJson());
+    expect(roundTrip.maxConcurrentAlbums, 2);
+    expect(roundTrip.downloadRateLimitMs, 600);
+    expect(
+      AppSettings.fromJson({'maxConcurrentAlbums': 99}).maxConcurrentAlbums,
+      AppSettings.maxConcurrentAlbumsLimit,
+    );
+
+    final manager = DownloadManager();
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: AppTheme.darkTheme(),
+        home: Scaffold(
+          body: SafeArea(
+            child: SettingsScreen(manager: manager),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    // Main Settings menu shows 5 clean categories instead of a cluttered wall
+    expect(find.text('Unduhan & Rate Limiting'), findsOneWidget);
+    expect(find.text('Akun & Login Platform'), findsOneWidget);
+    expect(find.text('Tampilan & Umum'), findsOneWidget);
+    expect(find.text('Backup, Migrasi & Data'), findsOneWidget);
+    expect(find.text('Mesin & Izin Sistem'), findsOneWidget);
+    expect(find.text('Maksimal Album Bersamaan'), findsNothing);
+
+    // Open Unduhan & Rate Limiting submenu
+    await tester.tap(find.text('Unduhan & Rate Limiting'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Maksimal Album Bersamaan'), findsOneWidget);
+    expect(find.text('Jeda Rate Limit Antar Album'), findsOneWidget);
+    expect(find.text('3 album'), findsOneWidget);
 
     manager.dispose();
   });

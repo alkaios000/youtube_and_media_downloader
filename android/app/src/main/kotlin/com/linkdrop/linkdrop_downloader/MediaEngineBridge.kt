@@ -7,11 +7,11 @@ import android.content.ContentUris
 import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
-import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.ImageDecoder
 import android.media.MediaScannerConnection
 import android.net.Uri
 import android.os.Build
@@ -78,10 +78,11 @@ class MediaEngineBridge(private val context: Context) {
         scope.launch {
             try {
                 ensureInitialized()
-                val version = runCatching { YoutubeDL.getInstance().version(context) }.getOrNull() ?: "bundled"
+                // Skip spawning Python `yt-dlp --version` subprocess during launch init
+                // so app startup stays instant; exact version is fetched lazily in Settings.
                 val info = mapOf(
                     "initialized" to isInitialized,
-                    "version" to version,
+                    "version" to "bundled",
                     "ffmpegReady" to ffmpegReady,
                     "aria2cReady" to aria2cReady,
                     "downloadFolder" to getPublicFolderLabel(),
@@ -1703,154 +1704,180 @@ class MediaEngineBridge(private val context: Context) {
         filePath: String?,
         contentUri: String?,
         target: String,
+        cropLeft: Float? = null,
+        cropTop: Float? = null,
+        cropWidth: Float? = null,
+        cropHeight: Float? = null,
         onSuccess: (Boolean) -> Unit,
         onError: (String, String) -> Unit,
     ) {
         scope.launch {
             try {
+                val normalizedPath = filePath
+                    ?.trim()
+                    ?.removePrefix("file://")
+                    ?.takeIf { it.isNotEmpty() }
+                val normalizedUri = contentUri
+                    ?.trim()
+                    ?.takeIf { it.startsWith("content://") }
+
+                fun findLocalFile(): File? {
+                    if (normalizedPath != null) {
+                        val f = File(normalizedPath)
+                        if (f.exists() && f.isFile && f.length() > 0L && f.canRead()) {
+                            return f
+                        }
+                    }
+                    return null
+                }
+
                 fun openImageStream(): java.io.InputStream? {
-                    // Prefer contentUri on Scoped Storage (Android 10+) to avoid EACCES on public paths
-                    if (!contentUri.isNullOrBlank() && contentUri.startsWith("content://")) {
+                    // Try readable local file first (Private Vault / app storage / accessible external)
+                    findLocalFile()?.let { f ->
+                        val s = runCatching { FileInputStream(f) }.getOrNull()
+                        if (s != null) return s
+                    }
+                    // Then try Scoped Storage contentUri (Android 10+ MediaStore)
+                    if (normalizedUri != null) {
                         val s = runCatching {
-                            context.contentResolver.openInputStream(Uri.parse(contentUri))
+                            context.contentResolver.openInputStream(Uri.parse(normalizedUri))
                         }.getOrNull()
                         if (s != null) return s
                     }
-                    if (!filePath.isNullOrBlank()) {
-                        val f = File(filePath)
-                        if (f.exists() && f.isFile && f.length() > 0L) {
-                            val s = runCatching { FileInputStream(f) }.getOrNull()
-                            if (s != null) return s
+                    // Final fallback: locate by display name in MediaStore if path went stale
+                    if (normalizedPath != null) {
+                        val baseName = File(normalizedPath).name
+                        if (baseName.isNotBlank() && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                            val lookedUpUri = runCatching {
+                                context.contentResolver.query(
+                                    MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                                    arrayOf(MediaStore.MediaColumns._ID),
+                                    "${MediaStore.MediaColumns.DISPLAY_NAME} = ? AND ${MediaStore.MediaColumns.RELATIVE_PATH} LIKE ?",
+                                    arrayOf(baseName, "%all_download%"),
+                                    "${MediaStore.MediaColumns.DATE_MODIFIED} DESC",
+                                )?.use { c ->
+                                    if (c.moveToFirst()) {
+                                        ContentUris.withAppendedId(
+                                            MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                                            c.getLong(0),
+                                        )
+                                    } else {
+                                        null
+                                    }
+                                }
+                            }.getOrNull()
+                            if (lookedUpUri != null) {
+                                val s = runCatching {
+                                    context.contentResolver.openInputStream(lookedUpUri)
+                                }.getOrNull()
+                                if (s != null) return s
+                            }
                         }
                     }
                     return null
                 }
 
                 fun decodeSafeBitmap(maxDimension: Int = 2560): Bitmap {
-                    val boundsOpts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-                    openImageStream()?.use { BitmapFactory.decodeStream(it, null, boundsOpts) }
-                        ?: throw IllegalArgumentException("File gambar tidak ditemukan atau tidak dapat dibaca.")
+                    var decoded: Bitmap? = null
 
-                    var inSample = 1
-                    val w = boundsOpts.outWidth
-                    val h = boundsOpts.outHeight
-                    if (w > 0 && h > 0) {
-                        val longest = maxOf(w, h)
-                        while (longest / inSample > maxDimension) {
-                            inSample *= 2
+                    // 1) Try modern ImageDecoder on Android 9+ (handles JPEG, PNG, WebP, HEIF + EXIF rotation!)
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                        val source = runCatching {
+                            val localFile = findLocalFile()
+                            when {
+                                localFile != null -> ImageDecoder.createSource(localFile)
+                                normalizedUri != null -> ImageDecoder.createSource(
+                                    context.contentResolver,
+                                    Uri.parse(normalizedUri),
+                                )
+                                else -> null
+                            }
+                        }.getOrNull()
+                        if (source != null) {
+                            decoded = runCatching {
+                                ImageDecoder.decodeBitmap(source) { decoder, info, _ ->
+                                    decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
+                                    decoder.isMutableRequired = false
+                                    val w = info.size.width
+                                    val h = info.size.height
+                                    val longest = maxOf(w, h)
+                                    if (longest > maxDimension && longest > 0) {
+                                        val scale = maxDimension.toFloat() / longest.toFloat()
+                                        decoder.setTargetSize(
+                                            maxOf(1, (w * scale).toInt()),
+                                            maxOf(1, (h * scale).toInt()),
+                                        )
+                                    }
+                                }
+                            }.getOrNull()
                         }
                     }
 
-                    val decodeOpts = BitmapFactory.Options().apply {
-                        inSampleSize = inSample
-                        inPreferredConfig = Bitmap.Config.ARGB_8888
-                    }
-                    val raw = openImageStream()?.use { BitmapFactory.decodeStream(it, null, decodeOpts) }
-                        ?: throw IllegalStateException("Gagal mendekode gambar untuk wallpaper.")
+                    // 2) Fallback: classic BitmapFactory stream decode with safe downsampling
+                    if (decoded == null) {
+                        val boundsOpts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                        val boundsStream = openImageStream()
+                            ?: throw IllegalArgumentException(
+                                "File gambar tidak ditemukan atau tidak dapat dibaca. Coba segarkan folder lalu ulangi.",
+                            )
+                        boundsStream.use { BitmapFactory.decodeStream(it, null, boundsOpts) }
 
-                    if (!raw.hasAlpha()) return raw
+                        var inSample = 1
+                        val w = boundsOpts.outWidth
+                        val h = boundsOpts.outHeight
+                        if (w > 0 && h > 0) {
+                            val longest = maxOf(w, h)
+                            while (longest / inSample > maxDimension) {
+                                inSample *= 2
+                            }
+                        }
+
+                        val decodeOpts = BitmapFactory.Options().apply {
+                            inSampleSize = inSample
+                            inPreferredConfig = Bitmap.Config.ARGB_8888
+                        }
+                        decoded = openImageStream()?.use {
+                            BitmapFactory.decodeStream(it, null, decodeOpts)
+                        } ?: throw IllegalStateException("Gagal mendekode gambar untuk wallpaper.")
+                    }
+
+                    var working = decoded
+
+                    // Apply user-framed normalized crop rectangle (from in-app WallpaperCropPreviewScreen)
+                    if (cropLeft != null && cropTop != null && cropWidth != null && cropHeight != null &&
+                        cropWidth > 0.01f && cropHeight > 0.01f
+                    ) {
+                        val cl = cropLeft.coerceIn(0f, 0.99f)
+                        val ct = cropTop.coerceIn(0f, 0.99f)
+                        val cw = cropWidth.coerceIn(0.01f, 1f - cl)
+                        val ch = cropHeight.coerceIn(0.01f, 1f - ct)
+
+                        val x = (cl * working.width).toInt().coerceIn(0, maxOf(0, working.width - 1))
+                        val y = (ct * working.height).toInt().coerceIn(0, maxOf(0, working.height - 1))
+                        val w = (cw * working.width).toInt().coerceIn(1, working.width - x)
+                        val h = (ch * working.height).toInt().coerceIn(1, working.height - y)
+
+                        if (w < working.width || h < working.height || x > 0 || y > 0) {
+                            val cropped = Bitmap.createBitmap(working, x, y, w, h)
+                            if (cropped != working) {
+                                working.recycle()
+                                working = cropped
+                            }
+                        }
+                    }
+
+                    if (!working.hasAlpha()) return working
 
                     // Flatten transparent PNGs onto opaque black so system wallpaper never renders artifacts
-                    val opaque = Bitmap.createBitmap(raw.width, raw.height, Bitmap.Config.ARGB_8888)
+                    val opaque = Bitmap.createBitmap(working.width, working.height, Bitmap.Config.ARGB_8888)
                     val canvas = Canvas(opaque)
                     canvas.drawColor(Color.BLACK)
-                    canvas.drawBitmap(raw, 0f, 0f, null)
-                    raw.recycle()
+                    canvas.drawBitmap(working, 0f, 0f, null)
+                    working.recycle()
                     return opaque
                 }
 
                 val wm = WallpaperManager.getInstance(context)
-
-                if (target.equals("crop", ignoreCase = true)) {
-                    // Always write a clean temporary JPEG into cacheDir so OEM wallpaper croppers
-                    // receive a guaranteed `image/jpeg` FileProvider URI (works for Private Vault, WebP, PNG, 8K!)
-                    val shareDir = File(context.cacheDir, "wallpaper_share").apply { mkdirs() }
-                    val cleanTemp = File(shareDir, "wallpaper_crop_${System.currentTimeMillis()}.jpg")
-                    // Clean stale temp wallpaper files
-                    shareDir.listFiles()?.forEach { old ->
-                        if (old.name != cleanTemp.name) runCatching { old.delete() }
-                    }
-
-                    val bmp = decodeSafeBitmap(maxDimension = 2560)
-                    try {
-                        FileOutputStream(cleanTemp).use { fos ->
-                            bmp.compress(Bitmap.CompressFormat.JPEG, 95, fos)
-                            fos.flush()
-                        }
-                    } finally {
-                        bmp.recycle()
-                    }
-
-                    val shareUri = FileProvider.getUriForFile(
-                        context,
-                        "${context.packageName}.fileprovider",
-                        cleanTemp,
-                    )
-
-                    postToMain {
-                        fun grantToHandlers(intent: Intent) {
-                            val handlers = runCatching {
-                                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                                    activity.packageManager.queryIntentActivities(
-                                        intent,
-                                        PackageManager.ResolveInfoFlags.of(PackageManager.MATCH_DEFAULT_ONLY.toLong()),
-                                    )
-                                } else {
-                                    @Suppress("DEPRECATION")
-                                    activity.packageManager.queryIntentActivities(
-                                        intent,
-                                        PackageManager.MATCH_DEFAULT_ONLY,
-                                    )
-                                }
-                            }.getOrDefault(emptyList())
-                            for (ri in handlers) {
-                                runCatching {
-                                    activity.grantUriPermission(
-                                        ri.activityInfo.packageName,
-                                        shareUri,
-                                        Intent.FLAG_GRANT_READ_URI_PERMISSION,
-                                    )
-                                }
-                            }
-                        }
-
-                        val launched = runCatching {
-                            val cropIntent = wm.getCropAndSetWallpaperIntent(shareUri).apply {
-                                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                                clipData = ClipData.newRawUri("wallpaper", shareUri)
-                            }
-                            grantToHandlers(cropIntent)
-                            activity.startActivity(cropIntent)
-                            true
-                        }.getOrElse {
-                            runCatching {
-                                val attachIntent = Intent(Intent.ACTION_ATTACH_DATA).apply {
-                                    setDataAndType(shareUri, "image/jpeg")
-                                    putExtra("mimeType", "image/jpeg")
-                                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                                    clipData = ClipData.newRawUri("wallpaper", shareUri)
-                                }
-                                grantToHandlers(attachIntent)
-                                val chooser = Intent.createChooser(attachIntent, "Jadikan Wallpaper").apply {
-                                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                                    clipData = ClipData.newRawUri("wallpaper", shareUri)
-                                }
-                                activity.startActivity(chooser)
-                                true
-                            }.getOrDefault(false)
-                        }
-
-                        if (launched) {
-                            onSuccess(true)
-                        } else {
-                            onError(
-                                "WALLPAPER_NO_CROPPER",
-                                "Perangkat tidak memiliki pemotong wallpaper bawaan. Gunakan opsi Layar Utama / Layar Kunci langsung.",
-                            )
-                        }
-                    }
-                    return@launch
-                }
 
                 // Direct native WallpaperManager apply (Home / Lock / Both)
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N && !wm.isSetWallpaperAllowed) {
@@ -1866,8 +1893,7 @@ class MediaEngineBridge(private val context: Context) {
                             else -> WallpaperManager.FLAG_SYSTEM
                         }
                         val applied = runCatching {
-                            wm.setBitmap(bitmap, null, true, flags)
-                            true
+                            wm.setBitmap(bitmap, null, true, flags) > 0
                         }.getOrDefault(false)
                         if (!applied) {
                             // Some OEM ROMs (e.g. certain MIUI/HyperOS builds) restrict FLAG_LOCK; fallback safely

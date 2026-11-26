@@ -186,7 +186,6 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
                 widget.manager.refreshManagedFiles();
               } else if (index == 3) {
                 widget.manager.refreshStorageInfo();
-                widget.manager.refreshBrowserSessions();
               }
             },
             destinations: [
