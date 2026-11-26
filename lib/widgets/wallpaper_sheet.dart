@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../models/managed_file.dart';
 import '../services/download_manager.dart';
@@ -80,6 +81,19 @@ Future<void> showSetWallpaperSheet(
           ),
         );
     }
+  } on PlatformException catch (e) {
+    if (!context.mounted) return;
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(
+          content: Text(
+            e.message?.isNotEmpty == true
+                ? e.message!
+                : 'Gagal memasang wallpaper.',
+          ),
+        ),
+      );
   } catch (e) {
     if (!context.mounted) return;
     ScaffoldMessenger.of(context)

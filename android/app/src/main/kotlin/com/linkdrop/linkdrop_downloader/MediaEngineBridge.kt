@@ -1,12 +1,17 @@
 package com.linkdrop.linkdrop_downloader
 
+import android.app.Activity
 import android.app.WallpaperManager
 import android.content.ClipData
 import android.content.ContentUris
 import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.Canvas
+import android.graphics.Color
 import android.media.MediaScannerConnection
 import android.net.Uri
 import android.os.Build
@@ -1691,6 +1696,7 @@ class MediaEngineBridge(private val context: Context) {
     }
 
     fun setWallpaper(
+        activity: Activity,
         filePath: String?,
         contentUri: String?,
         target: String,
@@ -1699,84 +1705,176 @@ class MediaEngineBridge(private val context: Context) {
     ) {
         scope.launch {
             try {
-                val wm = WallpaperManager.getInstance(context)
-                if (target.equals("crop", ignoreCase = true)) {
-                    val uri = resolveReadableUri(filePath, contentUri)
-                        ?: throw IllegalArgumentException("File gambar tidak ditemukan.")
-                    val launched = runCatching {
-                        val cropIntent = wm.getCropAndSetWallpaperIntent(uri).apply {
-                            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                        }
-                        context.startActivity(cropIntent)
-                        true
-                    }.getOrElse {
-                        runCatching {
-                            val attachIntent = Intent(Intent.ACTION_ATTACH_DATA).apply {
-                                setDataAndType(uri, "image/*")
-                                putExtra("mimeType", "image/*")
-                                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                            }
-                            context.startActivity(
-                                Intent.createChooser(attachIntent, "Jadikan Wallpaper").apply {
-                                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                                },
-                            )
-                            true
-                        }.getOrDefault(false)
-                    }
-                    postToMain { onSuccess(launched) }
-                    return@launch
-                }
-
                 fun openImageStream(): java.io.InputStream? {
+                    // Prefer contentUri on Scoped Storage (Android 10+) to avoid EACCES on public paths
+                    if (!contentUri.isNullOrBlank() && contentUri.startsWith("content://")) {
+                        val s = runCatching {
+                            context.contentResolver.openInputStream(Uri.parse(contentUri))
+                        }.getOrNull()
+                        if (s != null) return s
+                    }
                     if (!filePath.isNullOrBlank()) {
                         val f = File(filePath)
                         if (f.exists() && f.isFile && f.length() > 0L) {
-                            return FileInputStream(f)
+                            val s = runCatching { FileInputStream(f) }.getOrNull()
+                            if (s != null) return s
                         }
-                    }
-                    if (!contentUri.isNullOrBlank() && contentUri.startsWith("content://")) {
-                        return context.contentResolver.openInputStream(Uri.parse(contentUri))
                     }
                     return null
                 }
 
-                val flags = when (target.lowercase(Locale.US)) {
-                    "lock" -> if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) WallpaperManager.FLAG_LOCK else 0
-                    "both" -> if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-                        WallpaperManager.FLAG_SYSTEM or WallpaperManager.FLAG_LOCK
-                    } else {
-                        0
+                fun decodeSafeBitmap(maxDimension: Int = 2560): Bitmap {
+                    val boundsOpts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                    openImageStream()?.use { BitmapFactory.decodeStream(it, null, boundsOpts) }
+                        ?: throw IllegalArgumentException("File gambar tidak ditemukan atau tidak dapat dibaca.")
+
+                    var inSample = 1
+                    val w = boundsOpts.outWidth
+                    val h = boundsOpts.outHeight
+                    if (w > 0 && h > 0) {
+                        val longest = maxOf(w, h)
+                        while (longest / inSample > maxDimension) {
+                            inSample *= 2
+                        }
                     }
-                    else -> if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) WallpaperManager.FLAG_SYSTEM else 0
+
+                    val decodeOpts = BitmapFactory.Options().apply {
+                        inSampleSize = inSample
+                        inPreferredConfig = Bitmap.Config.ARGB_8888
+                    }
+                    val raw = openImageStream()?.use { BitmapFactory.decodeStream(it, null, decodeOpts) }
+                        ?: throw IllegalStateException("Gagal mendekode gambar untuk wallpaper.")
+
+                    if (!raw.hasAlpha()) return raw
+
+                    // Flatten transparent PNGs onto opaque black so system wallpaper never renders artifacts
+                    val opaque = Bitmap.createBitmap(raw.width, raw.height, Bitmap.Config.ARGB_8888)
+                    val canvas = Canvas(opaque)
+                    canvas.drawColor(Color.BLACK)
+                    canvas.drawBitmap(raw, 0f, 0f, null)
+                    raw.recycle()
+                    return opaque
                 }
 
-                val appliedByStream = runCatching {
-                    openImageStream()?.use { stream ->
-                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N && flags != 0) {
-                            wm.setStream(stream, null, true, flags)
-                        } else {
-                            wm.setStream(stream)
-                        }
-                        true
-                    } ?: false
-                }.getOrDefault(false)
+                val wm = WallpaperManager.getInstance(context)
 
-                if (!appliedByStream) {
-                    val bitmap = openImageStream()?.use { BitmapFactory.decodeStream(it) }
-                        ?: throw IllegalStateException("Gagal membaca gambar untuk wallpaper.")
+                if (target.equals("crop", ignoreCase = true)) {
+                    // Always write a clean temporary JPEG into cacheDir so OEM wallpaper croppers
+                    // receive a guaranteed `image/jpeg` FileProvider URI (works for Private Vault, WebP, PNG, 8K!)
+                    val shareDir = File(context.cacheDir, "wallpaper_share").apply { mkdirs() }
+                    val cleanTemp = File(shareDir, "wallpaper_crop_${System.currentTimeMillis()}.jpg")
+                    // Clean stale temp wallpaper files
+                    shareDir.listFiles()?.forEach { old ->
+                        if (old.name != cleanTemp.name) runCatching { old.delete() }
+                    }
+
+                    val bmp = decodeSafeBitmap(maxDimension = 2560)
                     try {
-                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N && flags != 0) {
-                            wm.setBitmap(bitmap, null, true, flags)
-                        } else {
-                            wm.setBitmap(bitmap)
+                        FileOutputStream(cleanTemp).use { fos ->
+                            bmp.compress(Bitmap.CompressFormat.JPEG, 95, fos)
+                            fos.flush()
                         }
                     } finally {
-                        bitmap.recycle()
+                        bmp.recycle()
                     }
+
+                    val shareUri = FileProvider.getUriForFile(
+                        context,
+                        "${context.packageName}.fileprovider",
+                        cleanTemp,
+                    )
+
+                    postToMain {
+                        fun grantToHandlers(intent: Intent) {
+                            val handlers = runCatching {
+                                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                                    activity.packageManager.queryIntentActivities(
+                                        intent,
+                                        PackageManager.ResolveInfoFlags.of(PackageManager.MATCH_DEFAULT_ONLY.toLong()),
+                                    )
+                                } else {
+                                    @Suppress("DEPRECATION")
+                                    activity.packageManager.queryIntentActivities(
+                                        intent,
+                                        PackageManager.MATCH_DEFAULT_ONLY,
+                                    )
+                                }
+                            }.getOrDefault(emptyList())
+                            for (ri in handlers) {
+                                runCatching {
+                                    activity.grantUriPermission(
+                                        ri.activityInfo.packageName,
+                                        shareUri,
+                                        Intent.FLAG_GRANT_READ_URI_PERMISSION,
+                                    )
+                                }
+                            }
+                        }
+
+                        val launched = runCatching {
+                            val cropIntent = wm.getCropAndSetWallpaperIntent(shareUri).apply {
+                                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                clipData = ClipData.newRawUri("wallpaper", shareUri)
+                            }
+                            grantToHandlers(cropIntent)
+                            activity.startActivity(cropIntent)
+                            true
+                        }.getOrElse {
+                            runCatching {
+                                val attachIntent = Intent(Intent.ACTION_ATTACH_DATA).apply {
+                                    setDataAndType(shareUri, "image/jpeg")
+                                    putExtra("mimeType", "image/jpeg")
+                                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                    clipData = ClipData.newRawUri("wallpaper", shareUri)
+                                }
+                                grantToHandlers(attachIntent)
+                                val chooser = Intent.createChooser(attachIntent, "Jadikan Wallpaper").apply {
+                                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                    clipData = ClipData.newRawUri("wallpaper", shareUri)
+                                }
+                                activity.startActivity(chooser)
+                                true
+                            }.getOrDefault(false)
+                        }
+
+                        if (launched) {
+                            onSuccess(true)
+                        } else {
+                            onError(
+                                "WALLPAPER_NO_CROPPER",
+                                "Perangkat tidak memiliki pemotong wallpaper bawaan. Gunakan opsi Layar Utama / Layar Kunci langsung.",
+                            )
+                        }
+                    }
+                    return@launch
+                }
+
+                // Direct native WallpaperManager apply (Home / Lock / Both)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N && !wm.isSetWallpaperAllowed) {
+                    throw IllegalStateException("Perangkat tidak mengizinkan penggantian wallpaper saat ini.")
+                }
+
+                val bitmap = decodeSafeBitmap(maxDimension = 2560)
+                try {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                        val flags = when (target.lowercase(Locale.US)) {
+                            "lock" -> WallpaperManager.FLAG_LOCK
+                            "both" -> WallpaperManager.FLAG_SYSTEM or WallpaperManager.FLAG_LOCK
+                            else -> WallpaperManager.FLAG_SYSTEM
+                        }
+                        val applied = runCatching {
+                            wm.setBitmap(bitmap, null, true, flags)
+                            true
+                        }.getOrDefault(false)
+                        if (!applied) {
+                            // Some OEM ROMs (e.g. certain MIUI/HyperOS builds) restrict FLAG_LOCK; fallback safely
+                            wm.setBitmap(bitmap)
+                        }
+                    } else {
+                        wm.setBitmap(bitmap)
+                    }
+                } finally {
+                    bitmap.recycle()
                 }
 
                 postToMain { onSuccess(true) }

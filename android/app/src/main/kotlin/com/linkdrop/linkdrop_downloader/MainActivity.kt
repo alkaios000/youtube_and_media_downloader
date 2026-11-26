@@ -452,6 +452,7 @@ class MainActivity : FlutterActivity() {
                         val contentUri = call.argument<String>("contentUri")
                         val target = call.argument<String>("target") ?: "crop"
                         bridge.setWallpaper(
+                            activity = this,
                             filePath = filePath,
                             contentUri = contentUri,
                             target = target,
