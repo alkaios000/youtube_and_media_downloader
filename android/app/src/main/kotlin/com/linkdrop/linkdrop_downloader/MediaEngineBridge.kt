@@ -1,5 +1,6 @@
 package com.linkdrop.linkdrop_downloader
 
+import android.Manifest
 import android.app.Activity
 import android.app.WallpaperManager
 import android.content.ClipData
@@ -7,6 +8,7 @@ import android.content.ContentUris
 import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Canvas
@@ -21,6 +23,7 @@ import android.os.Looper
 import android.provider.MediaStore
 import android.util.Log
 import android.webkit.MimeTypeMap
+import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import com.yausername.aria2c.Aria2c
 import com.yausername.ffmpeg.FFmpeg
@@ -786,7 +789,55 @@ class MediaEngineBridge(private val context: Context) {
         }
     }
 
-    private fun privateVaultRoot(): File {
+    fun hasAllFilesAccess(): Boolean {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            Environment.isExternalStorageManager()
+        } else {
+            ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.WRITE_EXTERNAL_STORAGE,
+            ) == PackageManager.PERMISSION_GRANTED
+        }
+    }
+
+    /**
+     * Shared external hidden vault (`Documents/.all_download_vault/`) that survives
+     * app uninstall, clear-data, reinstall, and `flutter run` while remaining 100%
+     * hidden from Android Gallery & WhatsApp via `.nomedia`.
+     */
+    private fun persistentVaultBaseDir(): File? {
+        if (!hasAllFilesAccess()) return null
+        return runCatching {
+            @Suppress("DEPRECATION")
+            val docs = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOCUMENTS)
+            val base = File(docs, ".all_download_vault")
+            if (!base.exists()) base.mkdirs()
+            if (!base.exists() || !base.canWrite()) return@runCatching null
+            val nomedia = File(base, ".nomedia")
+            if (!nomedia.exists()) runCatching { nomedia.createNewFile() }
+            base
+        }.getOrNull()
+    }
+
+    fun getPersistentStateDirPath(): String? {
+        val base = persistentVaultBaseDir() ?: return null
+        val stateDir = File(base, "state")
+        if (!stateDir.exists()) stateDir.mkdirs()
+        val nomedia = File(stateDir, ".nomedia")
+        if (!nomedia.exists()) runCatching { nomedia.createNewFile() }
+        return if (stateDir.exists() && stateDir.canWrite()) stateDir.absolutePath else null
+    }
+
+    private fun persistentPrivateVaultRoot(): File? {
+        val base = persistentVaultBaseDir() ?: return null
+        val mediaDir = File(base, "media")
+        if (!mediaDir.exists()) mediaDir.mkdirs()
+        val nomedia = File(mediaDir, ".nomedia")
+        if (!nomedia.exists()) runCatching { nomedia.createNewFile() }
+        return if (mediaDir.exists() && mediaDir.canWrite()) mediaDir else null
+    }
+
+    private fun legacyPrivateVaultRoot(): File {
         val base = context.getExternalFilesDir(null) ?: context.filesDir
         val root = File(base, "private_vault")
         if (!root.exists()) root.mkdirs()
@@ -795,15 +846,82 @@ class MediaEngineBridge(private val context: Context) {
         return root
     }
 
+    private fun privateVaultRoot(): File {
+        return persistentPrivateVaultRoot() ?: legacyPrivateVaultRoot()
+    }
+
+    private fun allPrivateVaultRoots(): List<File> {
+        val roots = mutableListOf<File>()
+        persistentPrivateVaultRoot()?.let { roots.add(it) }
+        val legacy = legacyPrivateVaultRoot()
+        if (roots.none { it.absolutePath == legacy.absolutePath }) {
+            roots.add(legacy)
+        }
+        return roots
+    }
+
+    /**
+     * Migrates any files still sitting in the old app-private directory
+     * (`Android/data/.../files/private_vault`) into the uninstall-proof
+     * `Documents/.all_download_vault/media/` directory.
+     */
+    fun migrateLegacyPrivateVault(onDone: (Int) -> Unit) {
+        scope.launch {
+            val persistent = persistentPrivateVaultRoot()
+            if (persistent == null) {
+                postToMain { onDone(0) }
+                return@launch
+            }
+            val legacy = legacyPrivateVaultRoot()
+            if (!legacy.exists() || legacy.canonicalPath == persistent.canonicalPath) {
+                postToMain { onDone(0) }
+                return@launch
+            }
+
+            var movedCount = 0
+            runCatching {
+                legacy.walkTopDown()
+                    .filter { it.isFile && !it.name.startsWith(".") && it.length() > 0L }
+                    .forEach { src ->
+                        runCatching {
+                            val relPath = src.relativeTo(legacy).path
+                            val dst = File(persistent, relPath)
+                            dst.parentFile?.mkdirs()
+                            val alreadyPresent = dst.exists() && dst.isFile && dst.length() == src.length()
+                            if (!alreadyPresent) {
+                                FileInputStream(src).use { input ->
+                                    FileOutputStream(dst).use { output ->
+                                        input.copyTo(output, bufferSize = 64 * 1024)
+                                    }
+                                }
+                                runCatching { dst.setLastModified(src.lastModified()) }
+                            }
+                            if (dst.exists() && dst.length() > 0L) {
+                                if (src.delete()) {
+                                    cleanupEmptyPrivateDirs(src)
+                                    movedCount++
+                                }
+                            }
+                        }
+                    }
+            }
+            postToMain { onDone(movedCount) }
+        }
+    }
+
     private fun cleanupEmptyPrivateDirs(deletedFile: File) {
         runCatching {
-            val vaultRoot = privateVaultRoot().canonicalFile
+            val roots = allPrivateVaultRoots().mapNotNull { runCatching { it.canonicalFile }.getOrNull() }
             var current = deletedFile.parentFile?.canonicalFile
-            while (current != null && current != vaultRoot && current.path.startsWith(vaultRoot.path)) {
+            while (current != null) {
+                val matchedRoot = roots.firstOrNull { root ->
+                    current != root && current.path.startsWith(root.path)
+                } ?: break
                 val children = current.listFiles()?.filter { it.name != ".nomedia" }
                 if (children.isNullOrEmpty()) {
                     current.deleteRecursively()
                     current = current.parentFile?.canonicalFile
+                    if (current == matchedRoot) break
                 } else {
                     break
                 }
@@ -926,31 +1044,32 @@ class MediaEngineBridge(private val context: Context) {
             sanitizeFolderSegment(it, "")
         }.orEmpty()
 
-        // 1. Check Private Vault (with album subfolder and without)
+        // 1. Check ALL Private Vault roots (uninstall-proof Documents/.all_download_vault/media + legacy app-private)
         if (checkPrivateVault) {
-            val vault = privateVaultRoot()
-            val candidateDirs = buildList {
-                if (safeAlbum.isNotEmpty()) {
-                    add(File(File(File(vault, safePlatform), safeCreator), safeAlbum) to "Privat/$safePlatform/$safeCreator/$safeAlbum")
+            for (vault in allPrivateVaultRoots()) {
+                val candidateDirs = buildList {
+                    if (safeAlbum.isNotEmpty()) {
+                        add(File(File(File(vault, safePlatform), safeCreator), safeAlbum) to "Privat/$safePlatform/$safeCreator/$safeAlbum")
+                    }
+                    add(File(File(vault, safePlatform), safeCreator) to "Privat/$safePlatform/$safeCreator")
                 }
-                add(File(File(vault, safePlatform), safeCreator) to "Privat/$safePlatform/$safeCreator")
-            }
-            for ((dir, label) in candidateDirs) {
-                val f = File(dir, cleanName)
-                if (f.exists() && f.isFile && f.length() > 0L) {
-                    return mapOf(
-                        "savedPath" to f.absolutePath,
-                        "contentUri" to "",
-                        "fileName" to f.name,
-                        "fileSize" to f.length(),
-                        "mimeType" to resolvedMime,
-                        "folderLabel" to label,
-                        "platformFolder" to safePlatform,
-                        "creatorFolder" to safeCreator,
-                        "albumFolder" to safeAlbum,
-                        "isPrivate" to true,
-                        "skipped" to true,
-                    )
+                for ((dir, label) in candidateDirs) {
+                    val f = File(dir, cleanName)
+                    if (f.exists() && f.isFile && f.length() > 0L) {
+                        return mapOf(
+                            "savedPath" to f.absolutePath,
+                            "contentUri" to "",
+                            "fileName" to f.name,
+                            "fileSize" to f.length(),
+                            "mimeType" to resolvedMime,
+                            "folderLabel" to label,
+                            "platformFolder" to safePlatform,
+                            "creatorFolder" to safeCreator,
+                            "albumFolder" to safeAlbum,
+                            "isPrivate" to true,
+                            "skipped" to true,
+                        )
+                    }
                 }
             }
         }
@@ -1571,6 +1690,11 @@ class MediaEngineBridge(private val context: Context) {
                                     val modSec = if (modIdx >= 0) cursor.getLong(modIdx) else 0L
                                     val relPath = if (relIdx >= 0) cursor.getString(relIdx) ?: "" else ""
                                     val dataPath = if (dataIdx >= 0) cursor.getString(dataIdx) ?: "" else ""
+                                    if (relPath.contains(".all_download_vault", ignoreCase = true) ||
+                                        dataPath.contains(".all_download_vault", ignoreCase = true)
+                                    ) {
+                                        continue
+                                    }
 
                                     val contentUri = ContentUris.withAppendedId(collectionUri, id).toString()
                                     val dedupKey = dataPath.ifBlank { contentUri }
@@ -1639,43 +1763,47 @@ class MediaEngineBridge(private val context: Context) {
                     }
                 }
 
-                // Also scan app-private vault (Pixiv default private storage, hidden from Gallery & WA!)
-                runCatching {
-                    val vault = privateVaultRoot()
-                    if (vault.exists()) {
-                        vault.walkTopDown()
-                            .filter { it.isFile && !it.name.startsWith(".") && it.length() > 0 }
-                            .forEach { f ->
-                                if (!seenPaths.add(f.absolutePath)) return@forEach
-                                val mime = detectMimeType(f.name)
-                                val kind = when {
-                                    mime.startsWith("video/") -> "video"
-                                    mime.startsWith("audio/") -> "audio"
-                                    mime.startsWith("image/") -> "image"
-                                    else -> "image"
+                // Also scan Private Vault roots (uninstall-proof Documents/.all_download_vault/media + legacy fallback)
+                val seenPrivateLogical = HashSet<String>()
+                for (vault in allPrivateVaultRoots()) {
+                    runCatching {
+                        if (vault.exists()) {
+                            vault.walkTopDown()
+                                .filter { it.isFile && !it.name.startsWith(".") && it.length() > 0 }
+                                .forEach { f ->
+                                    if (!seenPaths.add(f.absolutePath)) return@forEach
+                                    val mime = detectMimeType(f.name)
+                                    val kind = when {
+                                        mime.startsWith("video/") -> "video"
+                                        mime.startsWith("audio/") -> "audio"
+                                        mime.startsWith("image/") -> "image"
+                                        else -> "image"
+                                    }
+                                    val relDir = f.parentFile?.relativeTo(vault)?.path?.replace('\\', '/').orEmpty()
+                                    val parts = relDir.split('/').filter { it.isNotBlank() }
+                                    val platformName = parts.getOrNull(0) ?: "Pixiv"
+                                    val creatorName = parts.getOrNull(1) ?: "Umum"
+                                    val albumName = parts.getOrNull(2) ?: ""
+                                    val logicalKey = "$platformName/$creatorName/$albumName/${f.name}".lowercase(Locale.US)
+                                    if (!seenPrivateLogical.add(logicalKey)) return@forEach
+                                    results.add(
+                                        mapOf(
+                                            "fileName" to f.name,
+                                            "mimeType" to mime,
+                                            "mediaKind" to kind,
+                                            "fileSize" to f.length(),
+                                            "modifiedMs" to f.lastModified(),
+                                            "relativePath" to "Privat/$relDir",
+                                            "savedPath" to f.absolutePath,
+                                            "contentUri" to "",
+                                            "platformFolder" to platformName,
+                                            "creatorFolder" to creatorName,
+                                            "albumFolder" to albumName,
+                                            "isPrivate" to true,
+                                        ),
+                                    )
                                 }
-                                val relDir = f.parentFile?.relativeTo(vault)?.path?.replace('\\', '/').orEmpty()
-                                val parts = relDir.split('/').filter { it.isNotBlank() }
-                                val platformName = parts.getOrNull(0) ?: "Pixiv"
-                                val creatorName = parts.getOrNull(1) ?: "Umum"
-                                val albumName = parts.getOrNull(2) ?: ""
-                                results.add(
-                                    mapOf(
-                                        "fileName" to f.name,
-                                        "mimeType" to mime,
-                                        "mediaKind" to kind,
-                                        "fileSize" to f.length(),
-                                        "modifiedMs" to f.lastModified(),
-                                        "relativePath" to "Privat/$relDir",
-                                        "savedPath" to f.absolutePath,
-                                        "contentUri" to "",
-                                        "platformFolder" to platformName,
-                                        "creatorFolder" to creatorName,
-                                        "albumFolder" to albumName,
-                                        "isPrivate" to true,
-                                    ),
-                                )
-                            }
+                        }
                     }
                 }
 

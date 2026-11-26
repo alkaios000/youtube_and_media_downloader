@@ -16,10 +16,12 @@ import 'package:linkdrop_downloader/services/direct_extractors.dart';
 import 'package:linkdrop_downloader/services/download_manager.dart';
 import 'package:linkdrop_downloader/services/storage_service.dart';
 import 'package:linkdrop_downloader/theme/app_theme.dart';
+import 'package:linkdrop_downloader/widgets/app_feedback.dart';
 import 'package:linkdrop_downloader/widgets/file_gallery_viewer.dart';
 import 'package:linkdrop_downloader/widgets/media_preview_card.dart';
 import 'package:linkdrop_downloader/widgets/pixiv_album_viewer.dart';
 import 'package:linkdrop_downloader/widgets/sharp_original_image.dart';
+import 'package:linkdrop_downloader/widgets/tag_albums_screen.dart';
 
 class _MemoryStorageService extends StorageService {
   @override
@@ -50,13 +52,21 @@ class _FakeFilesManager extends DownloadManager {
   final List<DownloadItem> fakeItems;
 
   _FakeFilesManager(
-    this._fakeFiles,
+    List<ManagedFile> fakeFiles,
     this._fakeProfiles, {
     this.fakeItems = const [],
-  }) : super(storage: _MemoryStorageService());
+  })  : _fakeFiles = List<ManagedFile>.from(fakeFiles),
+        super(storage: _MemoryStorageService());
 
   @override
   List<ManagedFile> get managedFiles => _fakeFiles;
+
+  @override
+  Future<bool> deleteManagedFile(ManagedFile file) async {
+    _fakeFiles.removeWhere((f) => f.uniqueKey == file.uniqueKey);
+    notifyListeners();
+    return true;
+  }
 
   @override
   List<DownloadItem> get items => fakeItems;
@@ -1083,7 +1093,7 @@ void main() {
       ['Original', 'Fantasy'],
     );
 
-    // 2) Verify PixivAlbumViewer renders per-album tags strip
+    // 2) Verify PixivAlbumViewer renders per-album tags BELOW the album when scrolled
     await tester.pumpWidget(
       MaterialApp(
         theme: AppTheme.darkTheme(),
@@ -1098,6 +1108,9 @@ void main() {
       ),
     );
     await tester.pump();
+    await tester.drag(find.byType(CustomScrollView), const Offset(0, -600));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey<String>('album_tags_footer')), findsOneWidget);
     expect(find.text('#Original'), findsOneWidget);
     expect(find.text('#Fantasy'), findsOneWidget);
 
@@ -1136,6 +1149,12 @@ void main() {
     await tester.tap(find.text('NSFW'));
     await tester.pumpAndSettle();
     expect(manager.getPhotoRating(photoToMark), ContentRating.nsfw);
+    // Notification MUST appear at the TOP of the screen (never covering bottom buttons!)
+    final toastFinder = find.text('Foto ditandai sebagai NSFW.');
+    expect(toastFinder, findsOneWidget);
+    expect(tester.getTopLeft(toastFinder).dy, lessThan(140));
+    dismissTopToast();
+    await tester.pumpAndSettle();
 
     // Rating survives Private <-> Public Gallery move because ratingKey is logical!
     final unlockedCopy = ManagedFile(
@@ -1407,6 +1426,124 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.byType(FileGalleryViewer), findsNothing);
     expect(find.text('3 dipilih'), findsOneWidget);
+
+    manager.dispose();
+  });
+
+  testWidgets(
+      'Bottom album tags open all albums with same tag, delete confirm stays at bottom, and Fast Delete skips confirm',
+      (WidgetTester tester) async {
+    ManagedFile mkFile(String artist, String album, String name, int minute) =>
+        ManagedFile(
+          fileName: name,
+          mimeType: 'image/jpeg',
+          mediaKind: MediaKind.image,
+          fileSize: 2048,
+          modifiedAt: DateTime(2026, 11, 26, 10, minute),
+          relativePath: 'Pixiv/$artist/$album',
+          savedPath: '/nonexistent/$artist/$album/$name',
+          contentUri: 'content://test/$artist/$album/$name',
+          platformFolder: 'Pixiv',
+          creatorFolder: artist,
+          albumFolder: album,
+          isPrivate: true,
+        );
+
+    final f1 = mkFile('ArtistOne', 'AlbumAlpha', 'a1.jpg', 10);
+    final f2 = mkFile('ArtistOne', 'AlbumAlpha', 'a2.jpg', 11);
+    final f3 = mkFile('ArtistTwo', 'AlbumBeta', 'b1.jpg', 12);
+    final f4 = mkFile('ArtistTwo', 'AlbumOther', 'c1.jpg', 13);
+
+    final manager = _FakeFilesManager([f1, f2, f3, f4], const {});
+    await manager.saveAlbumMetadata(
+      platformFolder: 'Pixiv',
+      creatorFolder: 'ArtistOne',
+      albumFolder: 'AlbumAlpha',
+      tags: const ['Fantasy', 'Knight'],
+    );
+    await manager.saveAlbumMetadata(
+      platformFolder: 'Pixiv',
+      creatorFolder: 'ArtistTwo',
+      albumFolder: 'AlbumBeta',
+      tags: const ['fantasy', 'Magic'],
+    );
+    await manager.saveAlbumMetadata(
+      platformFolder: 'Pixiv',
+      creatorFolder: 'ArtistTwo',
+      albumFolder: 'AlbumOther',
+      tags: const ['SciFi'],
+    );
+
+    // 1) Open PixivAlbumViewer on AlbumAlpha -> scroll down -> tap #Fantasy -> opens TagAlbumsScreen with BOTH matching albums!
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: AppTheme.darkTheme(),
+        home: PixivAlbumViewer(
+          manager: manager,
+          platformFolder: 'Pixiv',
+          creatorFolder: 'ArtistOne',
+          albumName: 'AlbumAlpha',
+          albumNames: const ['AlbumAlpha'],
+          initialAlbumIndex: 0,
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.drag(find.byType(CustomScrollView), const Offset(0, -650));
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const ValueKey<String>('album_tags_footer')), findsOneWidget);
+    await tester.tap(find.text('#Fantasy'));
+    await tester.pumpAndSettle();
+
+    expect(find.byType(TagAlbumsScreen), findsOneWidget);
+    expect(find.text('2 album • 2 artist'), findsOneWidget);
+    expect(find.text('AlbumAlpha'), findsOneWidget);
+    expect(find.text('AlbumBeta'), findsOneWidget);
+    expect(find.text('AlbumOther'), findsNothing);
+
+    // 2) Open FileGalleryViewer -> verify bottom-anchored delete confirm when Fast Delete is OFF
+    await tester.pumpWidget(
+      MaterialApp(
+        key: const ValueKey<String>('fast_delete_gallery_app'),
+        theme: AppTheme.darkTheme(),
+        home: FileGalleryViewer(
+          manager: manager,
+          images: [f1, f2, f3],
+          initialIndex: 0,
+        ),
+      ),
+    );
+    await tester.pump();
+    expect(find.byKey(const ValueKey<String>('fast_delete_toggle')), findsOneWidget);
+    expect(find.text('Fast Delete'), findsOneWidget);
+
+    await tester.tap(find.text('Hapus'));
+    await tester.pumpAndSettle();
+
+    // Bottom sheet confirmation (NOT centered AlertDialog!) — buttons sit in lower thumb zone
+    expect(find.byType(AlertDialog), findsNothing);
+    expect(find.text('Hapus Foto?'), findsOneWidget);
+    final screenH = tester.view.physicalSize.height / tester.view.devicePixelRatio;
+    final confirmBtnY = tester.getCenter(find.text('Batal')).dy;
+    expect(confirmBtnY, greaterThan(screenH * 0.6));
+
+    // Cancel leaves all 3 images intact
+    await tester.tap(find.text('Batal'));
+    await tester.pumpAndSettle();
+    expect(manager.managedFiles.length, 4);
+
+    // 3) Check Fast Delete at the top -> tapping Hapus deletes IMMEDIATELY with ZERO confirmation!
+    await tester.tap(find.byKey(const ValueKey<String>('fast_delete_toggle')));
+    await tester.pumpAndSettle();
+    expect(find.text('Fast Delete Aktif (hapus langsung)'), findsOneWidget);
+
+    await tester.tap(find.text('Hapus'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Hapus Foto?'), findsNothing);
+    expect(manager.managedFiles.length, 3);
+    expect(find.text('a2.jpg'), findsOneWidget);
 
     manager.dispose();
   });

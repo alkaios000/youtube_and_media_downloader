@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 
+import 'managed_file.dart';
+
 /// User-assigned content rating per photo.
 /// Every photo defaults to [ContentRating.normal] ("Biasa") until changed.
 enum ContentRating {
@@ -128,4 +130,54 @@ class AlbumMetadata {
           DateTime.now(),
     );
   }
+}
+
+/// Lightweight identifier pointing to a specific album owned by an artist.
+class AlbumTarget {
+  final String platformFolder;
+  final String creatorFolder;
+  final String albumName;
+
+  const AlbumTarget({
+    required this.platformFolder,
+    required this.creatorFolder,
+    required this.albumName,
+  });
+
+  String get lookupKey => AlbumMetadata.buildLookupKey(
+        platformFolder,
+        creatorFolder,
+        albumName,
+      );
+}
+
+/// Resolved album match returned when searching all albums that share a tag.
+class TaggedAlbumMatch {
+  final String platformFolder;
+  final String creatorFolder;
+  final String albumName;
+  final List<ManagedFile> pages;
+  final List<String> tags;
+  final DateTime latestModified;
+  final int totalBytes;
+
+  const TaggedAlbumMatch({
+    required this.platformFolder,
+    required this.creatorFolder,
+    required this.albumName,
+    required this.pages,
+    required this.tags,
+    required this.latestModified,
+    required this.totalBytes,
+  });
+
+  ManagedFile get cover => pages.first;
+  int get privateCount => pages.where((p) => p.isPrivate).length;
+  int get publicCount => pages.length - privateCount;
+
+  AlbumTarget toTarget() => AlbumTarget(
+        platformFolder: platformFolder,
+        creatorFolder: creatorFolder,
+        albumName: albumName,
+      );
 }

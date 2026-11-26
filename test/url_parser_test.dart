@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -7,11 +8,14 @@ import 'package:linkdrop_downloader/models/creator_profile.dart';
 import 'package:linkdrop_downloader/models/download_item.dart';
 import 'package:linkdrop_downloader/models/managed_file.dart';
 import 'package:linkdrop_downloader/models/media_info.dart';
+import 'package:linkdrop_downloader/models/media_metadata.dart';
 import 'package:linkdrop_downloader/models/media_platform.dart';
 import 'package:linkdrop_downloader/services/direct_extractors.dart';
+import 'package:linkdrop_downloader/services/download_manager.dart';
 import 'package:linkdrop_downloader/services/media_extractor_service.dart';
 import 'package:linkdrop_downloader/services/native_bridge.dart';
 import 'package:linkdrop_downloader/services/storage_service.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
   group('UrlParser.extractUrl, detectPlatform & inspect', () {
@@ -330,6 +334,98 @@ void main() {
       final restored = PixivUgoiraFrame.fromJson(frame.toJson());
       expect(restored.file, '000001.jpg');
       expect(restored.delayMs, 67);
+    });
+  });
+
+  group('Uninstall-proof persistent vault state mirroring & auto-restore', () {
+    test('mirrors settings, markers, profiles, album tags & photo ratings and restores cleanly after simulated reinstall', () async {
+      TestWidgetsFlutterBinding.ensureInitialized();
+      SharedPreferences.setMockInitialValues({});
+
+      final tempVaultState =
+          await Directory.systemTemp.createTemp('all_download_vault_test_');
+      try {
+        // 1) First install writes all state with persistent vault mirror enabled
+        final storage1 = StorageService()
+          ..setPersistentStateDir(tempVaultState.path);
+        const savedSettings = AppSettings(
+          themeMode: ThemeMode.light,
+          maxConcurrentAlbums: 2,
+          downloadRateLimitMs: 600,
+          showNormalContent: true,
+          showEcchiContent: true,
+          showNsfwContent: false,
+        );
+        final profile = CreatorProfileRecord(
+          platform: MediaPlatform.pixiv,
+          creatorFolder: 'ArtistPersist',
+          displayName: 'ArtistPersist',
+          profileUrl: 'https://www.pixiv.net/users/77777',
+          lastSyncedAt: DateTime(2026, 11, 26),
+        );
+        final albumMeta = AlbumMetadata(
+          platformFolder: 'Pixiv',
+          creatorFolder: 'ArtistPersist',
+          albumFolder: 'Starlight',
+          pixivIllustId: '55555',
+          tags: const ['Original', 'Stars'],
+          updatedAt: DateTime(2026, 11, 26),
+        );
+        final sampleFile = ManagedFile(
+          fileName: 'Starlight_1.jpg',
+          mimeType: 'image/jpeg',
+          mediaKind: MediaKind.image,
+          fileSize: 2048,
+          modifiedAt: DateTime(2026, 11, 26),
+          relativePath: 'Privat/Pixiv/ArtistPersist/Starlight',
+          savedPath: '/sdcard/Documents/.all_download_vault/media/Pixiv/ArtistPersist/Starlight/Starlight_1.jpg',
+          contentUri: '',
+          platformFolder: 'Pixiv',
+          creatorFolder: 'ArtistPersist',
+          albumFolder: 'Starlight',
+          isPrivate: true,
+        );
+
+        await storage1.saveSettings(savedSettings);
+        await storage1.saveDownloadedMarkers({'pixiv:55555', 'pixiv:55556'});
+        await storage1.saveCreatorProfiles([profile]);
+        await storage1.saveAlbumMetadata({albumMeta.lookupKey: albumMeta});
+        await storage1.savePhotoRatings({sampleFile.ratingKey: ContentRating.nsfw});
+
+        // 2) Simulate COMPLETE UNINSTALL + FRESH REINSTALL (empty SharedPreferences, brand new manager)
+        SharedPreferences.setMockInitialValues({});
+        final freshManager = DownloadManager(storage: StorageService());
+        expect(freshManager.settings.themeMode, ThemeMode.dark);
+        expect(freshManager.settings.showNsfwContent, isTrue);
+        expect(freshManager.downloadedMarkers, isEmpty);
+
+        // 3) Re-attach persistent vault directory -> EVERYTHING auto-restores!
+        final ok = await freshManager.syncPersistentVaultAndState(
+          overrideStateDir: tempVaultState.path,
+        );
+        expect(ok, isTrue);
+        expect(freshManager.settings.themeMode, ThemeMode.light);
+        expect(freshManager.settings.maxConcurrentAlbums, 2);
+        expect(freshManager.settings.downloadRateLimitMs, 600);
+        expect(freshManager.settings.showNsfwContent, isFalse);
+        expect(freshManager.isMarkedDownloaded('pixiv:55555'), isTrue);
+        expect(freshManager.isMarkedDownloaded('pixiv:55556'), isTrue);
+        expect(
+          freshManager.getCreatorProfile('Pixiv', 'ArtistPersist')?.profileUrl,
+          'https://www.pixiv.net/users/77777',
+        );
+        expect(
+          freshManager.getAlbumTags('Pixiv', 'ArtistPersist', 'Starlight'),
+          ['Original', 'Stars'],
+        );
+        expect(freshManager.getPhotoRating(sampleFile), ContentRating.nsfw);
+
+        freshManager.dispose();
+      } finally {
+        if (await tempVaultState.exists()) {
+          await tempVaultState.delete(recursive: true);
+        }
+      }
     });
   });
 }

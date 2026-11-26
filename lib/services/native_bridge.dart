@@ -118,12 +118,14 @@ class EngineUpdateResult {
 
 class PermissionStatusInfo {
   final bool granted;
+  final bool allFilesGranted;
   final bool permanentlyDenied;
   final int sdkInt;
   final List<String> missing;
 
   const PermissionStatusInfo({
     required this.granted,
+    this.allFilesGranted = true,
     required this.permanentlyDenied,
     required this.sdkInt,
     required this.missing,
@@ -131,6 +133,7 @@ class PermissionStatusInfo {
 
   factory PermissionStatusInfo.unknown() => const PermissionStatusInfo(
         granted: true,
+        allFilesGranted: true,
         permanentlyDenied: false,
         sdkInt: 33,
         missing: [],
@@ -139,6 +142,7 @@ class PermissionStatusInfo {
   factory PermissionStatusInfo.fromMap(Map<dynamic, dynamic> map) {
     return PermissionStatusInfo(
       granted: map['granted'] as bool? ?? false,
+      allFilesGranted: map['allFilesGranted'] as bool? ?? true,
       permanentlyDenied: map['permanentlyDenied'] as bool? ?? false,
       sdkInt: (map['sdkInt'] as num?)?.toInt() ?? 33,
       missing: (map['missing'] as List?)
@@ -301,6 +305,23 @@ class NativeBridge {
   Future<bool> openAppSettings() async {
     final ok = await _channel.invokeMethod<bool>('openAppSettings');
     return ok ?? false;
+  }
+
+  Future<bool> requestAllFilesAccess() async {
+    final ok = await _channel.invokeMethod<bool>('requestAllFilesAccess');
+    return ok ?? false;
+  }
+
+  Future<String?> getPersistentDataDir() async {
+    final dir = await _channel.invokeMethod<String>('getPersistentDataDir');
+    if (dir == null || dir.trim().isEmpty) return null;
+    return dir.trim();
+  }
+
+  Future<int> migrateLegacyPrivateVault() async {
+    final count =
+        await _channel.invokeMethod<int>('migrateLegacyPrivateVault');
+    return count ?? 0;
   }
 
   Future<SniffedMediaResult> sniffMedia({

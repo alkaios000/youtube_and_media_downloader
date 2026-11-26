@@ -5,6 +5,7 @@ import '../models/download_item.dart';
 import '../models/media_info.dart';
 import '../models/media_platform.dart';
 import '../services/download_manager.dart';
+import '../widgets/app_feedback.dart';
 import '../widgets/download_detail_sheet.dart';
 import '../widgets/download_tile.dart';
 
@@ -921,41 +922,32 @@ class _DownloadsScreenState extends State<DownloadsScreen> {
   Future<void> _openFile(DownloadItem item) async {
     final ok = await widget.manager.openDownloadedItem(item);
     if (!ok && mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('File tidak ditemukan atau tidak ada aplikasi pemutar yang cocok.'),
-        ),
+      showTopToast(
+        context,
+        'File tidak ditemukan atau tidak ada aplikasi pemutar yang cocok.',
+        isError: true,
       );
     }
   }
 
   Future<void> _confirmDeleteItem(DownloadItem item) async {
-    final action = await showDialog<String>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Hapus Item'),
-        content: Text(
+    final action = await showBottomChoiceConfirm<String>(
+      context,
+      title: 'Hapus Item',
+      message:
           'Hapus "${item.title}" dari daftar riwayat saja, atau hapus juga file dari penyimpanan perangkat?',
+      options: [
+        if (item.status == DownloadStatus.completed)
+          const BottomActionOption(
+            value: 'device',
+            label: 'Hapus File & Riwayat',
+            destructive: true,
+          ),
+        const BottomActionOption(
+          value: 'history',
+          label: 'Hapus Riwayat Saja',
         ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('Batal'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, 'history'),
-            child: const Text('Riwayat Saja'),
-          ),
-          if (item.status == DownloadStatus.completed)
-            FilledButton(
-              onPressed: () => Navigator.pop(ctx, 'device'),
-              style: FilledButton.styleFrom(
-                backgroundColor: Theme.of(ctx).colorScheme.error,
-              ),
-              child: const Text('Hapus File'),
-            ),
-        ],
-      ),
+      ],
     );
 
     if (action == 'history') {
@@ -966,26 +958,16 @@ class _DownloadsScreenState extends State<DownloadsScreen> {
   }
 
   Future<void> _confirmClearHistory() async {
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Bersihkan Riwayat?'),
-        content: const Text(
-          'Daftar riwayat akan dikosongkan. File yang sudah tersimpan di folder Pictures/all_download (Album all_download) tetap aman.',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, false),
-            child: const Text('Batal'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(ctx, true),
-            child: const Text('Bersihkan'),
-          ),
-        ],
-      ),
+    final confirmed = await showBottomDeleteConfirm(
+      context,
+      title: 'Bersihkan Riwayat?',
+      message:
+          'Daftar riwayat akan dikosongkan. File yang sudah tersimpan di penyimpanan perangkat tetap aman.',
+      confirmLabel: 'Bersihkan',
+      icon: Icons.cleaning_services_rounded,
+      destructive: false,
     );
-    if (confirmed == true) {
+    if (confirmed) {
       await widget.manager.clearAllHistory();
     }
   }

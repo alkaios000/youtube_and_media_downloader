@@ -10,8 +10,10 @@ import '../models/managed_file.dart';
 import '../models/media_info.dart';
 import '../models/media_metadata.dart';
 import '../services/download_manager.dart';
+import 'app_feedback.dart';
 import 'file_gallery_viewer.dart';
 import 'sharp_original_image.dart';
+import 'tag_albums_screen.dart';
 import 'wallpaper_sheet.dart';
 
 enum _AlbumReaderMode { pixivScroll, galleryGrid, rowList }
@@ -154,6 +156,7 @@ class PixivAlbumViewer extends StatefulWidget {
   final String creatorFolder;
   final String albumName;
   final List<String> albumNames;
+  final List<AlbumTarget>? albumTargets;
   final int initialAlbumIndex;
 
   const PixivAlbumViewer({
@@ -163,6 +166,7 @@ class PixivAlbumViewer extends StatefulWidget {
     required this.creatorFolder,
     required this.albumName,
     this.albumNames = const [],
+    this.albumTargets,
     this.initialAlbumIndex = 0,
   });
 
@@ -171,7 +175,8 @@ class PixivAlbumViewer extends StatefulWidget {
 }
 
 class _PixivAlbumViewerState extends State<PixivAlbumViewer> {
-  late final List<String> _albumOrder;
+  late final List<AlbumTarget> _albumOrder;
+  late final Set<String> _allowedAlbumKeys;
   late final PageController _pageController;
   late final ValueNotifier<int> _currentAlbumIndexNotifier;
   late int _currentAlbumIndex;
@@ -185,7 +190,7 @@ class _PixivAlbumViewerState extends State<PixivAlbumViewer> {
   int _cachedRatingsRev = -1;
   int _cachedAlbumMetaRev = -1;
   Map<String, List<ManagedFile>> _cachedAlbumsMap = const {};
-  List<String> _cachedActiveAlbums = const [];
+  List<AlbumTarget> _cachedActiveAlbums = const [];
 
   _AlbumReaderMode _mode = _AlbumReaderMode.pixivScroll;
   bool _isSelectionMode = false;
@@ -205,12 +210,37 @@ class _PixivAlbumViewerState extends State<PixivAlbumViewer> {
   @override
   void initState() {
     super.initState();
-    _albumOrder = widget.albumNames.isNotEmpty
-        ? List<String>.from(widget.albumNames)
-        : <String>[widget.albumName];
+    if (widget.albumTargets != null && widget.albumTargets!.isNotEmpty) {
+      _albumOrder = List<AlbumTarget>.from(widget.albumTargets!);
+    } else if (widget.albumNames.isNotEmpty) {
+      _albumOrder = widget.albumNames
+          .map(
+            (name) => AlbumTarget(
+              platformFolder: widget.platformFolder,
+              creatorFolder: widget.creatorFolder,
+              albumName: name,
+            ),
+          )
+          .toList(growable: false);
+    } else {
+      _albumOrder = [
+        AlbumTarget(
+          platformFolder: widget.platformFolder,
+          creatorFolder: widget.creatorFolder,
+          albumName: widget.albumName,
+        ),
+      ];
+    }
+    _allowedAlbumKeys = _albumOrder.map((t) => t.lookupKey).toSet();
+
     var idx = widget.initialAlbumIndex;
     if (idx < 0 || idx >= _albumOrder.length) {
-      idx = _albumOrder.indexOf(widget.albumName);
+      final initialKey = AlbumMetadata.buildLookupKey(
+        widget.platformFolder,
+        widget.creatorFolder,
+        widget.albumName,
+      );
+      idx = _albumOrder.indexWhere((t) => t.lookupKey == initialKey);
       if (idx < 0) idx = 0;
     }
     _currentAlbumIndex = idx;
@@ -258,9 +288,13 @@ class _PixivAlbumViewerState extends State<PixivAlbumViewer> {
     }
     final grouped = <String, List<ManagedFile>>{};
     for (final f in allFiles) {
-      if (f.platformFolder == widget.platformFolder &&
-          f.creatorFolder == widget.creatorFolder) {
-        grouped.putIfAbsent(f.effectiveAlbumName, () => []).add(f);
+      final key = AlbumMetadata.buildLookupKey(
+        f.platformFolder,
+        f.creatorFolder,
+        f.effectiveAlbumName,
+      );
+      if (_allowedAlbumKeys.contains(key)) {
+        grouped.putIfAbsent(key, () => []).add(f);
       }
     }
     for (final pages in grouped.values) {
@@ -269,7 +303,7 @@ class _PixivAlbumViewerState extends State<PixivAlbumViewer> {
     _cachedFilesRef = allFiles;
     _cachedAlbumsMap = grouped;
     _cachedActiveAlbums = _albumOrder
-        .where((name) => (grouped[name]?.isNotEmpty ?? false))
+        .where((target) => (grouped[target.lookupKey]?.isNotEmpty ?? false))
         .toList(growable: false);
     return grouped;
   }
@@ -439,11 +473,15 @@ class _PixivAlbumViewerState extends State<PixivAlbumViewer> {
       });
     }
 
-    final currentAlbumName = activeAlbums.isNotEmpty
+    final currentTarget = activeAlbums.isNotEmpty
         ? activeAlbums[_currentAlbumIndex]
-        : widget.albumName;
+        : AlbumTarget(
+            platformFolder: widget.platformFolder,
+            creatorFolder: widget.creatorFolder,
+            albumName: widget.albumName,
+          );
     final pages = activeAlbums.isNotEmpty
-        ? (albumsMap[currentAlbumName] ?? const <ManagedFile>[])
+        ? (albumsMap[currentTarget.lookupKey] ?? const <ManagedFile>[])
         : const <ManagedFile>[];
     _currentPages = pages;
 
@@ -513,15 +551,20 @@ class _PixivAlbumViewerState extends State<PixivAlbumViewer> {
                     final safeIdx = activeAlbums.isEmpty
                         ? 0
                         : idx.clamp(0, activeAlbums.length - 1);
-                    final title = activeAlbums.isNotEmpty
+                    final target = activeAlbums.isNotEmpty
                         ? activeAlbums[safeIdx]
-                        : widget.albumName;
+                        : AlbumTarget(
+                            platformFolder: widget.platformFolder,
+                            creatorFolder: widget.creatorFolder,
+                            albumName: widget.albumName,
+                          );
+                    final title = target.albumName;
                     final albumPageCount = activeAlbums.isNotEmpty
-                        ? (albumsMap[title]?.length ?? 0)
+                        ? (albumsMap[target.lookupKey]?.length ?? 0)
                         : 0;
                     final sub = hasMultipleAlbums
-                        ? '${widget.creatorFolder} • ${safeIdx + 1}/${activeAlbums.length} • $albumPageCount hal'
-                        : '${widget.creatorFolder} • $albumPageCount halaman';
+                        ? '${target.creatorFolder} • ${safeIdx + 1}/${activeAlbums.length} • $albumPageCount hal'
+                        : '${target.creatorFolder} • $albumPageCount halaman';
                     return Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
@@ -604,7 +647,7 @@ class _PixivAlbumViewerState extends State<PixivAlbumViewer> {
                         _dragLastIndex = null;
                         if (newIndex >= 0 && newIndex < activeAlbums.length) {
                           _currentPages =
-                              albumsMap[activeAlbums[newIndex]] ??
+                              albumsMap[activeAlbums[newIndex].lookupKey] ??
                                   const <ManagedFile>[];
                         }
                         // Update ONLY the AppBar title via ValueNotifier —
@@ -612,20 +655,22 @@ class _PixivAlbumViewerState extends State<PixivAlbumViewer> {
                         _currentAlbumIndexNotifier.value = newIndex;
                       },
                       itemBuilder: (context, albumIdx) {
-                        final albumTitle = activeAlbums[albumIdx];
+                        final target = activeAlbums[albumIdx];
+                        final albumTitle = target.albumName;
                         final albumPages =
-                            albumsMap[albumTitle] ?? const <ManagedFile>[];
+                            albumsMap[target.lookupKey] ?? const <ManagedFile>[];
                         final albumTags = widget.manager.getAlbumTags(
-                          widget.platformFolder,
-                          widget.creatorFolder,
+                          target.platformFolder,
+                          target.creatorFolder,
                           albumTitle,
                         );
                         final privateCount =
                             albumPages.where((p) => p.isPrivate).length;
                         final publicCount = albumPages.length - privateCount;
+                        final hasTagsFooter = albumTags.isNotEmpty;
 
                         return RepaintBoundary(
-                          key: ValueKey<String>(albumTitle),
+                          key: ValueKey<String>(target.lookupKey),
                           child: GestureDetector(
                             key: _viewportKeyFor(albumIdx),
                             behavior: HitTestBehavior.translucent,
@@ -701,45 +746,68 @@ class _PixivAlbumViewerState extends State<PixivAlbumViewer> {
                                               ),
                                             ],
                                           ),
-                                          if (albumTags.isNotEmpty) ...[
-                                            const SizedBox(height: 8),
-                                            _AlbumTagsStrip(
-                                              tags: albumTags,
-                                              onTapTag: (tag) {
-                                                Clipboard.setData(
-                                                  ClipboardData(text: tag),
-                                                );
-                                                ScaffoldMessenger.of(context)
-                                                  ..hideCurrentSnackBar()
-                                                  ..showSnackBar(
-                                                    SnackBar(
-                                                      duration: const Duration(
-                                                        seconds: 1,
-                                                      ),
-                                                      content: Text(
-                                                        'Tag "#$tag" disalin.',
-                                                      ),
-                                                    ),
-                                                  );
-                                              },
-                                              onShowAllTags: () =>
-                                                  _showAlbumTagsSheet(
-                                                albumTitle,
-                                                albumTags,
-                                              ),
-                                            ),
-                                          ],
                                         ],
                                       ),
                                     ),
                                   ),
 
                                 if (_mode == _AlbumReaderMode.pixivScroll)
-                                  _buildPixivVerticalScrollSliver(albumPages)
+                                  _buildPixivVerticalScrollSliver(
+                                    albumPages,
+                                    hasFooterBelow: hasTagsFooter,
+                                  )
                                 else if (_mode == _AlbumReaderMode.galleryGrid)
-                                  _buildGalleryGridSliver(albumPages)
+                                  _buildGalleryGridSliver(
+                                    albumPages,
+                                    hasFooterBelow: hasTagsFooter,
+                                  )
                                 else
-                                  _buildRowListSliver(albumPages),
+                                  _buildRowListSliver(
+                                    albumPages,
+                                    hasFooterBelow: hasTagsFooter,
+                                  ),
+
+                                // Per-album tags positioned BELOW the album when scrolled
+                                if (hasTagsFooter)
+                                  SliverToBoxAdapter(
+                                    child: Padding(
+                                      padding: EdgeInsets.fromLTRB(
+                                        12,
+                                        14,
+                                        12,
+                                        _isSelectionMode ? 104 : 36,
+                                      ),
+                                      child: _AlbumTagsFooterSection(
+                                        albumTitle: albumTitle,
+                                        tags: albumTags,
+                                        onTapTag: _openAlbumsWithTag,
+                                        onLongPressTag: (tag) {
+                                          Clipboard.setData(
+                                            ClipboardData(text: tag),
+                                          );
+                                          showTopToast(
+                                            context,
+                                            'Tag "#$tag" disalin.',
+                                            icon: Icons.copy_rounded,
+                                          );
+                                        },
+                                        onCopyAllTags: () {
+                                          Clipboard.setData(
+                                            ClipboardData(
+                                              text: albumTags
+                                                  .map((t) => '#$t')
+                                                  .join(' '),
+                                            ),
+                                          );
+                                          showTopToast(
+                                            context,
+                                            'Semua tag album disalin.',
+                                            icon: Icons.copy_rounded,
+                                          );
+                                        },
+                                      ),
+                                    ),
+                                  ),
                               ],
                             ),
                           ),
@@ -779,9 +847,12 @@ class _PixivAlbumViewerState extends State<PixivAlbumViewer> {
   // ===========================================================================
   // VIEW 1: PIXIV VERTICAL SCROLL (Full-width page-by-page reading!)
   // ===========================================================================
-  Widget _buildPixivVerticalScrollSliver(List<ManagedFile> pages) {
+  Widget _buildPixivVerticalScrollSliver(
+    List<ManagedFile> pages, {
+    bool hasFooterBelow = false,
+  }) {
     final theme = Theme.of(context);
-    final bottomPad = _isSelectionMode ? 104.0 : 32.0;
+    final bottomPad = hasFooterBelow ? 8.0 : (_isSelectionMode ? 104.0 : 32.0);
     final mediaSize = MediaQuery.sizeOf(context);
     // Reserve ~65% of screen height before Photo #1 finishes decoding so
     // Flutter mounts STRICTLY 1 photo (not 4-5 undecoded 180px stubs!) on slide!
@@ -1021,9 +1092,12 @@ class _PixivAlbumViewerState extends State<PixivAlbumViewer> {
     });
   }
 
-  Widget _buildGalleryGridSliver(List<ManagedFile> pages) {
+  Widget _buildGalleryGridSliver(
+    List<ManagedFile> pages, {
+    bool hasFooterBelow = false,
+  }) {
     final theme = Theme.of(context);
-    final bottomPad = _isSelectionMode ? 104.0 : 32.0;
+    final bottomPad = hasFooterBelow ? 8.0 : (_isSelectionMode ? 104.0 : 32.0);
 
     _ensureGridDimensionsResolved(pages);
 
@@ -1208,9 +1282,12 @@ class _PixivAlbumViewerState extends State<PixivAlbumViewer> {
   // ===========================================================================
   // VIEW 3: ROW / LIST VIEW
   // ===========================================================================
-  Widget _buildRowListSliver(List<ManagedFile> pages) {
+  Widget _buildRowListSliver(
+    List<ManagedFile> pages, {
+    bool hasFooterBelow = false,
+  }) {
     final theme = Theme.of(context);
-    final bottomPad = _isSelectionMode ? 104.0 : 32.0;
+    final bottomPad = hasFooterBelow ? 8.0 : (_isSelectionMode ? 104.0 : 32.0);
 
     return SliverPadding(
       padding: EdgeInsets.fromLTRB(12, 2, 12, bottomPad),
@@ -1454,130 +1531,29 @@ class _PixivAlbumViewerState extends State<PixivAlbumViewer> {
 
   Future<void> _confirmDeleteMany(List<ManagedFile> targets) async {
     if (targets.isEmpty) return;
-    final ok = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: Text(
+    final ok = await showBottomDeleteConfirm(
+      context,
+      title:
           targets.length == 1 ? 'Hapus Foto?' : 'Hapus ${targets.length} Foto?',
-        ),
-        content: Text(
-          targets.length == 1
-              ? 'Hapus permanen "${targets.first.fileName}"?'
-              : 'Hapus permanen ${targets.length} foto terpilih dari perangkat?',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, false),
-            child: const Text('Batal'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(ctx, true),
-            style: FilledButton.styleFrom(
-              backgroundColor: Theme.of(ctx).colorScheme.error,
-            ),
-            child: const Text('Hapus'),
-          ),
-        ],
-      ),
+      message: targets.length == 1
+          ? 'Hapus permanen "${targets.first.fileName}"?'
+          : 'Hapus permanen ${targets.length} foto terpilih dari perangkat?',
     );
-    if (ok != true) return;
+    if (!ok) return;
     await widget.manager.deleteMultipleManagedFiles(targets);
     if (!mounted) return;
     if (_isSelectionMode) _exitSelection();
   }
 
-  void _showAlbumTagsSheet(String albumTitle, List<String> tags) {
-    showModalBottomSheet<void>(
-      context: context,
-      showDragHandle: true,
-      isScrollControlled: true,
-      builder: (ctx) {
-        final theme = Theme.of(ctx);
-        return SafeArea(
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(20, 4, 20, 20),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  'Tag Album (${tags.length})',
-                  style: theme.textTheme.titleMedium?.copyWith(
-                    fontWeight: FontWeight.w800,
-                  ),
-                ),
-                const SizedBox(height: 2),
-                Text(
-                  albumTitle,
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                  style: theme.textTheme.bodySmall?.copyWith(
-                    color: theme.colorScheme.onSurfaceVariant,
-                  ),
-                ),
-                const SizedBox(height: 12),
-                ConstrainedBox(
-                  constraints: const BoxConstraints(maxHeight: 280),
-                  child: SingleChildScrollView(
-                    child: Wrap(
-                      spacing: 6,
-                      runSpacing: 6,
-                      children: [
-                        for (final tag in tags)
-                          ActionChip(
-                            label: Text(
-                              '#$tag',
-                              style: const TextStyle(fontSize: 12),
-                            ),
-                            visualDensity: VisualDensity.compact,
-                            materialTapTargetSize:
-                                MaterialTapTargetSize.shrinkWrap,
-                            onPressed: () {
-                              Clipboard.setData(ClipboardData(text: tag));
-                              Navigator.pop(ctx);
-                              ScaffoldMessenger.of(context)
-                                ..hideCurrentSnackBar()
-                                ..showSnackBar(
-                                  SnackBar(
-                                    duration: const Duration(seconds: 1),
-                                    content: Text('Tag "#$tag" disalin.'),
-                                  ),
-                                );
-                            },
-                          ),
-                      ],
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 12),
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.end,
-                  children: [
-                    TextButton.icon(
-                      onPressed: () {
-                        Clipboard.setData(
-                          ClipboardData(text: tags.map((t) => '#$t').join(' ')),
-                        );
-                        Navigator.pop(ctx);
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(content: Text('Semua tag disalin.')),
-                        );
-                      },
-                      icon: const Icon(Icons.copy_rounded, size: 17),
-                      label: const Text('Salin Semua'),
-                    ),
-                    const SizedBox(width: 8),
-                    FilledButton.tonal(
-                      onPressed: () => Navigator.pop(ctx),
-                      child: const Text('Tutup'),
-                    ),
-                  ],
-                ),
-              ],
-            ),
-          ),
-        );
-      },
+  void _openAlbumsWithTag(String tag) {
+    HapticFeedback.selectionClick();
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => TagAlbumsScreen(
+          manager: widget.manager,
+          tag: tag,
+        ),
+      ),
     );
   }
 
@@ -2125,96 +2101,115 @@ class _AlbumBatchActionBar extends StatelessWidget {
   }
 }
 
-class _AlbumTagsStrip extends StatelessWidget {
+class _AlbumTagsFooterSection extends StatelessWidget {
+  final String albumTitle;
   final List<String> tags;
   final ValueChanged<String> onTapTag;
-  final VoidCallback onShowAllTags;
+  final ValueChanged<String> onLongPressTag;
+  final VoidCallback onCopyAllTags;
 
-  const _AlbumTagsStrip({
+  const _AlbumTagsFooterSection({
+    required this.albumTitle,
     required this.tags,
     required this.onTapTag,
-    required this.onShowAllTags,
+    required this.onLongPressTag,
+    required this.onCopyAllTags,
   });
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final accent = theme.colorScheme.primary;
-    return SizedBox(
-      height: 30,
-      child: Row(
+    return Container(
+      key: const ValueKey<String>('album_tags_footer'),
+      padding: const EdgeInsets.fromLTRB(14, 12, 14, 14),
+      decoration: BoxDecoration(
+        color: theme.colorScheme.surfaceContainerLow,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(
+          color: theme.colorScheme.outlineVariant.withValues(alpha: 0.4),
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          InkWell(
-            onTap: onShowAllTags,
-            borderRadius: BorderRadius.circular(8),
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 4),
-              decoration: BoxDecoration(
-                color: accent.withValues(alpha: 0.14),
-                borderRadius: BorderRadius.circular(8),
-              ),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(Icons.tag_rounded, size: 13, color: accent),
-                  const SizedBox(width: 3),
-                  Text(
-                    '${tags.length}',
-                    style: TextStyle(
-                      fontSize: 11,
-                      fontWeight: FontWeight.w800,
-                      color: accent,
+          Row(
+            children: [
+              Icon(Icons.tag_rounded, size: 17, color: accent),
+              const SizedBox(width: 6),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Tag Album (${tags.length})',
+                      style: theme.textTheme.titleSmall?.copyWith(
+                        fontWeight: FontWeight.w800,
+                      ),
                     ),
-                  ),
-                ],
+                    Text(
+                      'Ketuk tag untuk melihat semua album bertag sama',
+                      style: theme.textTheme.labelSmall?.copyWith(
+                        color: theme.colorScheme.onSurfaceVariant,
+                      ),
+                    ),
+                  ],
+                ),
               ),
-            ),
+              IconButton(
+                onPressed: onCopyAllTags,
+                icon: const Icon(Icons.copy_rounded, size: 18),
+                tooltip: 'Salin semua tag',
+                visualDensity: VisualDensity.compact,
+              ),
+            ],
           ),
-          const SizedBox(width: 6),
-          Expanded(
-            child: ListView.separated(
-              scrollDirection: Axis.horizontal,
-              itemCount: tags.length,
-              separatorBuilder: (_, _) => const SizedBox(width: 5),
-              itemBuilder: (context, i) {
-                final tag = tags[i];
-                final isR18 = tag.toLowerCase().contains('r-18');
-                final chipColor = isR18
-                    ? const Color(0xFFEF4444)
-                    : theme.colorScheme.onSurfaceVariant;
-                return InkWell(
-                  onTap: () => onTapTag(tag),
-                  borderRadius: BorderRadius.circular(8),
-                  child: Container(
-                    alignment: Alignment.center,
-                    padding: const EdgeInsets.symmetric(horizontal: 8),
-                    decoration: BoxDecoration(
-                      color: isR18
-                          ? const Color(0xFFEF4444).withValues(alpha: 0.14)
-                          : theme.colorScheme.surfaceContainerHighest
-                              .withValues(alpha: 0.55),
-                      borderRadius: BorderRadius.circular(8),
-                      border: Border.all(
-                        color: isR18
-                            ? const Color(0xFFEF4444).withValues(alpha: 0.45)
-                            : theme.colorScheme.outlineVariant
-                                .withValues(alpha: 0.35),
-                      ),
-                    ),
-                    child: Text(
-                      '#$tag',
-                      style: TextStyle(
-                        fontSize: 11,
-                        fontWeight: FontWeight.w600,
-                        color: chipColor,
-                      ),
-                    ),
-                  ),
-                );
-              },
-            ),
+          const SizedBox(height: 10),
+          Wrap(
+            spacing: 7,
+            runSpacing: 7,
+            children: [
+              for (final tag in tags) _buildTagChip(context, tag),
+            ],
           ),
         ],
+      ),
+    );
+  }
+
+  Widget _buildTagChip(BuildContext context, String tag) {
+    final theme = Theme.of(context);
+    final isR18 = tag.toLowerCase().contains('r-18');
+    final chipColor =
+        isR18 ? const Color(0xFFEF4444) : theme.colorScheme.onSurface;
+    return Material(
+      color: isR18
+          ? const Color(0xFFEF4444).withValues(alpha: 0.14)
+          : theme.colorScheme.surfaceContainerHighest.withValues(alpha: 0.65),
+      borderRadius: BorderRadius.circular(10),
+      child: InkWell(
+        onTap: () => onTapTag(tag),
+        onLongPress: () => onLongPressTag(tag),
+        borderRadius: BorderRadius.circular(10),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(
+              color: isR18
+                  ? const Color(0xFFEF4444).withValues(alpha: 0.45)
+                  : theme.colorScheme.outlineVariant.withValues(alpha: 0.4),
+            ),
+          ),
+          child: Text(
+            '#$tag',
+            style: TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.w700,
+              color: chipColor,
+            ),
+          ),
+        ),
       ),
     );
   }

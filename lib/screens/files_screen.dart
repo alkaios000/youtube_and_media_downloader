@@ -12,8 +12,10 @@ import '../models/media_info.dart';
 import '../models/media_metadata.dart';
 import '../models/media_platform.dart';
 import '../services/download_manager.dart';
+import '../widgets/app_feedback.dart';
 import '../widgets/file_gallery_viewer.dart';
 import '../widgets/pixiv_album_viewer.dart';
+import '../widgets/tag_albums_screen.dart';
 import '../widgets/wallpaper_sheet.dart';
 import 'platform_all_photos_screen.dart';
 
@@ -1570,10 +1572,10 @@ class _FilesScreenState extends State<FilesScreen> {
                             ClipboardData(text: savedProfile.profileUrl),
                           );
                           Navigator.pop(ctx);
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            const SnackBar(
-                              content: Text('Link profil disalin.'),
-                            ),
+                          showTopToast(
+                            context,
+                            'Link profil disalin.',
+                            icon: Icons.copy_rounded,
                           );
                         },
                         icon: const Icon(Icons.copy_rounded, size: 17),
@@ -2428,12 +2430,10 @@ class _FilesScreenState extends State<FilesScreen> {
   Future<void> _openExternalFile(ManagedFile file) async {
     final ok = await widget.manager.openManagedFile(file);
     if (!ok && mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text(
-            'Tidak ada aplikasi pemutar yang cocok atau file sudah dipindah.',
-          ),
-        ),
+      showTopToast(
+        context,
+        'Tidak ada aplikasi pemutar yang cocok atau file sudah dipindah.',
+        isError: true,
       );
     }
   }
@@ -2442,10 +2442,10 @@ class _FilesScreenState extends State<FilesScreen> {
     if (selected.isEmpty) return;
     final ok = await widget.manager.shareMultipleManagedFiles(selected);
     if (!ok && mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Gagal membuka menu Bagikan untuk file terpilih.'),
-        ),
+      showTopToast(
+        context,
+        'Gagal membuka menu Bagikan untuk file terpilih.',
+        isError: true,
       );
     }
   }
@@ -2455,29 +2455,13 @@ class _FilesScreenState extends State<FilesScreen> {
     required String unitLabel,
   }) async {
     if (selected.isEmpty) return;
-    final ok = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Hapus Permanen?'),
-        content: Text(
+    final ok = await showBottomDeleteConfirm(
+      context,
+      title: 'Hapus Permanen?',
+      message:
           'Hapus $unitLabel dari perangkat? Tindakan ini tidak dapat dibatalkan.',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, false),
-            child: const Text('Batal'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(ctx, true),
-            style: FilledButton.styleFrom(
-              backgroundColor: Theme.of(ctx).colorScheme.error,
-            ),
-            child: const Text('Hapus'),
-          ),
-        ],
-      ),
     );
-    if (ok != true) return;
+    if (!ok) return;
 
     await widget.manager.deleteMultipleManagedFiles(selected);
     if (!mounted) return;
@@ -2546,7 +2530,7 @@ class _FilesScreenState extends State<FilesScreen> {
                 const SizedBox(height: 10),
                 Text(
                   tags.isNotEmpty
-                      ? 'Tag Album (${tags.length}) — ketuk untuk salin'
+                      ? 'Tag Album (${tags.length}) — ketuk untuk lihat album bertag sama'
                       : 'Belum ada tag tersimpan untuk album ini',
                   style: theme.textTheme.labelMedium?.copyWith(
                     fontWeight: FontWeight.w700,
@@ -2572,16 +2556,15 @@ class _FilesScreenState extends State<FilesScreen> {
                               materialTapTargetSize:
                                   MaterialTapTargetSize.shrinkWrap,
                               onPressed: () {
-                                Clipboard.setData(ClipboardData(text: tag));
                                 Navigator.pop(ctx);
-                                ScaffoldMessenger.of(context)
-                                  ..hideCurrentSnackBar()
-                                  ..showSnackBar(
-                                    SnackBar(
-                                      duration: const Duration(seconds: 1),
-                                      content: Text('Tag "#$tag" disalin.'),
+                                Navigator.of(context).push(
+                                  MaterialPageRoute<void>(
+                                    builder: (_) => TagAlbumsScreen(
+                                      manager: widget.manager,
+                                      tag: tag,
                                     ),
-                                  );
+                                  ),
+                                );
                               },
                             ),
                         ],
@@ -2602,10 +2585,10 @@ class _FilesScreenState extends State<FilesScreen> {
                             ),
                           );
                           Navigator.pop(ctx);
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            const SnackBar(
-                              content: Text('Semua tag album disalin.'),
-                            ),
+                          showTopToast(
+                            context,
+                            'Semua tag album disalin.',
+                            icon: Icons.copy_rounded,
                           );
                         },
                         icon: const Icon(Icons.copy_rounded, size: 17),
@@ -2691,8 +2674,10 @@ class _FilesScreenState extends State<FilesScreen> {
                         ),
                       );
                       Navigator.pop(ctx);
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(content: Text('Lokasi file disalin.')),
+                      showTopToast(
+                        context,
+                        'Lokasi file disalin.',
+                        icon: Icons.copy_rounded,
                       );
                     },
                     icon: const Icon(Icons.copy_rounded, size: 17),

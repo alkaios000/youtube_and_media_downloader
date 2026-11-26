@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 
 import '../models/managed_file.dart';
 import '../services/download_manager.dart';
+import 'app_feedback.dart';
 
 /// Presents a fast native-backed bottom sheet letting the user set any image
 /// (public or Private Vault) as Android Home Screen, Lock Screen, Both, or via
@@ -71,11 +72,11 @@ Future<void> showSetWallpaperSheet(
       ),
     );
     if (applied == true && context.mounted) {
-      ScaffoldMessenger.of(context)
-        ..hideCurrentSnackBar()
-        ..showSnackBar(
-          const SnackBar(content: Text('Wallpaper berhasil dipasang!')),
-        );
+      showTopToast(
+        context,
+        'Wallpaper berhasil dipasang!',
+        icon: Icons.wallpaper_rounded,
+      );
     }
     return;
   }
@@ -102,53 +103,37 @@ Future<bool> _applyWallpaperDirect(
       cropRect: cropRect,
     );
     if (!context.mounted) return ok;
-    ScaffoldMessenger.of(context)
-      ..hideCurrentSnackBar()
-      ..showSnackBar(
-        SnackBar(
-          content: Text(
-            ok ? 'Wallpaper berhasil dipasang!' : 'Gagal memasang wallpaper.',
-          ),
-        ),
-      );
+    showTopToast(
+      context,
+      ok ? 'Wallpaper berhasil dipasang!' : 'Gagal memasang wallpaper.',
+      icon: Icons.wallpaper_rounded,
+      isError: !ok,
+    );
     return ok;
   } on MissingPluginException {
     if (!context.mounted) return false;
-    ScaffoldMessenger.of(context)
-      ..hideCurrentSnackBar()
-      ..showSnackBar(
-        const SnackBar(
-          content: Text(
-            'Modul native belum terpasang. Stop lalu Run ulang aplikasi (atau pasang APK terbaru) agar fitur Wallpaper aktif.',
-          ),
-        ),
-      );
+    showTopToast(
+      context,
+      'Modul native belum terpasang. Stop lalu Run ulang aplikasi (atau pasang APK terbaru) agar fitur Wallpaper aktif.',
+      duration: const Duration(seconds: 3),
+      isError: true,
+    );
     return false;
   } on PlatformException catch (e) {
     if (!context.mounted) return false;
-    ScaffoldMessenger.of(context)
-      ..hideCurrentSnackBar()
-      ..showSnackBar(
-        SnackBar(
-          content: Text(
-            e.message?.isNotEmpty == true
-                ? e.message!
-                : 'Gagal memasang wallpaper.',
-          ),
-        ),
-      );
+    showTopToast(
+      context,
+      e.message?.isNotEmpty == true ? e.message! : 'Gagal memasang wallpaper.',
+      isError: true,
+    );
     return false;
   } catch (e) {
     if (!context.mounted) return false;
-    ScaffoldMessenger.of(context)
-      ..hideCurrentSnackBar()
-      ..showSnackBar(
-        SnackBar(
-          content: Text(
-            'Gagal memasang wallpaper: ${e.toString().replaceFirst('Exception: ', '')}',
-          ),
-        ),
-      );
+    showTopToast(
+      context,
+      'Gagal memasang wallpaper: ${e.toString().replaceFirst('Exception: ', '')}',
+      isError: true,
+    );
     return false;
   }
 }
@@ -283,36 +268,28 @@ class _WallpaperCropPreviewScreenState
       if (ok) {
         Navigator.of(context).pop(true);
       } else {
-        ScaffoldMessenger.of(context)
-          ..hideCurrentSnackBar()
-          ..showSnackBar(
-            const SnackBar(content: Text('Gagal memasang wallpaper.')),
-          );
+        showTopToast(
+          context,
+          'Gagal memasang wallpaper.',
+          isError: true,
+        );
       }
     } on PlatformException catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context)
-        ..hideCurrentSnackBar()
-        ..showSnackBar(
-          SnackBar(
-            content: Text(
-              e.message?.isNotEmpty == true
-                  ? e.message!
-                  : 'Gagal memasang wallpaper.',
-            ),
-          ),
-        );
+      showTopToast(
+        context,
+        e.message?.isNotEmpty == true
+            ? e.message!
+            : 'Gagal memasang wallpaper.',
+        isError: true,
+      );
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context)
-        ..hideCurrentSnackBar()
-        ..showSnackBar(
-          SnackBar(
-            content: Text(
-              'Gagal memasang wallpaper: ${e.toString().replaceFirst('Exception: ', '')}',
-            ),
-          ),
-        );
+      showTopToast(
+        context,
+        'Gagal memasang wallpaper: ${e.toString().replaceFirst('Exception: ', '')}',
+        isError: true,
+      );
     } finally {
       if (mounted) setState(() => _applying = false);
     }

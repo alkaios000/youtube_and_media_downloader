@@ -6,6 +6,7 @@ import '../models/media_info.dart';
 import '../models/media_metadata.dart';
 import '../services/download_manager.dart';
 import '../services/storage_service.dart';
+import '../widgets/app_feedback.dart';
 
 /// Main Settings hub organized into clean categories that navigate to focused
 /// submenu pages so every option is quick to find and uncluttered.
@@ -126,14 +127,16 @@ class SettingsScreen extends StatelessWidget {
                     const Divider(height: 1, indent: 68),
                     _SettingsMenuTile(
                       icon: Icons.memory_rounded,
-                      iconColor: manager.permissionStatus.granted
+                      iconColor: (manager.permissionStatus.granted &&
+                              manager.permissionStatus.allFilesGranted)
                           ? const Color(0xFF22C55E)
                           : const Color(0xFFF59E0B),
                       title: 'Mesin & Izin Sistem',
                       subtitle:
-                          'yt-dlp ${engine.version} • Izin ${manager.permissionStatus.granted ? 'diizinkan' : 'belum lengkap'}',
+                          'yt-dlp ${engine.version} • Anti-Hilang ${manager.permissionStatus.allFilesGranted ? 'aktif' : 'belum aktif'}',
                       onTap: () {
                         manager.ensureEngineInitialized();
+                        manager.refreshPermissions();
                         manager.refreshStorageInfo();
                         _openSubmenu(
                           context,
@@ -570,11 +573,10 @@ class _AccountsLoginSubmenu extends StatelessWidget {
                         onTap: () async {
                           await manager.clearBrowserSessions();
                           if (!context.mounted) return;
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            const SnackBar(
-                              content:
-                                  Text('Semua sesi login browser dihapus.'),
-                            ),
+                          showTopToast(
+                            context,
+                            'Semua sesi login browser dihapus.',
+                            icon: Icons.logout_rounded,
                           );
                         },
                       ),
@@ -1135,38 +1137,69 @@ class _EngineSystemSubmenu extends StatelessWidget {
 
               Card(
                 clipBehavior: Clip.antiAlias,
-                child: ListTile(
-                  leading: Icon(
-                    manager.permissionStatus.granted
-                        ? Icons.verified_user_outlined
-                        : Icons.shield_outlined,
-                    color: manager.permissionStatus.granted
-                        ? const Color(0xFF22C55E)
-                        : const Color(0xFFF59E0B),
-                  ),
-                  title: const Text('Izin Penyimpanan & Media'),
-                  subtitle: Text(
-                    manager.permissionStatus.granted
-                        ? 'Diizinkan — siap menyimpan & membuka hasil unduhan'
-                        : 'Belum diizinkan — ketuk untuk meminta izin sistem',
-                  ),
-                  trailing: FilledButton.tonal(
-                    onPressed: () async {
-                      if (manager.permissionStatus.granted ||
-                          manager.permissionStatus.permanentlyDenied) {
-                        await manager.openAppSettings();
-                      } else {
-                        await manager.requestStoragePermissions();
-                      }
-                    },
-                    child: Text(
-                      manager.permissionStatus.granted
-                          ? 'Atur'
-                          : (manager.permissionStatus.permanentlyDenied
-                              ? 'Pengaturan'
-                              : 'Izinkan'),
+                child: Column(
+                  children: [
+                    ListTile(
+                      leading: Icon(
+                        manager.permissionStatus.granted
+                            ? Icons.verified_user_outlined
+                            : Icons.shield_outlined,
+                        color: manager.permissionStatus.granted
+                            ? const Color(0xFF22C55E)
+                            : const Color(0xFFF59E0B),
+                      ),
+                      title: const Text('Izin Penyimpanan & Media'),
+                      subtitle: Text(
+                        manager.permissionStatus.granted
+                            ? 'Diizinkan — siap menyimpan & membuka hasil unduhan'
+                            : 'Belum diizinkan — ketuk untuk meminta izin sistem',
+                      ),
+                      trailing: FilledButton.tonal(
+                        onPressed: () async {
+                          if (manager.permissionStatus.granted ||
+                              manager.permissionStatus.permanentlyDenied) {
+                            await manager.openAppSettings();
+                          } else {
+                            await manager.requestStoragePermissions();
+                          }
+                        },
+                        child: Text(
+                          manager.permissionStatus.granted
+                              ? 'Atur'
+                              : (manager.permissionStatus.permanentlyDenied
+                                  ? 'Pengaturan'
+                                  : 'Izinkan'),
+                        ),
+                      ),
                     ),
-                  ),
+                    const Divider(height: 1),
+                    ListTile(
+                      leading: Icon(
+                        manager.permissionStatus.allFilesGranted
+                            ? Icons.lock_person_rounded
+                            : Icons.admin_panel_settings_outlined,
+                        color: manager.permissionStatus.allFilesGranted
+                            ? const Color(0xFF22C55E)
+                            : const Color(0xFFF59E0B),
+                      ),
+                      title: const Text('Penyimpanan Anti-Hilang (Akses Semua File)'),
+                      subtitle: Text(
+                        manager.permissionStatus.allFilesGranted
+                            ? 'Aktif — Brankas Privat Pixiv & seluruh pengaturan tersimpan di Documents/.all_download_vault (tahan uninstall & flutter run)'
+                            : 'Belum aktif — aktifkan agar foto Privat Pixiv, penanda, tag album, rating & pengaturan otomatis bertahan saat uninstall / install ulang',
+                      ),
+                      trailing: FilledButton.tonal(
+                        onPressed: () async {
+                          await manager.requestAllFilesAccess();
+                        },
+                        child: Text(
+                          manager.permissionStatus.allFilesGranted
+                              ? 'Aktif'
+                              : 'Aktifkan',
+                        ),
+                      ),
+                    ),
+                  ],
                 ),
               ),
             ],
@@ -1199,16 +1232,17 @@ Future<void> _exportBackupFile(
     final saved = await manager.exportBackupToFile();
     if (!context.mounted) return;
     if (saved) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Backup pengaturan & data berhasil diekspor (.json).'),
-        ),
+      showTopToast(
+        context,
+        'Backup pengaturan & data berhasil diekspor (.json).',
       );
     }
   } catch (e) {
     if (!context.mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text('Gagal mengekspor backup: $e')),
+    showTopToast(
+      context,
+      'Gagal mengekspor backup: $e',
+      isError: true,
     );
   }
 }
@@ -1220,10 +1254,10 @@ Future<void> _copyBackupJson(
   final json = manager.buildBackupJson();
   await Clipboard.setData(ClipboardData(text: json));
   if (!context.mounted) return;
-  ScaffoldMessenger.of(context).showSnackBar(
-    const SnackBar(
-      content: Text('Data backup JSON disalin ke clipboard.'),
-    ),
+  showTopToast(
+    context,
+    'Data backup JSON disalin ke clipboard.',
+    icon: Icons.copy_rounded,
   );
 }
 
@@ -1237,12 +1271,10 @@ Future<void> _importBackupFile(
     await _confirmAndApplyBackup(context, manager, bundle);
   } catch (e) {
     if (!context.mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(
-          'Gagal membaca file backup: ${e.toString().replaceFirst('FormatException: ', '')}',
-        ),
-      ),
+    showTopToast(
+      context,
+      'Gagal membaca file backup: ${e.toString().replaceFirst('FormatException: ', '')}',
+      isError: true,
     );
   }
 }
@@ -1307,12 +1339,10 @@ Future<void> _openPasteBackupDialog(
     await _confirmAndApplyBackup(context, manager, bundle);
   } catch (e) {
     if (!context.mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(
-          'Format JSON tidak valid: ${e.toString().replaceFirst('FormatException: ', '')}',
-        ),
-      ),
+    showTopToast(
+      context,
+      'Format JSON tidak valid: ${e.toString().replaceFirst('FormatException: ', '')}',
+      isError: true,
     );
   }
 }
@@ -1372,14 +1402,11 @@ Future<void> _confirmAndApplyBackup(
 
   await manager.applyBackup(bundle, merge: mode == 'merge');
   if (!context.mounted) return;
-  ScaffoldMessenger.of(context).showSnackBar(
-    SnackBar(
-      content: Text(
-        mode == 'merge'
-            ? 'Backup berhasil digabungkan!'
-            : 'Backup berhasil diterapkan!',
-      ),
-    ),
+  showTopToast(
+    context,
+    mode == 'merge'
+        ? 'Backup berhasil digabungkan!'
+        : 'Backup berhasil diterapkan!',
   );
 }
 
@@ -1432,7 +1459,7 @@ Future<void> _showMigrationGuideSheet(BuildContext context) {
             step: '3',
             title: 'Pindahkan Brankas Privat Pixiv',
             body:
-                'Foto Pixiv yang berstatus Privat tersembunyi dari Galeri & WA. Ada 2 cara memindahkannya:\n• Cara Mudah (Tanpa PC): Buka tab File → Pixiv → tahan & pilih semua album → ketuk Unlock (foto pindah ke Pictures/all_download/Pixiv). Setelah disalin ke HP baru, pilih lalu Kunci lagi.\n• Cara Langsung (PC/USB): Salin folder Android/data/com.linkdrop.linkdrop_downloader/files/private_vault/ ke folder yang sama di HP baru.',
+                'Foto Pixiv yang berstatus Privat tersembunyi dari Galeri & WA:\n• Jika Penyimpanan Anti-Hilang (Akses Semua File) aktif, seluruh foto Privat & pengaturan tersimpan otomatis di folder Documents/.all_download_vault/ (tahan uninstall/install ulang di HP yang sama; cukup salin folder ini jika pindah HP).\n• Cara Tanpa PC: Buka tab File → Pixiv → tahan & pilih semua album → ketuk Unlock (pindah ke Pictures/all_download/Pixiv), lalu Kunci kembali di HP baru.',
           ),
           const SizedBox(height: 10),
           const _MigrationStepCard(
@@ -1455,12 +1482,10 @@ Future<void> _doBrowserLogin(
 ) async {
   final ok = await manager.openBrowserLogin(key);
   if (!context.mounted) return;
-  ScaffoldMessenger.of(context).showSnackBar(
-    SnackBar(
-      content: Text(
-        ok ? 'Sesi $label tersimpan!' : 'Sesi $label ditutup.',
-      ),
-    ),
+  showTopToast(
+    context,
+    ok ? 'Sesi $label tersimpan!' : 'Sesi $label ditutup.',
+    icon: ok ? Icons.verified_user_rounded : Icons.info_outline_rounded,
   );
 }
 
@@ -1474,11 +1499,13 @@ Future<void> _updateEngine(
     final msg = result.updated
         ? 'Berhasil diperbarui ke yt-dlp ${result.version}'
         : 'yt-dlp sudah versi terbaru (${result.version})';
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
+    showTopToast(context, msg, icon: Icons.system_update_rounded);
   } catch (e) {
     if (!context.mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text('Gagal memperbarui yt-dlp: $e')),
+    showTopToast(
+      context,
+      'Gagal memperbarui yt-dlp: $e',
+      isError: true,
     );
   }
 }
@@ -1492,7 +1519,7 @@ Future<void> _clearCache(
   final msg = freed > 0
       ? 'Berhasil membersihkan ${formatBytes(freed)} cache sementara.'
       : 'Tidak ada cache sementara untuk dibersihkan.';
-  ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
+  showTopToast(context, msg, icon: Icons.cleaning_services_rounded);
 }
 
 Future<void> _confirmResetMarkers(
@@ -1500,32 +1527,19 @@ Future<void> _confirmResetMarkers(
   DownloadManager manager,
 ) async {
   final count = manager.downloadedMarkers.length;
-  final ok = await showDialog<bool>(
-    context: context,
-    builder: (ctx) => AlertDialog(
-      title: const Text('Reset Semua Penandaan?'),
-      content: Text(
+  final ok = await showBottomDeleteConfirm(
+    context,
+    title: 'Reset Semua Penandaan?',
+    message:
         'Hapus semua $count tanda "Sudah diunduh"? File yang tersimpan di penyimpanan perangkat tetap aman.',
-      ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.pop(ctx, false),
-          child: const Text('Batal'),
-        ),
-        FilledButton(
-          onPressed: () => Navigator.pop(ctx, true),
-          child: const Text('Reset Semua'),
-        ),
-      ],
-    ),
+    confirmLabel: 'Reset Semua',
   );
-  if (ok == true) {
+  if (ok) {
     await manager.clearAllDownloadedMarkers();
     if (!context.mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text('Semua penandaan "Sudah diunduh" telah dihapus.'),
-      ),
+    showTopToast(
+      context,
+      'Semua penandaan "Sudah diunduh" telah dihapus.',
     );
   }
 }
@@ -1662,14 +1676,12 @@ Future<void> _openCookiesDialog(
       manager.settings.copyWith(customCookies: saved),
     );
     if (context.mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            saved.isEmpty
-                ? 'Cookies dihapus.'
-                : 'Cookies berhasil disimpan.',
-          ),
-        ),
+      showTopToast(
+        context,
+        saved.isEmpty
+            ? 'Cookies dihapus.'
+            : 'Cookies berhasil disimpan.',
+        icon: Icons.cookie_outlined,
       );
     }
   }

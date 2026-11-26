@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../models/media_info.dart';
 import '../models/media_platform.dart';
+import 'app_feedback.dart';
 import 'platform_badge.dart';
 
 bool _neverDownloaded(String _) => false;
@@ -132,28 +133,13 @@ class _MediaPreviewCardState extends State<MediaPreviewCard> {
     required String title,
     required String message,
     String confirmLabel = 'Hapus Tanda',
-  }) async {
-    final ok = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: Text(title),
-        content: Text(message),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, false),
-            child: const Text('Batal'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(ctx, true),
-            style: FilledButton.styleFrom(
-              backgroundColor: Theme.of(ctx).colorScheme.error,
-            ),
-            child: Text(confirmLabel),
-          ),
-        ],
-      ),
+  }) {
+    return showBottomDeleteConfirm(
+      context,
+      title: title,
+      message: message,
+      confirmLabel: confirmLabel,
     );
-    return ok == true;
   }
 
   Future<void> _unmarkSingleItem(
@@ -282,16 +268,11 @@ class _MediaPreviewCardState extends State<MediaPreviewCard> {
   }
 
   void _showLockedHint(BuildContext context) {
-    ScaffoldMessenger.of(context)
-      ..hideCurrentSnackBar()
-      ..showSnackBar(
-        const SnackBar(
-          duration: Duration(seconds: 2),
-          content: Text(
-            'Sudah tertandai terunduh — tidak bisa dicentang. Hapus tanda dulu (ketuk badge hijau atau Hapus Tanda Massal).',
-          ),
-        ),
-      );
+    showTopToast(
+      context,
+      'Sudah tertandai terunduh — tidak bisa dicentang. Hapus tanda dulu (ketuk badge hijau atau Hapus Tanda Massal).',
+      icon: Icons.lock_outline_rounded,
+    );
   }
 
   @override

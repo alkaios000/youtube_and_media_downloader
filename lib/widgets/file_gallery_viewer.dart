@@ -7,6 +7,7 @@ import '../models/managed_file.dart';
 import '../models/media_info.dart';
 import '../models/media_metadata.dart';
 import '../services/download_manager.dart';
+import 'app_feedback.dart';
 import 'sharp_original_image.dart';
 import 'wallpaper_sheet.dart';
 
@@ -146,18 +147,14 @@ Future<ContentRating?> showPhotoContentRatingSheet(
   await manager.setPhotoRating(file, chosen);
   if (context.mounted) {
     final hiddenByFilter = !manager.settings.isContentRatingVisible(chosen);
-    ScaffoldMessenger.of(context)
-      ..hideCurrentSnackBar()
-      ..showSnackBar(
-        SnackBar(
-          duration: const Duration(seconds: 2),
-          content: Text(
-            hiddenByFilter
-                ? 'Ditandai ${chosen.label} (disembunyikan oleh filter Visibilitas Konten).'
-                : 'Foto ditandai sebagai ${chosen.label}.',
-          ),
-        ),
-      );
+    showTopToast(
+      context,
+      hiddenByFilter
+          ? 'Ditandai ${chosen.label} (disembunyikan oleh filter Visibilitas Konten).'
+          : 'Foto ditandai sebagai ${chosen.label}.',
+      icon: chosen.icon,
+      accentColor: chosen.color,
+    );
   }
   return chosen;
 }
@@ -229,6 +226,8 @@ class _FileGalleryViewerState extends State<FileGalleryViewer> {
   bool _showChrome = true;
   bool _isZoomed = false;
   bool _togglingPrivacy = false;
+  bool _fastDeleteEnabled = false;
+  bool _isDeleting = false;
 
   @override
   void initState() {
@@ -319,10 +318,10 @@ class _FileGalleryViewerState extends State<FileGalleryViewer> {
             ),
           ),
 
-          // Top bar
+          // Top bar (includes checkable Fast Delete toggle)
           AnimatedPositioned(
             duration: const Duration(milliseconds: 180),
-            top: _showChrome ? 0 : -120,
+            top: _showChrome ? 0 : -170,
             left: 0,
             right: 0,
             child: Container(
@@ -331,7 +330,8 @@ class _FileGalleryViewerState extends State<FileGalleryViewer> {
                   begin: Alignment.topCenter,
                   end: Alignment.bottomCenter,
                   colors: [
-                    Colors.black.withValues(alpha: 0.78),
+                    Colors.black.withValues(alpha: 0.82),
+                    Colors.black.withValues(alpha: 0.45),
                     Colors.transparent,
                   ],
                 ),
@@ -339,60 +339,140 @@ class _FileGalleryViewerState extends State<FileGalleryViewer> {
               child: SafeArea(
                 bottom: false,
                 child: Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 6),
-                  child: Row(
+                  padding: const EdgeInsets.fromLTRB(6, 4, 6, 10),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      IconButton(
-                        onPressed: () => Navigator.pop(context),
-                        icon: const Icon(Icons.arrow_back_rounded, color: Colors.white),
-                      ),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Text(
-                              _current.fileName,
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: const TextStyle(
-                                color: Colors.white,
-                                fontWeight: FontWeight.w700,
-                                fontSize: 14,
-                              ),
+                      Row(
+                        children: [
+                          IconButton(
+                            onPressed: () => Navigator.pop(context),
+                            icon: const Icon(
+                              Icons.arrow_back_rounded,
+                              color: Colors.white,
                             ),
-                            Text(
-                              widget.showCreatorInSubtitle
-                                  ? '${_currentIndex + 1} / ${_images.length} • ${_current.creatorFolder}'
-                                  : '${_currentIndex + 1} / ${_images.length} • ${formatBytes(_current.fileSize)}',
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: const TextStyle(
-                                color: Colors.white70,
-                                fontSize: 11.5,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                      if (widget.enableShuffleRefresh && _images.length > 1)
-                        IconButton(
-                          onPressed: _shuffleInViewer,
-                          icon: const Icon(
-                            Icons.shuffle_rounded,
-                            color: Colors.white,
                           ),
-                          tooltip: 'Acak ulang & segarkan',
-                        ),
-                      IconButton(
-                        onPressed: () => widget.manager.openManagedFile(_current),
-                        icon: const Icon(Icons.open_in_new_rounded, color: Colors.white),
-                        tooltip: 'Buka di App Lain',
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Text(
+                                  _current.fileName,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: const TextStyle(
+                                    color: Colors.white,
+                                    fontWeight: FontWeight.w700,
+                                    fontSize: 14,
+                                  ),
+                                ),
+                                Text(
+                                  widget.showCreatorInSubtitle
+                                      ? '${_currentIndex + 1} / ${_images.length} • ${_current.creatorFolder}'
+                                      : '${_currentIndex + 1} / ${_images.length} • ${formatBytes(_current.fileSize)}',
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: const TextStyle(
+                                    color: Colors.white70,
+                                    fontSize: 11.5,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                          if (widget.enableShuffleRefresh && _images.length > 1)
+                            IconButton(
+                              onPressed: _shuffleInViewer,
+                              icon: const Icon(
+                                Icons.shuffle_rounded,
+                                color: Colors.white,
+                              ),
+                              tooltip: 'Acak ulang & segarkan',
+                            ),
+                          IconButton(
+                            onPressed: () =>
+                                widget.manager.openManagedFile(_current),
+                            icon: const Icon(
+                              Icons.open_in_new_rounded,
+                              color: Colors.white,
+                            ),
+                            tooltip: 'Buka di App Lain',
+                          ),
+                          IconButton(
+                            onPressed: _showInfoSheet,
+                            icon: const Icon(
+                              Icons.info_outline_rounded,
+                              color: Colors.white,
+                            ),
+                            tooltip: 'Detail File',
+                          ),
+                        ],
                       ),
-                      IconButton(
-                        onPressed: _showInfoSheet,
-                        icon: const Icon(Icons.info_outline_rounded, color: Colors.white),
-                        tooltip: 'Detail File',
+                      // Fast Delete checkable pill right in the top bar
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(12, 2, 12, 0),
+                        child: Material(
+                          color: _fastDeleteEnabled
+                              ? const Color(0xFFEF4444).withValues(alpha: 0.28)
+                              : Colors.black.withValues(alpha: 0.45),
+                          borderRadius: BorderRadius.circular(20),
+                          child: InkWell(
+                            key: const ValueKey<String>('fast_delete_toggle'),
+                            borderRadius: BorderRadius.circular(20),
+                            onTap: () {
+                              HapticFeedback.selectionClick();
+                              setState(() {
+                                _fastDeleteEnabled = !_fastDeleteEnabled;
+                              });
+                            },
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 10,
+                                vertical: 5,
+                              ),
+                              decoration: BoxDecoration(
+                                borderRadius: BorderRadius.circular(20),
+                                border: Border.all(
+                                  color: _fastDeleteEnabled
+                                      ? const Color(0xFFF87171)
+                                      : Colors.white.withValues(alpha: 0.28),
+                                  width: _fastDeleteEnabled ? 1.3 : 0.9,
+                                ),
+                              ),
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Icon(
+                                    _fastDeleteEnabled
+                                        ? Icons.check_box_rounded
+                                        : Icons.check_box_outline_blank_rounded,
+                                    size: 17,
+                                    color: _fastDeleteEnabled
+                                        ? const Color(0xFFFCA5A5)
+                                        : Colors.white70,
+                                  ),
+                                  const SizedBox(width: 6),
+                                  Text(
+                                    _fastDeleteEnabled
+                                        ? 'Fast Delete Aktif (hapus langsung)'
+                                        : 'Fast Delete',
+                                    style: TextStyle(
+                                      color: _fastDeleteEnabled
+                                          ? const Color(0xFFFEE2E2)
+                                          : Colors.white.withValues(alpha: 0.9),
+                                      fontSize: 12,
+                                      fontWeight: _fastDeleteEnabled
+                                          ? FontWeight.w800
+                                          : FontWeight.w600,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ),
                       ),
                     ],
                   ),
@@ -478,10 +558,16 @@ class _FileGalleryViewerState extends State<FileGalleryViewer> {
                           ),
                           Expanded(
                             child: _ViewerActionBtn(
-                              icon: Icons.delete_outline_rounded,
+                              icon: _fastDeleteEnabled
+                                  ? Icons.delete_forever_rounded
+                                  : Icons.delete_outline_rounded,
                               label: 'Hapus',
                               color: const Color(0xFFF87171),
-                              onTap: _confirmDeleteCurrent,
+                              activePill: _fastDeleteEnabled,
+                              loading: _isDeleting,
+                              onTap: _isDeleting
+                                  ? () {}
+                                  : _confirmDeleteCurrent,
                             ),
                           ),
                         ],
@@ -536,39 +622,42 @@ class _FileGalleryViewerState extends State<FileGalleryViewer> {
   }
 
   Future<void> _confirmDeleteCurrent() async {
+    if (_isDeleting || _images.isEmpty) return;
     final target = _current;
-    final ok = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Hapus Foto?'),
-        content: Text('Hapus permanen "${target.fileName}" dari perangkat?'),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, false),
-            child: const Text('Batal'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(ctx, true),
-            style: FilledButton.styleFrom(
-              backgroundColor: Theme.of(ctx).colorScheme.error,
-            ),
-            child: const Text('Hapus'),
-          ),
-        ],
-      ),
-    );
-    if (ok != true || !mounted) return;
+    if (!_fastDeleteEnabled) {
+      final ok = await showBottomDeleteConfirm(
+        context,
+        title: 'Hapus Foto?',
+        message: 'Hapus permanen "${target.fileName}" dari perangkat?',
+      );
+      if (!ok || !mounted) return;
+    } else {
+      HapticFeedback.lightImpact();
+    }
 
-    await widget.manager.deleteManagedFile(target);
-    if (!mounted) return;
-    setState(() {
-      _images.removeAt(_currentIndex);
+    setState(() => _isDeleting = true);
+    try {
+      await widget.manager.deleteManagedFile(target);
+      if (!mounted) return;
+      final idx = _images.indexWhere((f) => f.uniqueKey == target.uniqueKey);
+      if (idx >= 0) {
+        _images.removeAt(idx);
+      } else if (_currentIndex >= 0 && _currentIndex < _images.length) {
+        _images.removeAt(_currentIndex);
+      }
       if (_images.isEmpty) {
         Navigator.pop(context);
-      } else if (_currentIndex >= _images.length) {
-        _currentIndex = _images.length - 1;
+        return;
       }
-    });
+      setState(() {
+        if (_currentIndex >= _images.length) {
+          _currentIndex = _images.length - 1;
+        }
+        _isZoomed = false;
+      });
+    } finally {
+      if (mounted) setState(() => _isDeleting = false);
+    }
   }
 
   void _showInfoSheet() {
@@ -632,8 +721,10 @@ class _FileGalleryViewerState extends State<FileGalleryViewer> {
                       ),
                     );
                     Navigator.pop(ctx);
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(content: Text('Lokasi file disalin.')),
+                    showTopToast(
+                      context,
+                      'Lokasi file disalin.',
+                      icon: Icons.copy_rounded,
                     );
                   },
                   icon: const Icon(Icons.copy_rounded, size: 17),

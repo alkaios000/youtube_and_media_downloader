@@ -45,6 +45,32 @@ class BackupDataBundle {
   });
 }
 
+class PersistentStateSnapshot {
+  final AppSettings? settings;
+  final Set<String>? downloadedMarkers;
+  final List<CreatorProfileRecord> creatorProfiles;
+  final Map<String, AlbumMetadata> albumMetadata;
+  final Map<String, ContentRating> photoRatings;
+  final List<DownloadItem> history;
+
+  const PersistentStateSnapshot({
+    this.settings,
+    this.downloadedMarkers,
+    this.creatorProfiles = const [],
+    this.albumMetadata = const {},
+    this.photoRatings = const {},
+    this.history = const [],
+  });
+
+  bool get hasAnyData =>
+      settings != null ||
+      (downloadedMarkers != null && downloadedMarkers!.isNotEmpty) ||
+      creatorProfiles.isNotEmpty ||
+      albumMetadata.isNotEmpty ||
+      photoRatings.isNotEmpty ||
+      history.isNotEmpty;
+}
+
 class StorageService {
   static const String _historyKey = 'linkdrop_download_history_v1';
   static const String _settingsKey = 'linkdrop_settings_v1';
@@ -52,6 +78,18 @@ class StorageService {
   static const String _creatorProfilesKey = 'all_download_creator_profiles_v1';
   static const String _albumMetadataKey = 'all_download_album_metadata_v1';
   static const String _photoRatingsKey = 'all_download_photo_ratings_v1';
+
+  /// Uninstall-proof shared state directory (`Documents/.all_download_vault/state`)
+  /// provided by native Android once All Files Access is granted.
+  String? _persistentStateDirPath;
+
+  String? get persistentStateDirPath => _persistentStateDirPath;
+
+  void setPersistentStateDir(String? dirPath) {
+    final clean = dirPath?.trim();
+    _persistentStateDirPath =
+        (clean != null && clean.isNotEmpty) ? clean : null;
+  }
 
   // Serialized coalescing writers prevent concurrent multi-MB JSON spikes in RAM.
   bool _isWritingHistory = false;
@@ -62,6 +100,131 @@ class StorageService {
   Map<String, AlbumMetadata>? _pendingAlbumMetaWrite;
   bool _isWritingRatings = false;
   Map<String, ContentRating>? _pendingRatingsWrite;
+
+  File? _persistentFileOrNull(String fileName) {
+    final dir = _persistentStateDirPath;
+    if (dir == null || dir.isEmpty) return null;
+    return File(p.join(dir, fileName));
+  }
+
+  Future<void> _mirrorToPersistentFile(String fileName, String content) async {
+    final target = _persistentFileOrNull(fileName);
+    if (target == null) return;
+    try {
+      final parent = target.parent;
+      if (!await parent.exists()) {
+        await parent.create(recursive: true);
+      }
+      await _writeAtomicFile(target, content);
+    } catch (_) {}
+  }
+
+  Future<String?> _readPersistentText(String fileName) async {
+    final target = _persistentFileOrNull(fileName);
+    if (target == null) return null;
+    try {
+      if (await target.exists()) {
+        final raw = await target.readAsString();
+        if (raw.isNotEmpty) return raw;
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  Future<bool> hasLocalSavedSettings() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString(_settingsKey);
+      return raw != null && raw.isNotEmpty;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Reads all uninstall-proof state files directly from [_persistentStateDirPath]
+  /// (used on reinstall / first activation of All Files Access to auto-restore
+  /// settings, markers, artist links, album tags, photo ratings, and history).
+  Future<PersistentStateSnapshot?> loadPersistentSnapshot() async {
+    if (_persistentStateDirPath == null) return null;
+
+    AppSettings? settings;
+    final settingsRaw = await _readPersistentText('settings_v1.json');
+    if (settingsRaw != null) {
+      try {
+        final decoded = jsonDecode(settingsRaw);
+        if (decoded is Map) {
+          settings = AppSettings.fromJson(Map<String, dynamic>.from(decoded));
+        }
+      } catch (_) {}
+    }
+
+    Set<String>? markers;
+    final markersRaw = await _readPersistentText('downloaded_markers_v2.json');
+    if (markersRaw != null) {
+      try {
+        final decoded = jsonDecode(markersRaw);
+        if (decoded is List) {
+          markers = decoded
+              .map((e) => e.toString().trim())
+              .where((e) => e.isNotEmpty)
+              .toSet();
+        }
+      } catch (_) {}
+    }
+
+    var profiles = <CreatorProfileRecord>[];
+    final profilesRaw = await _readPersistentText('creator_profiles_v1.json');
+    if (profilesRaw != null) {
+      try {
+        final decoded = jsonDecode(profilesRaw);
+        if (decoded is List) {
+          profiles = decoded
+              .whereType<Map>()
+              .map(
+                (e) => CreatorProfileRecord.fromJson(
+                  Map<String, dynamic>.from(e),
+                ),
+              )
+              .where((r) => r.profileUrl.isNotEmpty)
+              .toList();
+        }
+      } catch (_) {}
+    }
+
+    var albumMeta = <String, AlbumMetadata>{};
+    final albumRaw = await _readPersistentText('album_metadata_v1.json');
+    if (albumRaw != null) {
+      try {
+        albumMeta = _parseAlbumMetadataRaw(albumRaw);
+      } catch (_) {}
+    }
+
+    var ratings = <String, ContentRating>{};
+    final ratingsRaw = await _readPersistentText('photo_ratings_v1.json');
+    if (ratingsRaw != null) {
+      try {
+        ratings = _parsePhotoRatingsRaw(ratingsRaw);
+      } catch (_) {}
+    }
+
+    var history = <DownloadItem>[];
+    final historyRaw = await _readPersistentText('download_history_v2.json');
+    if (historyRaw != null) {
+      try {
+        history = await _parseHistoryRaw(historyRaw);
+      } catch (_) {}
+    }
+
+    final snap = PersistentStateSnapshot(
+      settings: settings,
+      downloadedMarkers: markers,
+      creatorProfiles: profiles,
+      albumMetadata: albumMeta,
+      photoRatings: ratings,
+      history: history,
+    );
+    return snap.hasAnyData ? snap : null;
+  }
 
   Future<File?> _supportFileOrNull(String fileName) async {
     try {
@@ -125,18 +288,26 @@ class StorageService {
     try {
       final prefs = await SharedPreferences.getInstance();
       final raw = prefs.getString(_historyKey);
-      if (raw == null || raw.isEmpty) return [];
-      final parsed = await _parseHistoryRaw(raw);
-      if (file != null) {
-        try {
-          await saveHistory(parsed);
-          await prefs.remove(_historyKey);
-        } catch (_) {}
+      if (raw != null && raw.isNotEmpty) {
+        final parsed = await _parseHistoryRaw(raw);
+        if (file != null) {
+          try {
+            await saveHistory(parsed);
+            await prefs.remove(_historyKey);
+          } catch (_) {}
+        }
+        return parsed;
       }
-      return parsed;
-    } catch (_) {
-      return [];
+    } catch (_) {}
+
+    // 3) Uninstall-proof persistent vault fallback
+    final persistentRaw = await _readPersistentText('download_history_v2.json');
+    if (persistentRaw != null) {
+      try {
+        return await _parseHistoryRaw(persistentRaw);
+      } catch (_) {}
     }
+    return [];
   }
 
   /// Saves ALL items including paused & active checkpoints using serialized,
@@ -167,9 +338,11 @@ class StorageService {
     final file = await _supportFileOrNull('download_history_v2.json');
     if (file != null) {
       await _writeAtomicFile(file, encoded);
+      await _mirrorToPersistentFile('download_history_v2.json', encoded);
       return;
     }
 
+    await _mirrorToPersistentFile('download_history_v2.json', encoded);
     // Fallback when running in headless unit tests without path_provider
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(_historyKey, encoded);
@@ -195,20 +368,34 @@ class StorageService {
 
     try {
       final prefs = await SharedPreferences.getInstance();
-      if (!prefs.containsKey(_downloadedMarkersKey)) return null;
-      final list = prefs.getStringList(_downloadedMarkersKey);
-      if (list == null) return <String>{};
-      final set = list.where((e) => e.isNotEmpty).toSet();
-      if (file != null) {
-        try {
-          await saveDownloadedMarkers(set);
-          await prefs.remove(_downloadedMarkersKey);
-        } catch (_) {}
+      if (prefs.containsKey(_downloadedMarkersKey)) {
+        final list = prefs.getStringList(_downloadedMarkersKey);
+        if (list == null) return <String>{};
+        final set = list.where((e) => e.isNotEmpty).toSet();
+        if (file != null) {
+          try {
+            await saveDownloadedMarkers(set);
+            await prefs.remove(_downloadedMarkersKey);
+          } catch (_) {}
+        }
+        return set;
       }
-      return set;
-    } catch (_) {
-      return null;
+    } catch (_) {}
+
+    final persistentRaw =
+        await _readPersistentText('downloaded_markers_v2.json');
+    if (persistentRaw != null) {
+      try {
+        final decoded = jsonDecode(persistentRaw);
+        if (decoded is List) {
+          return decoded
+              .map((e) => e.toString())
+              .where((e) => e.isNotEmpty)
+              .toSet();
+        }
+      } catch (_) {}
     }
+    return null;
   }
 
   Future<void> saveDownloadedMarkers(Set<String> markers) async {
@@ -221,16 +408,17 @@ class StorageService {
         final batch = _pendingMarkersWrite!;
         _pendingMarkersWrite = null;
         final list = batch.toList(growable: false);
+        final encoded = list.length >= 500
+            ? await Isolate.run(() => _encodeJsonPayload(list))
+            : jsonEncode(list);
         final file = await _supportFileOrNull('downloaded_markers_v2.json');
         if (file != null) {
-          final encoded = list.length >= 500
-              ? await Isolate.run(() => _encodeJsonPayload(list))
-              : jsonEncode(list);
           await _writeAtomicFile(file, encoded);
         } else {
           final prefs = await SharedPreferences.getInstance();
           await prefs.setStringList(_downloadedMarkersKey, list);
         }
+        await _mirrorToPersistentFile('downloaded_markers_v2.json', encoded);
       }
     } finally {
       _isWritingMarkers = false;
@@ -238,8 +426,14 @@ class StorageService {
   }
 
   Future<List<CreatorProfileRecord>> loadCreatorProfiles() async {
-    final prefs = await SharedPreferences.getInstance();
-    final raw = prefs.getString(_creatorProfilesKey);
+    String? raw;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      raw = prefs.getString(_creatorProfilesKey);
+    } catch (_) {}
+    if (raw == null || raw.isEmpty) {
+      raw = await _readPersistentText('creator_profiles_v1.json');
+    }
     if (raw == null || raw.isEmpty) return [];
     try {
       final list = jsonDecode(raw) as List;
@@ -254,11 +448,13 @@ class StorageService {
   }
 
   Future<void> saveCreatorProfiles(List<CreatorProfileRecord> profiles) async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(
-      _creatorProfilesKey,
-      jsonEncode(profiles.map((e) => e.toJson()).toList(growable: false)),
-    );
+    final encoded =
+        jsonEncode(profiles.map((e) => e.toJson()).toList(growable: false));
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(_creatorProfilesKey, encoded);
+    } catch (_) {}
+    await _mirrorToPersistentFile('creator_profiles_v1.json', encoded);
   }
 
   Future<Map<String, AlbumMetadata>> loadAlbumMetadata() async {
@@ -275,11 +471,18 @@ class StorageService {
     try {
       final prefs = await SharedPreferences.getInstance();
       final raw = prefs.getString(_albumMetadataKey);
-      if (raw == null || raw.isEmpty) return {};
-      return _parseAlbumMetadataRaw(raw);
-    } catch (_) {
-      return {};
+      if (raw != null && raw.isNotEmpty) {
+        return _parseAlbumMetadataRaw(raw);
+      }
+    } catch (_) {}
+
+    final persistentRaw = await _readPersistentText('album_metadata_v1.json');
+    if (persistentRaw != null) {
+      try {
+        return _parseAlbumMetadataRaw(persistentRaw);
+      } catch (_) {}
     }
+    return {};
   }
 
   Map<String, AlbumMetadata> _parseAlbumMetadataRaw(String raw) {
@@ -328,6 +531,7 @@ class StorageService {
           final prefs = await SharedPreferences.getInstance();
           await prefs.setString(_albumMetadataKey, encoded);
         }
+        await _mirrorToPersistentFile('album_metadata_v1.json', encoded);
       }
     } finally {
       _isWritingAlbumMeta = false;
@@ -348,11 +552,18 @@ class StorageService {
     try {
       final prefs = await SharedPreferences.getInstance();
       final raw = prefs.getString(_photoRatingsKey);
-      if (raw == null || raw.isEmpty) return {};
-      return _parsePhotoRatingsRaw(raw);
-    } catch (_) {
-      return {};
+      if (raw != null && raw.isNotEmpty) {
+        return _parsePhotoRatingsRaw(raw);
+      }
+    } catch (_) {}
+
+    final persistentRaw = await _readPersistentText('photo_ratings_v1.json');
+    if (persistentRaw != null) {
+      try {
+        return _parsePhotoRatingsRaw(persistentRaw);
+      } catch (_) {}
     }
+    return {};
   }
 
   Map<String, ContentRating> _parsePhotoRatingsRaw(String raw) {
@@ -395,6 +606,7 @@ class StorageService {
           final prefs = await SharedPreferences.getInstance();
           await prefs.setString(_photoRatingsKey, encoded);
         }
+        await _mirrorToPersistentFile('photo_ratings_v1.json', encoded);
       }
     } finally {
       _isWritingRatings = false;
@@ -402,8 +614,14 @@ class StorageService {
   }
 
   Future<AppSettings> loadSettings() async {
-    final prefs = await SharedPreferences.getInstance();
-    final raw = prefs.getString(_settingsKey);
+    String? raw;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      raw = prefs.getString(_settingsKey);
+    } catch (_) {}
+    if (raw == null || raw.isEmpty) {
+      raw = await _readPersistentText('settings_v1.json');
+    }
     if (raw == null || raw.isEmpty) return const AppSettings();
     try {
       final map = jsonDecode(raw) as Map;
@@ -414,8 +632,12 @@ class StorageService {
   }
 
   Future<void> saveSettings(AppSettings settings) async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(_settingsKey, jsonEncode(settings.toJson()));
+    final encoded = jsonEncode(settings.toJson());
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(_settingsKey, encoded);
+    } catch (_) {}
+    await _mirrorToPersistentFile('settings_v1.json', encoded);
     await syncCookiesFile(settings.customCookies);
   }
 
@@ -534,7 +756,8 @@ class StorageService {
 
   Future<String?> getCookiesFilePath(String cookiesContent) async {
     if (cookiesContent.trim().isEmpty) return null;
-    final file = await _cookiesFile();
+    final file = await _supportFileOrNull('user_cookies.txt');
+    if (file == null) return null;
     if (!await file.exists()) {
       await file.writeAsString(cookiesContent.trim());
     }
@@ -542,7 +765,8 @@ class StorageService {
   }
 
   Future<void> syncCookiesFile(String cookiesContent) async {
-    final file = await _cookiesFile();
+    final file = await _supportFileOrNull('user_cookies.txt');
+    if (file == null) return;
     if (cookiesContent.trim().isEmpty) {
       if (await file.exists()) {
         await file.delete();
@@ -550,10 +774,5 @@ class StorageService {
     } else {
       await file.writeAsString(cookiesContent.trim());
     }
-  }
-
-  Future<File> _cookiesFile() async {
-    final dir = await getApplicationSupportDirectory();
-    return File(p.join(dir.path, 'user_cookies.txt'));
   }
 }

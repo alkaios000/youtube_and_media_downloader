@@ -7,6 +7,7 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Environment
 import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
@@ -132,6 +133,17 @@ class MainActivity : FlutterActivity() {
         }
     }
 
+    private fun hasAllFilesAccess(): Boolean {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            Environment.isExternalStorageManager()
+        } else {
+            ContextCompat.checkSelfPermission(
+                this,
+                Manifest.permission.WRITE_EXTERNAL_STORAGE,
+            ) == PackageManager.PERMISSION_GRANTED
+        }
+    }
+
     private fun buildPermissionStatus(): Map<String, Any?> {
         val perms = requiredStoragePermissions()
         val missing = perms.filter { perm ->
@@ -143,6 +155,7 @@ class MainActivity : FlutterActivity() {
         }
         return mapOf(
             "granted" to granted,
+            "allFilesGranted" to hasAllFilesAccess(),
             "permanentlyDenied" to permanentlyDenied,
             "sdkInt" to Build.VERSION.SDK_INT,
             "missing" to missing,
@@ -288,6 +301,54 @@ class MainActivity : FlutterActivity() {
                             true
                         }.getOrDefault(false)
                         result.success(opened)
+                    }
+
+                    "requestAllFilesAccess" -> {
+                        if (hasAllFilesAccess()) {
+                            result.success(true)
+                        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                            val opened = runCatching {
+                                val intent = Intent(
+                                    Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+                                    Uri.parse("package:$packageName"),
+                                ).apply {
+                                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                }
+                                startActivity(intent)
+                                true
+                            }.getOrElse {
+                                runCatching {
+                                    val fallback = Intent(
+                                        Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION,
+                                    ).apply {
+                                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                    }
+                                    startActivity(fallback)
+                                    true
+                                }.getOrDefault(false)
+                            }
+                            result.success(opened)
+                        } else {
+                            ActivityCompat.requestPermissions(
+                                this,
+                                arrayOf(
+                                    Manifest.permission.WRITE_EXTERNAL_STORAGE,
+                                    Manifest.permission.READ_EXTERNAL_STORAGE,
+                                ),
+                                PERMISSION_REQUEST_CODE,
+                            )
+                            result.success(true)
+                        }
+                    }
+
+                    "getPersistentDataDir" -> {
+                        result.success(bridge.getPersistentStateDirPath())
+                    }
+
+                    "migrateLegacyPrivateVault" -> {
+                        bridge.migrateLegacyPrivateVault { movedCount ->
+                            result.success(movedCount)
+                        }
                     }
 
                     "sniffMedia" -> {

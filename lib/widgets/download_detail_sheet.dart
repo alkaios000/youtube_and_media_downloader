@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../models/download_item.dart';
 import '../models/media_info.dart';
 import '../services/download_manager.dart';
+import 'app_feedback.dart';
 import 'platform_badge.dart';
 
 /// Opens a live-updating bottom sheet displaying per-file download progress,
@@ -237,33 +238,14 @@ class _DownloadDetailSheet extends StatelessWidget {
                               TextButton(
                                 onPressed: () async {
                                   if (isMarked) {
-                                    final ok = await showDialog<bool>(
-                                      context: context,
-                                      builder: (ctx) => AlertDialog(
-                                        title: const Text('Hapus Penandaan?'),
-                                        content: Text(
+                                    final ok = await showBottomDeleteConfirm(
+                                      context,
+                                      title: 'Hapus Penandaan?',
+                                      message:
                                           'Hapus tanda "Sudah diunduh" untuk "${item.title}"? File yang sudah tersimpan di HP tidak ikut terhapus.',
-                                        ),
-                                        actions: [
-                                          TextButton(
-                                            onPressed: () =>
-                                                Navigator.pop(ctx, false),
-                                            child: const Text('Batal'),
-                                          ),
-                                          FilledButton(
-                                            onPressed: () =>
-                                                Navigator.pop(ctx, true),
-                                            style: FilledButton.styleFrom(
-                                              backgroundColor: Theme.of(ctx)
-                                                  .colorScheme
-                                                  .error,
-                                            ),
-                                            child: const Text('Hapus Tanda'),
-                                          ),
-                                        ],
-                                      ),
+                                      confirmLabel: 'Hapus Tanda',
                                     );
-                                    if (ok == true) {
+                                    if (ok) {
                                       await manager.unmarkDownloaded(markerKey);
                                     }
                                   } else {
@@ -308,12 +290,10 @@ class _DownloadDetailSheet extends StatelessWidget {
                             ? () async {
                                 final ok = await manager.openSubFile(sub);
                                 if (!ok && context.mounted) {
-                                  ScaffoldMessenger.of(context).showSnackBar(
-                                    const SnackBar(
-                                      content: Text(
-                                        'File tidak ditemukan atau belum ada pemutar yang cocok.',
-                                      ),
-                                    ),
+                                  showTopToast(
+                                    context,
+                                    'File tidak ditemukan atau belum ada pemutar yang cocok.',
+                                    isError: true,
                                   );
                                 }
                               }

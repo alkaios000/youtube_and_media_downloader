@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 import '../models/media_info.dart';
 import '../models/media_platform.dart';
 import '../services/download_manager.dart';
+import '../widgets/app_feedback.dart';
 import '../widgets/clipboard_banner.dart';
 import '../widgets/media_preview_card.dart';
 
@@ -86,9 +87,7 @@ class _DownloaderScreenState extends State<DownloaderScreen> {
 
   void _showSnack(String message) {
     if (!mounted) return;
-    ScaffoldMessenger.of(context)
-      ..hideCurrentSnackBar()
-      ..showSnackBar(SnackBar(content: Text(message)));
+    showTopToast(context, message);
   }
 
   @override
@@ -137,6 +136,14 @@ class _DownloaderScreenState extends State<DownloaderScreen> {
                           );
                         }
                       }
+                    },
+                  ),
+                  const SizedBox(height: 12),
+                ] else if (manager.permissionChecked &&
+                    !manager.permissionStatus.allFilesGranted) ...[
+                  _AllFilesVaultBanner(
+                    onEnable: () async {
+                      await manager.requestAllFilesAccess();
                     },
                   ),
                   const SizedBox(height: 12),
@@ -636,6 +643,62 @@ class _PermissionBanner extends StatelessWidget {
               padding: const EdgeInsets.symmetric(horizontal: 12),
             ),
             child: Text(permanentlyDenied ? 'Pengaturan' : 'Izinkan'),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _AllFilesVaultBanner extends StatelessWidget {
+  final VoidCallback onEnable;
+
+  const _AllFilesVaultBanner({required this.onEnable});
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    const accent = Color(0xFF14B8A6);
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: accent.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: accent.withValues(alpha: 0.42)),
+      ),
+      child: Row(
+        children: [
+          const Icon(Icons.shield_outlined, color: accent, size: 22),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Lindungi Data & Pengaturan Anti-Hilang',
+                  style: theme.textTheme.labelLarge?.copyWith(
+                    color: accent,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  'Aktifkan Akses Semua File agar Brankas Privat Pixiv & pengaturan tetap aman walau uninstall / install ulang.',
+                  style: theme.textTheme.bodySmall?.copyWith(height: 1.3),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 8),
+          FilledButton(
+            onPressed: onEnable,
+            style: FilledButton.styleFrom(
+              visualDensity: VisualDensity.compact,
+              backgroundColor: accent,
+              foregroundColor: Colors.black,
+              padding: const EdgeInsets.symmetric(horizontal: 12),
+            ),
+            child: const Text('Aktifkan'),
           ),
         ],
       ),

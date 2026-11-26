@@ -130,6 +130,8 @@ class DownloadManager extends ChangeNotifier {
   bool _isUpdatingEngine = false;
   bool _isLoadingFiles = false;
   bool _permissionChecked = false;
+  bool _persistentSyncCompleted = false;
+  bool _isSyncingPersistent = false;
   bool _instagramLoggedIn = false;
   bool _douyinLoggedIn = false;
   bool _facebookLoggedIn = false;
@@ -220,6 +222,9 @@ class DownloadManager extends ChangeNotifier {
   EngineStatus get engineStatus => _engineStatus;
   PermissionStatusInfo get permissionStatus => _permissionStatus;
   bool get permissionChecked => _permissionChecked;
+  bool get isPersistentVaultActive =>
+      _permissionStatus.allFilesGranted &&
+      _storage.persistentStateDirPath != null;
   AppSettings get settings => _settings;
   List<DownloadItem> get items => List.unmodifiable(_items);
   int get itemsRevision => _itemsRevision;
@@ -331,6 +336,54 @@ class DownloadManager extends ChangeNotifier {
   ) {
     return getAlbumMetadata(platformFolder, creatorFolder, albumFolder)?.tags ??
         const <String>[];
+  }
+
+  /// Returns all visible albums (across all artists/platforms) that carry [tag]
+  /// (case-insensitive match), sorted by newest modified photo descending.
+  List<TaggedAlbumMatch> findAlbumsByTag(String tag) {
+    final needle = tag.trim().toLowerCase();
+    if (needle.isEmpty) return const <TaggedAlbumMatch>[];
+
+    final grouped = <String, List<ManagedFile>>{};
+    for (final f in visibleManagedFiles) {
+      final key = AlbumMetadata.buildLookupKey(
+        f.platformFolder,
+        f.creatorFolder,
+        f.effectiveAlbumName,
+      );
+      grouped.putIfAbsent(key, () => []).add(f);
+    }
+
+    final matches = <TaggedAlbumMatch>[];
+    grouped.forEach((key, pages) {
+      if (pages.isEmpty) return;
+      final meta = _albumMetadata[key];
+      if (meta == null || meta.tags.isEmpty) return;
+      final hasTag = meta.tags.any((t) => t.trim().toLowerCase() == needle);
+      if (!hasTag) return;
+
+      pages.sort((a, b) => naturalCompareFileNames(a.fileName, b.fileName));
+      var latest = pages.first.modifiedAt;
+      var totalBytes = 0;
+      for (final p in pages) {
+        if (p.modifiedAt.isAfter(latest)) latest = p.modifiedAt;
+        totalBytes += p.fileSize;
+      }
+      matches.add(
+        TaggedAlbumMatch(
+          platformFolder: pages.first.platformFolder,
+          creatorFolder: pages.first.creatorFolder,
+          albumName: pages.first.effectiveAlbumName,
+          pages: List<ManagedFile>.unmodifiable(pages),
+          tags: meta.tags,
+          latestModified: latest,
+          totalBytes: totalBytes,
+        ),
+      );
+    });
+
+    matches.sort((a, b) => b.latestModified.compareTo(a.latestModified));
+    return matches;
   }
 
   Future<void> saveAlbumMetadata({
@@ -715,6 +768,14 @@ class DownloadManager extends ChangeNotifier {
 
     unawaited(_checkInitialSharedLink());
 
+    // Attach uninstall-proof persistent vault dir right away if All Files Access is already granted
+    try {
+      final persistentDir = await _bridge.getPersistentDataDir();
+      if (persistentDir != null && persistentDir.isNotEmpty) {
+        _storage.setPersistentStateDir(persistentDir);
+      }
+    } catch (_) {}
+
     // Phase 1 (< 5ms): load tiny settings first so theme & Home screen render immediately!
     _settings =
         await _storage.loadSettings().catchError((_) => const AppSettings());
@@ -758,7 +819,9 @@ class DownloadManager extends ChangeNotifier {
         }
       }
       _downloadedMarkers = seeded;
-      unawaited(_storage.saveDownloadedMarkers(_downloadedMarkers));
+      if (seeded.isNotEmpty) {
+        unawaited(_storage.saveDownloadedMarkers(_downloadedMarkers));
+      }
     }
 
     final loadedProfiles = localData[2] as List<CreatorProfileRecord>;
@@ -781,6 +844,9 @@ class DownloadManager extends ChangeNotifier {
     _notifyImmediate();
 
     await refreshPermissions();
+    if (_storage.persistentStateDirPath != null && !_persistentSyncCompleted) {
+      unawaited(syncPersistentVaultAndState());
+    }
 
     // Defer yt-dlp/FFmpeg native init so app startup stays completely snappy.
     // Files & Browser sessions load lazily when user opens File / Settings tabs!
@@ -790,6 +856,111 @@ class DownloadManager extends ChangeNotifier {
         unawaited(ensureEngineInitialized());
       }),
     );
+  }
+
+  /// Connects to the uninstall-proof `Documents/.all_download_vault/state` directory:
+  /// - On a fresh reinstall / clear-data, automatically restores ALL settings,
+  ///   downloaded/skipped markers, artist profile links, Pixiv album tags,
+  ///   per-photo Biasa/Ecchi/NSFW ratings, and history!
+  /// - On first-time activation, mirrors all local state into persistent storage
+  ///   and migrates legacy `Android/data/.../private_vault` files safely!
+  Future<bool> syncPersistentVaultAndState({
+    String? overrideStateDir,
+    bool forceResync = false,
+  }) async {
+    if (_isDisposed || _isSyncingPersistent) return false;
+    if (_persistentSyncCompleted && !forceResync) return true;
+    _isSyncingPersistent = true;
+    try {
+      String? dirPath = overrideStateDir?.trim();
+      if (dirPath == null || dirPath.isEmpty) {
+        dirPath = _storage.persistentStateDirPath;
+      }
+      if (dirPath == null || dirPath.isEmpty) {
+        try {
+          dirPath = await _bridge.getPersistentDataDir();
+        } catch (_) {
+          dirPath = null;
+        }
+      }
+      if (dirPath == null || dirPath.isEmpty) return false;
+
+      _storage.setPersistentStateDir(dirPath);
+      final hasLocalSettings = await _storage.hasLocalSavedSettings();
+      final snapshot = await _storage.loadPersistentSnapshot();
+      if (_isDisposed) return false;
+
+      if (snapshot != null) {
+        if (!hasLocalSettings && snapshot.settings != null) {
+          _settings = snapshot.settings!;
+          themeNotifier.value = _settings.themeMode;
+          _applyRateLimitSettings();
+        }
+        if (snapshot.downloadedMarkers != null &&
+            snapshot.downloadedMarkers!.isNotEmpty) {
+          _downloadedMarkers = {
+            ...snapshot.downloadedMarkers!,
+            ..._downloadedMarkers,
+          };
+        }
+        for (final rec in snapshot.creatorProfiles) {
+          _creatorProfiles.putIfAbsent(rec.lookupKey, () => rec);
+        }
+        snapshot.albumMetadata.forEach((k, v) {
+          _albumMetadata.putIfAbsent(k, () => v);
+        });
+        snapshot.photoRatings.forEach((k, v) {
+          _photoRatings.putIfAbsent(k, () => v);
+        });
+        if (snapshot.history.isNotEmpty) {
+          final existingIds = _items.map((e) => e.id).toSet();
+          final missing = snapshot.history
+              .where((e) => !existingIds.contains(e.id))
+              .toList(growable: false);
+          if (missing.isNotEmpty) {
+            _setItems([..._items, ...missing]);
+          }
+        }
+        _albumMetadataRevision++;
+        _photoRatingsRevision++;
+      }
+
+      _persistentSyncCompleted = true;
+      _notifyImmediate();
+
+      // Mirror the unified state back to BOTH local & persistent storage
+      await Future.wait([
+        _storage.saveSettings(_settings),
+        if (_downloadedMarkers.isNotEmpty || snapshot?.downloadedMarkers != null)
+          _storage.saveDownloadedMarkers(_downloadedMarkers),
+        if (_creatorProfiles.isNotEmpty || snapshot?.creatorProfiles.isNotEmpty == true)
+          _storage.saveCreatorProfiles(_creatorProfiles.values.toList()),
+        if (_albumMetadata.isNotEmpty || snapshot?.albumMetadata.isNotEmpty == true)
+          _storage.saveAlbumMetadata(_albumMetadata),
+        if (_photoRatings.isNotEmpty || snapshot?.photoRatings.isNotEmpty == true)
+          _storage.savePhotoRatings(_photoRatings),
+        if (_items.isNotEmpty || snapshot?.history.isNotEmpty == true)
+          _storage.saveHistory(_items),
+      ]);
+
+      if (overrideStateDir == null) {
+        unawaited(_migrateLegacyVaultAndRefresh());
+      }
+      return true;
+    } catch (_) {
+      return false;
+    } finally {
+      _isSyncingPersistent = false;
+    }
+  }
+
+  Future<void> _migrateLegacyVaultAndRefresh() async {
+    try {
+      await _bridge.migrateLegacyPrivateVault();
+    } catch (_) {}
+    if (!_isDisposed) {
+      await refreshManagedFiles();
+    }
   }
 
   Future<void> ensureEngineInitialized() async {
@@ -825,6 +996,9 @@ class DownloadManager extends ChangeNotifier {
       _permissionStatus = await _bridge.checkPermissions();
       _permissionChecked = true;
       _notifyImmediate();
+      if (_permissionStatus.allFilesGranted && !_persistentSyncCompleted) {
+        unawaited(syncPersistentVaultAndState());
+      }
     } catch (_) {}
     return _permissionStatus;
   }
@@ -834,9 +1008,21 @@ class DownloadManager extends ChangeNotifier {
       _permissionStatus = await _bridge.requestPermissions();
       _permissionChecked = true;
       _notifyImmediate();
-      unawaited(refreshManagedFiles());
+      if (_permissionStatus.allFilesGranted && !_persistentSyncCompleted) {
+        unawaited(syncPersistentVaultAndState());
+      } else {
+        unawaited(refreshManagedFiles());
+      }
     } catch (_) {}
     return _permissionStatus;
+  }
+
+  Future<bool> requestAllFilesAccess() async {
+    try {
+      return await _bridge.requestAllFilesAccess();
+    } catch (_) {
+      return false;
+    }
   }
 
   Future<bool> openAppSettings() async {
