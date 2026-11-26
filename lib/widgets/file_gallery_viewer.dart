@@ -7,8 +7,8 @@ import '../models/managed_file.dart';
 import '../models/media_info.dart';
 import '../services/download_manager.dart';
 
-/// Full-screen, swipeable, pinch-to-zoom gallery viewer for downloaded images
-/// with direct Share, Open Externally, Info, and Delete controls.
+/// Full-screen, swipeable, unclipped pinch-to-zoom & double-tap-to-zoom gallery viewer
+/// for downloaded images with Unlock/Lock, Share, Open Externally, Info, and Delete controls.
 class FileGalleryViewer extends StatefulWidget {
   final DownloadManager manager;
   final List<ManagedFile> images;
@@ -30,6 +30,7 @@ class _FileGalleryViewerState extends State<FileGalleryViewer> {
   late List<ManagedFile> _images;
   late int _currentIndex;
   bool _showChrome = true;
+  bool _isZoomed = false;
 
   @override
   void initState() {
@@ -57,49 +58,38 @@ class _FileGalleryViewerState extends State<FileGalleryViewer> {
       backgroundColor: Colors.black,
       body: Stack(
         children: [
-          // Swipeable & zoomable image pager
-          GestureDetector(
-            onTap: () => setState(() => _showChrome = !_showChrome),
-            child: PageView.builder(
-              controller: _pageController,
-              itemCount: _images.length,
-              onPageChanged: (idx) => setState(() => _currentIndex = idx),
-              itemBuilder: (context, index) {
-                final img = _images[index];
-                return Center(
-                  child: InteractiveViewer(
-                    minScale: 1.0,
-                    maxScale: 4.0,
-                    child: Image.file(
-                      File(img.savedPath),
-                      cacheWidth: 1600,
-                      fit: BoxFit.contain,
-                      errorBuilder: (_, _, _) => const Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Icon(
-                            Icons.broken_image_outlined,
-                            color: Colors.white54,
-                            size: 56,
-                          ),
-                          SizedBox(height: 8),
-                          Text(
-                            'Gagal memuat gambar',
-                            style: TextStyle(color: Colors.white70),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-                );
-              },
-            ),
+          // Full-viewport swipeable & unclipped zoomable pager
+          PageView.builder(
+            controller: _pageController,
+            physics: _isZoomed
+                ? const NeverScrollableScrollPhysics()
+                : const BouncingScrollPhysics(),
+            itemCount: _images.length,
+            onPageChanged: (idx) {
+              setState(() {
+                _currentIndex = idx;
+                _isZoomed = false;
+              });
+            },
+            itemBuilder: (context, index) {
+              final img = _images[index];
+              return _ZoomablePhotoPage(
+                key: ValueKey(img.uniqueKey),
+                filePath: img.savedPath,
+                onTap: () => setState(() => _showChrome = !_showChrome),
+                onZoomStateChanged: (zoomed) {
+                  if (index == _currentIndex && zoomed != _isZoomed) {
+                    setState(() => _isZoomed = zoomed);
+                  }
+                },
+              );
+            },
           ),
 
           // Top bar
           AnimatedPositioned(
             duration: const Duration(milliseconds: 180),
-            top: _showChrome ? 0 : -110,
+            top: _showChrome ? 0 : -120,
             left: 0,
             right: 0,
             child: Container(
@@ -163,7 +153,7 @@ class _FileGalleryViewerState extends State<FileGalleryViewer> {
           // Bottom action bar
           AnimatedPositioned(
             duration: const Duration(milliseconds: 180),
-            bottom: _showChrome ? 0 : -110,
+            bottom: _showChrome ? 0 : -120,
             left: 0,
             right: 0,
             child: Container(
@@ -229,7 +219,6 @@ class _FileGalleryViewerState extends State<FileGalleryViewer> {
         : await widget.manager.lockManagedFiles([target]);
     if (!mounted || count == 0) return;
 
-    // Refresh matching item reference from manager's updated list
     final updated = widget.manager.managedFiles
         .where((f) =>
             f.platformFolder == target.platformFolder &&
@@ -307,11 +296,23 @@ class _FileGalleryViewerState extends State<FileGalleryViewer> {
                     ),
               ),
               const SizedBox(height: 12),
+              _DetailRow(
+                label: 'Status',
+                value: f.isPrivate
+                    ? 'Privat (Tersembunyi dari Galeri & WA)'
+                    : 'Terbuka (Muncul di Galeri & WA)',
+              ),
               _DetailRow(label: 'Nama', value: f.fileName),
-              _DetailRow(label: 'Folder', value: '${f.platformFolder} / ${f.creatorFolder}'),
+              _DetailRow(
+                label: 'Folder',
+                value: '${f.platformFolder} / ${f.creatorFolder}',
+              ),
               _DetailRow(label: 'Ukuran', value: formatBytes(f.fileSize)),
               _DetailRow(label: 'Format', value: f.mimeType),
-              _DetailRow(label: 'Lokasi', value: f.savedPath.isNotEmpty ? f.savedPath : f.relativePath),
+              _DetailRow(
+                label: 'Lokasi',
+                value: f.savedPath.isNotEmpty ? f.savedPath : f.relativePath,
+              ),
               const SizedBox(height: 12),
               Align(
                 alignment: Alignment.centerRight,
@@ -319,7 +320,9 @@ class _FileGalleryViewerState extends State<FileGalleryViewer> {
                   onPressed: () {
                     Clipboard.setData(
                       ClipboardData(
-                        text: f.savedPath.isNotEmpty ? f.savedPath : f.relativePath,
+                        text: f.savedPath.isNotEmpty
+                            ? f.savedPath
+                            : f.relativePath,
                       ),
                     );
                     Navigator.pop(ctx);
@@ -332,6 +335,140 @@ class _FileGalleryViewerState extends State<FileGalleryViewer> {
                 ),
               ),
             ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Full-viewport zoomable image page:
+/// - `InteractiveViewer` occupies the ENTIRE screen (`SizedBox.expand`), NOT just
+///   the image's intrinsic aspect-ratio rectangle, so zooming landscape or portrait
+///   images expands freely into the full screen with ZERO top/bottom/side clipping!
+/// - Double-tap zooms cleanly to 2.6x at the tapped focal point (or resets to 1.0x).
+/// - Panning only locks the parent PageView while zoomed (> 1.02x).
+class _ZoomablePhotoPage extends StatefulWidget {
+  final String filePath;
+  final VoidCallback onTap;
+  final ValueChanged<bool> onZoomStateChanged;
+
+  const _ZoomablePhotoPage({
+    super.key,
+    required this.filePath,
+    required this.onTap,
+    required this.onZoomStateChanged,
+  });
+
+  @override
+  State<_ZoomablePhotoPage> createState() => _ZoomablePhotoPageState();
+}
+
+class _ZoomablePhotoPageState extends State<_ZoomablePhotoPage>
+    with SingleTickerProviderStateMixin {
+  final TransformationController _controller = TransformationController();
+  late final AnimationController _animController;
+  Animation<Matrix4>? _matrixAnimation;
+  TapDownDetails? _doubleTapDetails;
+  bool _zoomed = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _animController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 220),
+    )..addListener(() {
+        if (_matrixAnimation != null) {
+          _controller.value = _matrixAnimation!.value;
+        }
+      });
+    _controller.addListener(_handleMatrixChange);
+  }
+
+  @override
+  void dispose() {
+    _controller.removeListener(_handleMatrixChange);
+    _animController.dispose();
+    _controller.dispose();
+    super.dispose();
+  }
+
+  void _handleMatrixChange() {
+    final scale = _controller.value.getMaxScaleOnAxis();
+    final nowZoomed = scale > 1.02;
+    if (nowZoomed != _zoomed) {
+      _zoomed = nowZoomed;
+      widget.onZoomStateChanged(nowZoomed);
+    }
+  }
+
+  void _handleDoubleTap() {
+    final currentScale = _controller.value.getMaxScaleOnAxis();
+    final Matrix4 target;
+    if (currentScale > 1.05) {
+      target = Matrix4.identity();
+    } else {
+      const zoomScale = 2.6;
+      final tapPos = _doubleTapDetails?.localPosition ??
+          Offset(
+            MediaQuery.sizeOf(context).width / 2,
+            MediaQuery.sizeOf(context).height / 2,
+          );
+      target = Matrix4.identity()
+        ..translateByDouble(
+          -tapPos.dx * (zoomScale - 1),
+          -tapPos.dy * (zoomScale - 1),
+          0,
+          1,
+        )
+        ..scaleByDouble(zoomScale, zoomScale, 1, 1);
+    }
+
+    _matrixAnimation = Matrix4Tween(
+      begin: _controller.value,
+      end: target,
+    ).animate(
+      CurvedAnimation(parent: _animController, curve: Curves.easeOutCubic),
+    );
+    _animController.forward(from: 0);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: widget.onTap,
+      onDoubleTapDown: (d) => _doubleTapDetails = d,
+      onDoubleTap: _handleDoubleTap,
+      child: InteractiveViewer(
+        transformationController: _controller,
+        minScale: 1.0,
+        maxScale: 5.0,
+        clipBehavior: Clip.none,
+        panEnabled: _zoomed,
+        child: SizedBox.expand(
+          child: Center(
+            child: Image.file(
+              File(widget.filePath),
+              cacheWidth: 2048,
+              fit: BoxFit.contain,
+              errorBuilder: (_, _, _) => const Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(
+                    Icons.broken_image_outlined,
+                    color: Colors.white54,
+                    size: 56,
+                  ),
+                  SizedBox(height: 8),
+                  Text(
+                    'Gagal memuat gambar',
+                    style: TextStyle(color: Colors.white70),
+                  ),
+                ],
+              ),
+            ),
           ),
         ),
       ),
@@ -358,7 +495,7 @@ class _ViewerActionBtn extends StatelessWidget {
       onTap: onTap,
       borderRadius: BorderRadius.circular(12),
       child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 8),
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
