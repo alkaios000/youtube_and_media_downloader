@@ -48,6 +48,7 @@ class SavedFileResult {
   final String creatorFolder;
   final String albumFolder;
   final bool isPrivate;
+  final bool skipped;
 
   const SavedFileResult({
     required this.savedPath,
@@ -60,6 +61,7 @@ class SavedFileResult {
     required this.creatorFolder,
     this.albumFolder = '',
     this.isPrivate = false,
+    this.skipped = false,
   });
 
   factory SavedFileResult.fromMap(Map<dynamic, dynamic> map) {
@@ -74,6 +76,7 @@ class SavedFileResult {
       creatorFolder: map['creatorFolder']?.toString() ?? 'Umum',
       albumFolder: map['albumFolder']?.toString() ?? '',
       isPrivate: map['isPrivate'] as bool? ?? false,
+      skipped: map['skipped'] as bool? ?? false,
     );
   }
 }
@@ -523,6 +526,29 @@ class NativeBridge {
       'contentUri': contentUri,
     });
     return ok ?? false;
+  }
+
+  Future<SavedFileResult?> findExistingFile({
+    required String fileName,
+    String? mimeType,
+    required String platformFolder,
+    required String creatorFolder,
+    String? albumFolder,
+    bool checkPrivateVault = true,
+  }) async {
+    final res = await _channel.invokeMethod<Map<dynamic, dynamic>>(
+      'findExistingFile',
+      {
+        'fileName': fileName,
+        'mimeType': mimeType,
+        'platformFolder': platformFolder,
+        'creatorFolder': creatorFolder,
+        'albumFolder': albumFolder,
+        'checkPrivateVault': checkPrivateVault,
+      },
+    );
+    if (res == null) return null;
+    return SavedFileResult.fromMap(res);
   }
 
   Future<String?> getInitialSharedText() async {

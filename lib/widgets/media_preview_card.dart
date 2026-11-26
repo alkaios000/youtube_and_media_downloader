@@ -41,8 +41,16 @@ class _MediaPreviewCardState extends State<MediaPreviewCard> {
   MediaFormatOption? _selectedOption;
   final Set<String> _selectedIds = {};
   final Set<String> _unmarkSelectedIds = {};
+  final TextEditingController _profileSearchController = TextEditingController();
+  String _profileSearch = '';
   bool _bulkAudioOnly = false;
   bool _isUnmarkMode = false;
+
+  @override
+  void dispose() {
+    _profileSearchController.dispose();
+    super.dispose();
+  }
 
   bool get _strictLockMarked => widget.info.platform == MediaPlatform.pixiv;
 
@@ -79,6 +87,8 @@ class _MediaPreviewCardState extends State<MediaPreviewCard> {
         (widget.info.options.isNotEmpty ? widget.info.options.first : null);
     _selectedIds.clear();
     _unmarkSelectedIds.clear();
+    _profileSearchController.clear();
+    _profileSearch = '';
     _isUnmarkMode = false;
     _bulkAudioOnly = false;
 
@@ -258,10 +268,19 @@ class _MediaPreviewCardState extends State<MediaPreviewCard> {
   Widget _buildBulkProfileCard(BuildContext context) {
     final theme = Theme.of(context);
     final info = widget.info;
-    final items = info.selectableItems;
-    final hasVideoItems = items.any((i) => i.kind == MediaKind.video);
+    final allItems = info.selectableItems;
+    final query = _profileSearch.trim().toLowerCase();
+    final items = query.isEmpty
+        ? allItems
+        : allItems
+            .where((e) =>
+                e.title.toLowerCase().contains(query) ||
+                e.badgeLabel.toLowerCase().contains(query) ||
+                (e.pixivIllustId?.contains(query) ?? false))
+            .toList(growable: false);
+    final hasVideoItems = allItems.any((i) => i.kind == MediaKind.video);
 
-    final downloadedItems = items.where(_isItemMarked).toList();
+    final downloadedItems = allItems.where(_isItemMarked).toList();
     final downloadedCount = downloadedItems.length;
     final eligibleItems = items.where((e) => !_isItemLocked(e)).toList();
     final undownloadedItems = items.where((e) => !_isItemMarked(e)).toList();
@@ -335,8 +354,8 @@ class _MediaPreviewCardState extends State<MediaPreviewCard> {
               else
                 _DownloadedNoticeStrip(
                   message: _strictLockMarked
-                      ? '$downloadedCount/${items.length} sudah diunduh (terkunci dari unduh ulang)'
-                      : '$downloadedCount dari ${items.length} media sudah pernah diunduh',
+                      ? '$downloadedCount/${allItems.length} sudah diunduh (terkunci dari unduh ulang)'
+                      : '$downloadedCount dari ${allItems.length} media sudah pernah diunduh',
                   showBulkPickBtn: downloadedCount > 1 && widget.onUnmarkKeys != null,
                   onPickBulkUnmark: () {
                     setState(() {
@@ -345,7 +364,7 @@ class _MediaPreviewCardState extends State<MediaPreviewCard> {
                     });
                   },
                   onClearAll: widget.onUnmarkKeys != null
-                      ? () => _confirmUnmarkAll(context, items, downloadedCount)
+                      ? () => _confirmUnmarkAll(context, allItems, downloadedCount)
                       : null,
                 ),
             ],
@@ -437,13 +456,47 @@ class _MediaPreviewCardState extends State<MediaPreviewCard> {
               ],
             ],
 
+            if (allItems.length > 6) ...[
+              const SizedBox(height: 10),
+              TextField(
+                controller: _profileSearchController,
+                onChanged: (v) => setState(() => _profileSearch = v),
+                decoration: InputDecoration(
+                  isDense: true,
+                  hintText: 'Cari judul atau ID karya ${info.author}...',
+                  prefixIcon: const Icon(Icons.search_rounded, size: 20),
+                  suffixIcon: _profileSearch.isNotEmpty
+                      ? IconButton(
+                          onPressed: () => setState(() {
+                            _profileSearchController.clear();
+                            _profileSearch = '';
+                          }),
+                          icon: const Icon(Icons.close_rounded, size: 18),
+                        )
+                      : null,
+                ),
+              ),
+            ],
+
             const SizedBox(height: 12),
 
-            _buildAdaptiveSelectableGrid(
-              context,
-              items: items,
-              aspectRatio: 0.82,
-            ),
+            if (items.isEmpty)
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 24),
+                child: Text(
+                  'Tidak ada karya yang cocok dengan "$_profileSearch".',
+                  textAlign: TextAlign.center,
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: theme.colorScheme.onSurfaceVariant,
+                  ),
+                ),
+              )
+            else
+              _buildAdaptiveSelectableGrid(
+                context,
+                items: items,
+                aspectRatio: 0.82,
+              ),
 
             const SizedBox(height: 14),
             if (_isUnmarkMode)
@@ -455,7 +508,7 @@ class _MediaPreviewCardState extends State<MediaPreviewCard> {
                       child: FilledButton.icon(
                         onPressed: _unmarkSelectedIds.isEmpty
                             ? null
-                            : () => _executeBulkUnmarkSelected(items),
+                            : () => _executeBulkUnmarkSelected(allItems),
                         style: FilledButton.styleFrom(
                           backgroundColor: theme.colorScheme.error,
                           foregroundColor: Colors.white,
@@ -479,7 +532,7 @@ class _MediaPreviewCardState extends State<MediaPreviewCard> {
                     height: 48,
                     child: OutlinedButton(
                       onPressed: () =>
-                          _confirmUnmarkAll(context, items, downloadedCount),
+                          _confirmUnmarkAll(context, allItems, downloadedCount),
                       style: OutlinedButton.styleFrom(
                         foregroundColor: theme.colorScheme.error,
                         side: BorderSide(color: theme.colorScheme.error),
@@ -499,7 +552,7 @@ class _MediaPreviewCardState extends State<MediaPreviewCard> {
                   onPressed: _selectedIds.isEmpty
                       ? null
                       : () {
-                          final chosen = items
+                          final chosen = allItems
                               .where((e) =>
                                   _selectedIds.contains(e.id) &&
                                   !_isItemLocked(e))

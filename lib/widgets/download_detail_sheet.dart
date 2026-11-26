@@ -424,6 +424,11 @@ class _SubFileRow extends StatelessWidget {
       case DownloadStatus.saving:
         return 'Menyimpan ke galeri...';
       case DownloadStatus.completed:
+        if (file.speedText.isNotEmpty) {
+          return file.downloadedBytes > 0
+              ? '${file.speedText} • ${formatBytes(file.downloadedBytes)}'
+              : file.speedText;
+        }
         return file.downloadedBytes > 0
             ? 'Selesai • ${formatBytes(file.downloadedBytes)}'
             : 'Selesai';

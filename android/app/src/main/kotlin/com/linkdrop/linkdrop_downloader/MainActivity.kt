@@ -411,6 +411,28 @@ class MainActivity : FlutterActivity() {
                         result.success(exists)
                     }
 
+                    "findExistingFile" -> {
+                        val fileName = call.argument<String>("fileName") ?: ""
+                        val mimeType = call.argument<String>("mimeType")
+                        val platformFolder = call.argument<String>("platformFolder") ?: "Lainnya"
+                        val creatorFolder = call.argument<String>("creatorFolder") ?: "Umum"
+                        val albumFolder = call.argument<String>("albumFolder")
+                        val checkPrivateVault = call.argument<Boolean>("checkPrivateVault") ?: true
+                        if (fileName.isBlank()) {
+                            result.success(null)
+                            return@setMethodCallHandler
+                        }
+                        bridge.findExistingFile(
+                            fileName = fileName,
+                            mimeType = mimeType,
+                            platformFolder = platformFolder,
+                            creatorFolder = creatorFolder,
+                            albumFolder = albumFolder,
+                            checkPrivateVault = checkPrivateVault,
+                            onResult = { existing -> result.success(existing) },
+                        )
+                    }
+
                     "getInitialSharedText" -> {
                         val pending = initialSharedText
                         initialSharedText = null

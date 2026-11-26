@@ -73,10 +73,12 @@ class FilesScreen extends StatefulWidget {
 
 class _FilesScreenState extends State<FilesScreen> {
   final ScrollController _scrollController = ScrollController();
+  final TextEditingController _searchController = TextEditingController();
   final GlobalKey _viewportKey = GlobalKey();
 
   String? _selectedPlatformFolder;
   String? _selectedCreatorFolder;
+  String _searchQuery = '';
   _FileViewMode _viewMode = _FileViewMode.gallery;
 
   // Multi-select & Drag-select state (works for both Pixiv albums & loose files!)
@@ -95,7 +97,13 @@ class _FilesScreenState extends State<FilesScreen> {
   void dispose() {
     _stopAutoScroll();
     _scrollController.dispose();
+    _searchController.dispose();
     super.dispose();
+  }
+
+  void _clearSearch() {
+    _searchController.clear();
+    _searchQuery = '';
   }
 
   bool get _isPixivPlatform =>
@@ -140,6 +148,7 @@ class _FilesScreenState extends State<FilesScreen> {
       return;
     }
     setState(() {
+      _clearSearch();
       if (_selectedCreatorFolder != null) {
         _selectedCreatorFolder = null;
       } else if (_selectedPlatformFolder != null) {
@@ -340,13 +349,26 @@ class _FilesScreenState extends State<FilesScreen> {
         : const <ManagedFile>[];
 
     final isPixivAlbumView = inCreatorFolder && _isPixivPlatform;
-    final pixivAlbums = isPixivAlbumView
+    final trimmedQuery = _searchQuery.trim().toLowerCase();
+
+    final allPixivAlbums = isPixivAlbumView
         ? _groupIntoPixivAlbums(folderFiles)
         : const <_PixivAlbumGroup>[];
+    final pixivAlbums = (isPixivAlbumView && trimmedQuery.isNotEmpty)
+        ? allPixivAlbums
+            .where((a) => a.albumName.toLowerCase().contains(trimmedQuery))
+            .toList(growable: false)
+        : allPixivAlbums;
+
+    final visibleFolderFiles = (!isPixivAlbumView && trimmedQuery.isNotEmpty)
+        ? folderFiles
+            .where((f) => f.fileName.toLowerCase().contains(trimmedQuery))
+            .toList(growable: false)
+        : folderFiles;
 
     _activeSelectableKeys = isPixivAlbumView
         ? pixivAlbums.map((a) => a.albumName).toList(growable: false)
-        : folderFiles.map((f) => f.uniqueKey).toList(growable: false);
+        : visibleFolderFiles.map((f) => f.uniqueKey).toList(growable: false);
 
     // Prune stale selected keys
     if (_selectedKeys.isNotEmpty && inCreatorFolder) {
@@ -436,6 +458,7 @@ class _FilesScreenState extends State<FilesScreen> {
                                           onTap: () => setState(() {
                                             _selectedPlatformFolder = null;
                                             _selectedCreatorFolder = null;
+                                            _clearSearch();
                                             _isSelectionMode = false;
                                             _selectedKeys.clear();
                                           }),
@@ -449,6 +472,7 @@ class _FilesScreenState extends State<FilesScreen> {
                                                 _selectedCreatorFolder == null,
                                             onTap: () => setState(() {
                                               _selectedCreatorFolder = null;
+                                              _clearSearch();
                                               _isSelectionMode = false;
                                               _selectedKeys.clear();
                                             }),
@@ -478,13 +502,41 @@ class _FilesScreenState extends State<FilesScreen> {
                                 ],
                               ],
                             ),
+                            if (_selectedPlatformFolder != null) ...[
+                              const SizedBox(height: 10),
+                              TextField(
+                                controller: _searchController,
+                                onChanged: (v) =>
+                                    setState(() => _searchQuery = v),
+                                decoration: InputDecoration(
+                                  isDense: true,
+                                  hintText: _selectedCreatorFolder == null
+                                      ? (_isPixivPlatform
+                                          ? 'Cari artist Pixiv...'
+                                          : 'Cari kreator $_selectedPlatformFolder...')
+                                      : (isPixivAlbumView
+                                          ? 'Cari album / karya $_selectedCreatorFolder...'
+                                          : 'Cari file $_selectedCreatorFolder...'),
+                                  prefixIcon: const Icon(Icons.search_rounded, size: 20),
+                                  suffixIcon: _searchQuery.isNotEmpty
+                                      ? IconButton(
+                                          onPressed: () =>
+                                              setState(_clearSearch),
+                                          icon: const Icon(Icons.close_rounded,
+                                              size: 18),
+                                          tooltip: 'Hapus pencarian',
+                                        )
+                                      : null,
+                                ),
+                              ),
+                            ],
                             if (inCreatorFolder &&
                                 _activeSelectableKeys.isNotEmpty) ...[
                               const SizedBox(height: 6),
                               Text(
                                 isPixivAlbumView
                                     ? '${pixivAlbums.length} album (${folderFiles.length} foto) • Ketuk album untuk baca • Privat tersembunyi dari Galeri & WA'
-                                    : '${folderFiles.length} item • Tahan & geser jari untuk pilih banyak',
+                                    : '${visibleFolderFiles.length} item • Tahan & geser jari untuk pilih banyak',
                                 style: theme.textTheme.labelSmall?.copyWith(
                                   color: theme.colorScheme.onSurfaceVariant,
                                 ),
@@ -543,13 +595,17 @@ class _FilesScreenState extends State<FilesScreen> {
                       byPlatform[_selectedPlatformFolder!] ?? const {},
                     )
                   else if (isPixivAlbumView)
-                    (_viewMode == _FileViewMode.gallery
-                        ? _buildPixivAlbumsGridSliver(pixivAlbums)
-                        : _buildPixivAlbumsRowSliver(pixivAlbums))
+                    (pixivAlbums.isEmpty
+                        ? _buildEmptySearchSliver(context, 'Album tidak ditemukan')
+                        : (_viewMode == _FileViewMode.gallery
+                            ? _buildPixivAlbumsGridSliver(pixivAlbums)
+                            : _buildPixivAlbumsRowSliver(pixivAlbums)))
+                  else if (visibleFolderFiles.isEmpty)
+                    _buildEmptySearchSliver(context, 'File tidak ditemukan')
                   else if (_viewMode == _FileViewMode.gallery)
-                    _buildFilesGallerySliver(folderFiles)
+                    _buildFilesGallerySliver(visibleFolderFiles)
                   else
-                    _buildFilesRowSliver(folderFiles),
+                    _buildFilesRowSliver(visibleFolderFiles),
                 ],
               ),
             ),
@@ -695,7 +751,10 @@ class _FilesScreenState extends State<FilesScreen> {
             return Card(
               clipBehavior: Clip.antiAlias,
               child: InkWell(
-                onTap: () => setState(() => _selectedPlatformFolder = name),
+                onTap: () => setState(() {
+                  _clearSearch();
+                  _selectedPlatformFolder = name;
+                }),
                 child: Padding(
                   padding: const EdgeInsets.all(14),
                   child: Column(
@@ -795,7 +854,10 @@ class _FilesScreenState extends State<FilesScreen> {
     String platformFolder,
     Map<String, List<ManagedFile>> byCreator,
   ) {
-    final creators = byCreator.keys.toList()
+    final q = _searchQuery.trim().toLowerCase();
+    final creators = byCreator.keys
+        .where((c) => q.isEmpty || c.toLowerCase().contains(q))
+        .toList()
       ..sort((a, b) {
         final aLatest = byCreator[a]!.first.modifiedAt;
         final bLatest = byCreator[b]!.first.modifiedAt;
@@ -803,6 +865,13 @@ class _FilesScreenState extends State<FilesScreen> {
       });
     final platform = MediaPlatformMeta.fromKey(platformFolder);
     final isPixiv = platform == MediaPlatform.pixiv;
+
+    if (creators.isEmpty) {
+      return _buildEmptySearchSliver(
+        context,
+        isPixiv ? 'Artist Pixiv tidak ditemukan' : 'Kreator tidak ditemukan',
+      );
+    }
 
     return SliverPadding(
       padding: const EdgeInsets.fromLTRB(16, 4, 16, 28),
@@ -869,10 +938,49 @@ class _FilesScreenState extends State<FilesScreen> {
               ),
               subtitle: Text(subLine),
               trailing: const Icon(Icons.chevron_right_rounded),
-              onTap: () => setState(() => _selectedCreatorFolder = creator),
+              onTap: () => setState(() {
+                _clearSearch();
+                _selectedCreatorFolder = creator;
+              }),
             ),
           );
         },
+      ),
+    );
+  }
+
+  Widget _buildEmptySearchSliver(BuildContext context, String message) {
+    final theme = Theme.of(context);
+    return SliverFillRemaining(
+      hasScrollBody: false,
+      child: Center(
+        child: Padding(
+          padding: const EdgeInsets.all(28),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                Icons.search_off_rounded,
+                size: 48,
+                color: theme.colorScheme.onSurfaceVariant.withValues(alpha: 0.55),
+              ),
+              const SizedBox(height: 10),
+              Text(
+                message,
+                style: theme.textTheme.titleSmall?.copyWith(
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+              const SizedBox(height: 4),
+              Text(
+                'Coba kata kunci lain atau hapus pencarian.',
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: theme.colorScheme.onSurfaceVariant,
+                ),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }

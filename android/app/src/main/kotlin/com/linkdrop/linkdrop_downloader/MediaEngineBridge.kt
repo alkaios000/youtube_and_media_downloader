@@ -557,7 +557,30 @@ class MediaEngineBridge(private val context: Context) {
         }
         targetDir.mkdirs()
 
-        val destFile = resolveUniqueFile(targetDir, cleanName)
+        val destFile = File(targetDir, cleanName)
+        val folderLabel = if (safeAlbum.isNotEmpty()) {
+            "Privat/$safePlatform/$safeCreator/$safeAlbum"
+        } else {
+            "Privat/$safePlatform/$safeCreator"
+        }
+
+        // Skip if identical file already exists — never create "file (1)" duplicates!
+        if (destFile.exists() && destFile.isFile && destFile.length() > 0L) {
+            return mapOf(
+                "savedPath" to destFile.absolutePath,
+                "contentUri" to "",
+                "fileName" to destFile.name,
+                "fileSize" to destFile.length(),
+                "mimeType" to mimeType,
+                "folderLabel" to folderLabel,
+                "platformFolder" to safePlatform,
+                "creatorFolder" to safeCreator,
+                "albumFolder" to safeAlbum,
+                "isPrivate" to true,
+                "skipped" to true,
+            )
+        }
+
         FileInputStream(sourceFile).use { input ->
             FileOutputStream(destFile).use { output ->
                 input.copyTo(output, bufferSize = 64 * 1024)
@@ -565,12 +588,6 @@ class MediaEngineBridge(private val context: Context) {
         }
         val nowMs = System.currentTimeMillis()
         runCatching { destFile.setLastModified(nowMs) }
-
-        val folderLabel = if (safeAlbum.isNotEmpty()) {
-            "Privat/$safePlatform/$safeCreator/$safeAlbum"
-        } else {
-            "Privat/$safePlatform/$safeCreator"
-        }
 
         return mapOf(
             "savedPath" to destFile.absolutePath,
@@ -583,7 +600,236 @@ class MediaEngineBridge(private val context: Context) {
             "creatorFolder" to safeCreator,
             "albumFolder" to safeAlbum,
             "isPrivate" to true,
+            "skipped" to false,
         )
+    }
+
+    /**
+     * Checks asynchronously whether the target file already exists in Private Vault
+     * or Public MediaStore so downloads can be skipped cleanly before fetching bytes
+     * (never overwriting or producing `(1)` duplicate files).
+     */
+    fun findExistingFile(
+        fileName: String,
+        mimeType: String?,
+        platformFolder: String,
+        creatorFolder: String,
+        albumFolder: String? = null,
+        checkPrivateVault: Boolean = true,
+        onResult: (Map<String, Any?>?) -> Unit,
+    ) {
+        scope.launch {
+            val found = runCatching {
+                findExistingFileSync(
+                    requestedName = fileName,
+                    mimeType = mimeType,
+                    platformFolder = platformFolder,
+                    creatorFolder = creatorFolder,
+                    albumFolder = albumFolder,
+                    checkPrivateVault = checkPrivateVault,
+                )
+            }.getOrNull()
+            postToMain { onResult(found) }
+        }
+    }
+
+    private fun findExistingFileSync(
+        requestedName: String,
+        mimeType: String?,
+        platformFolder: String,
+        creatorFolder: String,
+        albumFolder: String?,
+        checkPrivateVault: Boolean,
+    ): Map<String, Any?>? {
+        val cleanName = sanitizeFileName(requestedName)
+        val resolvedMime = mimeType?.takeIf { it.isNotBlank() } ?: detectMimeType(cleanName)
+        val safePlatform = sanitizeFolderSegment(platformFolder, "Lainnya")
+        val safeCreator = sanitizeFolderSegment(creatorFolder, "Umum")
+        val safeAlbum = albumFolder?.takeIf { it.isNotBlank() }?.let {
+            sanitizeFolderSegment(it, "")
+        }.orEmpty()
+
+        // 1. Check Private Vault (with album subfolder and without)
+        if (checkPrivateVault) {
+            val vault = privateVaultRoot()
+            val candidateDirs = buildList {
+                if (safeAlbum.isNotEmpty()) {
+                    add(File(File(File(vault, safePlatform), safeCreator), safeAlbum) to "Privat/$safePlatform/$safeCreator/$safeAlbum")
+                }
+                add(File(File(vault, safePlatform), safeCreator) to "Privat/$safePlatform/$safeCreator")
+            }
+            for ((dir, label) in candidateDirs) {
+                val f = File(dir, cleanName)
+                if (f.exists() && f.isFile && f.length() > 0L) {
+                    return mapOf(
+                        "savedPath" to f.absolutePath,
+                        "contentUri" to "",
+                        "fileName" to f.name,
+                        "fileSize" to f.length(),
+                        "mimeType" to resolvedMime,
+                        "folderLabel" to label,
+                        "platformFolder" to safePlatform,
+                        "creatorFolder" to safeCreator,
+                        "albumFolder" to safeAlbum,
+                        "isPrivate" to true,
+                        "skipped" to true,
+                    )
+                }
+            }
+        }
+
+        // 2. Check Public Storage (both with album subfolder and legacy flat creator folder)
+        val existingPublic = findExistingPublicFile(
+            cleanName = cleanName,
+            mimeType = resolvedMime,
+            safePlatform = safePlatform,
+            safeCreator = safeCreator,
+            safeAlbum = safeAlbum,
+        )
+        if (existingPublic != null) return existingPublic
+
+        if (safeAlbum.isNotEmpty()) {
+            val existingFlatPublic = findExistingPublicFile(
+                cleanName = cleanName,
+                mimeType = resolvedMime,
+                safePlatform = safePlatform,
+                safeCreator = safeCreator,
+                safeAlbum = "",
+            )
+            if (existingFlatPublic != null) return existingFlatPublic
+        }
+
+        return null
+    }
+
+    private fun findExistingPublicFile(
+        cleanName: String,
+        mimeType: String,
+        safePlatform: String,
+        safeCreator: String,
+        safeAlbum: String,
+    ): Map<String, Any?>? {
+        val subFolder = if (safeAlbum.isNotEmpty()) {
+            "all_download/$safePlatform/$safeCreator/$safeAlbum"
+        } else {
+            "all_download/$safePlatform/$safeCreator"
+        }
+        val isVideo = mimeType.startsWith("video/", ignoreCase = true)
+        val isImage = mimeType.startsWith("image/", ignoreCase = true)
+        val isAudio = mimeType.startsWith("audio/", ignoreCase = true)
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val resolver = context.contentResolver
+            val targets = when {
+                isVideo -> listOf(
+                    Triple(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, "${Environment.DIRECTORY_PICTURES}/$subFolder/", "Pictures/$subFolder"),
+                    Triple(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, "${Environment.DIRECTORY_MOVIES}/$subFolder/", "Movies/$subFolder"),
+                    Triple(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, "${Environment.DIRECTORY_DCIM}/$subFolder/", "DCIM/$subFolder"),
+                )
+                isImage -> listOf(
+                    Triple(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, "${Environment.DIRECTORY_PICTURES}/$subFolder/", "Pictures/$subFolder"),
+                    Triple(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, "${Environment.DIRECTORY_DCIM}/$subFolder/", "DCIM/$subFolder"),
+                )
+                isAudio -> listOf(
+                    Triple(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, "${Environment.DIRECTORY_MUSIC}/$subFolder/", "Music/$subFolder"),
+                )
+                else -> listOf(
+                    Triple(MediaStore.Downloads.EXTERNAL_CONTENT_URI, "${Environment.DIRECTORY_DOWNLOADS}/$subFolder/", "Download/$subFolder"),
+                )
+            }
+
+            @Suppress("DEPRECATION")
+            val projection = arrayOf(
+                MediaStore.MediaColumns._ID,
+                MediaStore.MediaColumns.DISPLAY_NAME,
+                MediaStore.MediaColumns.SIZE,
+                MediaStore.MediaColumns.DATA,
+            )
+
+            for ((collectionUri, relWithSlash, folderLabel) in targets) {
+                val relNoSlash = relWithSlash.trimEnd('/')
+                val selection = "${MediaStore.MediaColumns.DISPLAY_NAME} = ? AND (${MediaStore.MediaColumns.RELATIVE_PATH} = ? OR ${MediaStore.MediaColumns.RELATIVE_PATH} = ?)"
+                val args = arrayOf(cleanName, relWithSlash, relNoSlash)
+
+                val found = runCatching {
+                    resolver.query(collectionUri, projection, selection, args, null)?.use { cursor ->
+                        if (cursor.moveToFirst()) {
+                            val id = cursor.getLong(cursor.getColumnIndexOrThrow(MediaStore.MediaColumns._ID))
+                            val name = cursor.getString(cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.DISPLAY_NAME)) ?: cleanName
+                            val size = cursor.getLong(cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.SIZE))
+                            @Suppress("DEPRECATION")
+                            val dataIdx = cursor.getColumnIndex(MediaStore.MediaColumns.DATA)
+                            val dataPath = if (dataIdx >= 0) cursor.getString(dataIdx) else null
+                            val uri = ContentUris.withAppendedId(collectionUri, id)
+
+                            val reallyExists = (size > 0L) && (
+                                (!dataPath.isNullOrBlank() && File(dataPath).exists()) ||
+                                    runCatching {
+                                        resolver.openAssetFileDescriptor(uri, "r")?.use { true } ?: false
+                                    }.getOrDefault(false)
+                                )
+                            if (reallyExists) {
+                                mapOf(
+                                    "savedPath" to (dataPath ?: "/storage/emulated/0/$folderLabel/$name"),
+                                    "contentUri" to uri.toString(),
+                                    "fileName" to name,
+                                    "fileSize" to size,
+                                    "mimeType" to mimeType,
+                                    "folderLabel" to folderLabel,
+                                    "platformFolder" to safePlatform,
+                                    "creatorFolder" to safeCreator,
+                                    "albumFolder" to safeAlbum,
+                                    "isPrivate" to false,
+                                    "skipped" to true,
+                                )
+                            } else {
+                                null
+                            }
+                        } else {
+                            null
+                        }
+                    }
+                }.getOrNull()
+                if (found != null) return found
+            }
+            return null
+        } else {
+            @Suppress("DEPRECATION")
+            val rootType = when {
+                isVideo || isImage -> Environment.DIRECTORY_PICTURES
+                isAudio -> Environment.DIRECTORY_MUSIC
+                else -> Environment.DIRECTORY_DOWNLOADS
+            }
+            val folderLabel = when {
+                isVideo || isImage -> "Pictures/$subFolder"
+                isAudio -> "Music/$subFolder"
+                else -> "Download/$subFolder"
+            }
+            @Suppress("DEPRECATION")
+            val dirs = listOf(
+                File(Environment.getExternalStoragePublicDirectory(rootType), subFolder),
+                File(context.getExternalFilesDir(rootType), subFolder),
+            )
+            for (dir in dirs) {
+                val f = File(dir, cleanName)
+                if (f.exists() && f.isFile && f.length() > 0L) {
+                    return mapOf(
+                        "savedPath" to f.absolutePath,
+                        "contentUri" to "",
+                        "fileName" to f.name,
+                        "fileSize" to f.length(),
+                        "mimeType" to mimeType,
+                        "folderLabel" to folderLabel,
+                        "platformFolder" to safePlatform,
+                        "creatorFolder" to safeCreator,
+                        "albumFolder" to safeAlbum,
+                        "isPrivate" to false,
+                        "skipped" to true,
+                    )
+                }
+            }
+            return null
+        }
     }
 
     /**
@@ -725,6 +971,18 @@ class MediaEngineBridge(private val context: Context) {
         val isVideo = mimeType.startsWith("video/", ignoreCase = true)
         val isImage = mimeType.startsWith("image/", ignoreCase = true)
         val isAudio = mimeType.startsWith("audio/", ignoreCase = true)
+
+        // Never overwrite or create "(1)" duplicate copies when the exact file already exists!
+        val existingPublic = findExistingPublicFile(
+            cleanName = cleanName,
+            mimeType = mimeType,
+            safePlatform = safePlatform,
+            safeCreator = safeCreator,
+            safeAlbum = safeAlbum,
+        )
+        if (existingPublic != null) {
+            return existingPublic
+        }
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             val resolver = context.contentResolver
@@ -894,6 +1152,7 @@ class MediaEngineBridge(private val context: Context) {
                     "creatorFolder" to safeCreator,
                     "albumFolder" to safeAlbum,
                     "isPrivate" to false,
+                    "skipped" to false,
                 )
             } catch (t: Throwable) {
                 runCatching { resolver.delete(uri, null, null) }
@@ -921,7 +1180,22 @@ class MediaEngineBridge(private val context: Context) {
                 File(context.getExternalFilesDir(rootType), subFolder).apply { mkdirs() }
             }
 
-            val destFile = resolveUniqueFile(finalDir, cleanName)
+            val destFile = File(finalDir, cleanName)
+            if (destFile.exists() && destFile.isFile && destFile.length() > 0L) {
+                return mapOf(
+                    "savedPath" to destFile.absolutePath,
+                    "contentUri" to "",
+                    "fileName" to destFile.name,
+                    "fileSize" to destFile.length(),
+                    "mimeType" to mimeType,
+                    "folderLabel" to folderLabel,
+                    "platformFolder" to safePlatform,
+                    "creatorFolder" to safeCreator,
+                    "albumFolder" to safeAlbum,
+                    "isPrivate" to false,
+                    "skipped" to true,
+                )
+            }
             FileInputStream(sourceFile).use { input ->
                 FileOutputStream(destFile).use { output ->
                     input.copyTo(output, bufferSize = 64 * 1024)

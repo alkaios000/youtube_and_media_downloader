@@ -946,6 +946,7 @@ class DownloadManager extends ChangeNotifier {
           progress: 100,
           downloadedBytes: saved.fileSize,
           totalBytes: saved.fileSize,
+          speedText: saved.skipped ? 'Dilewati (sudah ada)' : '',
           savedPath: saved.savedPath,
           contentUri: saved.contentUri,
           mimeType: saved.mimeType,
@@ -956,7 +957,9 @@ class DownloadManager extends ChangeNotifier {
           (item) => item.copyWith(
             status: DownloadStatus.completed,
             progress: 100,
-            statusText: 'Tersimpan di ${saved.folderLabel}',
+            statusText: saved.skipped
+                ? 'Dilewati — file sudah ada di ${saved.folderLabel}'
+                : 'Tersimpan di ${saved.folderLabel}',
             savedPath: saved.savedPath,
             contentUri: saved.contentUri,
             fileName: saved.fileName,
@@ -1038,6 +1041,7 @@ class DownloadManager extends ChangeNotifier {
       final fileSpeedBps = List<double>.filled(totalFiles, 0.0);
       SavedFileResult? firstSaved;
       SavedFileResult? lastSaved;
+      int skippedCount = 0;
 
       _updateItem(
         taskId,
@@ -1132,6 +1136,40 @@ class DownloadManager extends ChangeNotifier {
               return;
             }
 
+            final isPixivPrivate = info.platform == MediaPlatform.pixiv;
+            final mime = _mimeForExtension(fileExt, option.kind);
+
+            // Fast pre-download check: if exact file already exists on device
+            // (Private Vault OR Public Gallery), SKIP immediately without downloading or creating "(1)"!
+            try {
+              final existing = await _bridge.findExistingFile(
+                fileName: fileName,
+                mimeType: mime,
+                platformFolder: info.platform.folderName,
+                creatorFolder: info.author,
+                albumFolder: isPixivPrivate ? info.title : null,
+                checkPrivateVault: true,
+              );
+              if (existing != null) {
+                skippedCount++;
+                firstSaved ??= existing;
+                lastSaved = existing;
+                subTasks[i] = subTasks[i].copyWith(
+                  fileName: existing.fileName,
+                  status: DownloadStatus.completed,
+                  progress: 100,
+                  downloadedBytes: existing.fileSize,
+                  totalBytes: existing.fileSize,
+                  speedText: 'Dilewati (sudah ada)',
+                  savedPath: existing.savedPath,
+                  contentUri: existing.contentUri,
+                  mimeType: existing.mimeType,
+                );
+                syncParent(immediate: true);
+                return;
+              }
+            } catch (_) {}
+
             subTasks[i] = subTasks[i].copyWith(
               status: DownloadStatus.downloading,
               progress: 0,
@@ -1217,16 +1255,16 @@ class DownloadManager extends ChangeNotifier {
               );
               syncParent();
 
-              final isPixivPrivate = info.platform == MediaPlatform.pixiv;
               final saved = await _bridge.saveFileToDownloads(
                 sourcePath: tempPath,
                 fileName: fileName,
-                mimeType: _mimeForExtension(fileExt, option.kind),
+                mimeType: mime,
                 platformFolder: info.platform.folderName,
                 creatorFolder: info.author,
                 albumFolder: isPixivPrivate ? info.title : null,
                 isPrivate: isPixivPrivate,
               );
+              if (saved.skipped) skippedCount++;
 
               firstSaved ??= saved;
               lastSaved = saved;
@@ -1237,7 +1275,7 @@ class DownloadManager extends ChangeNotifier {
                 progress: 100,
                 downloadedBytes: saved.fileSize,
                 totalBytes: saved.fileSize,
-                speedText: '',
+                speedText: saved.skipped ? 'Dilewati (sudah ada)' : '',
                 savedPath: saved.savedPath,
                 contentUri: saved.contentUri,
                 mimeType: saved.mimeType,
@@ -1295,14 +1333,26 @@ class DownloadManager extends ChangeNotifier {
       final representative = firstSaved ?? lastSaved;
 
       if (completedSubs.isNotEmpty && representative != null) {
+        final newlySavedCount = completedSubs.length - skippedCount;
         final String doneText;
         if (totalFiles == 1) {
-          doneText = 'Tersimpan di ${representative.folderLabel}';
+          doneText = skippedCount > 0
+              ? 'Dilewati — file sudah ada di ${representative.folderLabel}'
+              : 'Tersimpan di ${representative.folderLabel}';
         } else if (failedSubs.isEmpty) {
-          doneText = '${completedSubs.length} file tersimpan di ${representative.folderLabel}';
+          if (skippedCount == completedSubs.length) {
+            doneText =
+                'Semua ${completedSubs.length} file sudah ada (dilewati)';
+          } else if (skippedCount > 0) {
+            doneText =
+                '$newlySavedCount file baru, $skippedCount sudah ada (dilewati)';
+          } else {
+            doneText =
+                '${completedSubs.length} file tersimpan di ${representative.folderLabel}';
+          }
         } else {
           doneText =
-              '${completedSubs.length}/$totalFiles file tersimpan (${failedSubs.length} gagal)';
+              '${completedSubs.length}/$totalFiles file selesai (${failedSubs.length} gagal)';
         }
 
         _updateItem(
