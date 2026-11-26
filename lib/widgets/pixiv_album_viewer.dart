@@ -1481,12 +1481,9 @@ class _PixivAlbumViewerState extends State<PixivAlbumViewer> {
       ),
     );
     if (ok != true) return;
-    final deleted = await widget.manager.deleteMultipleManagedFiles(targets);
+    await widget.manager.deleteMultipleManagedFiles(targets);
     if (!mounted) return;
     if (_isSelectionMode) _exitSelection();
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text('$deleted foto dihapus.')),
-    );
   }
 
   void _showAlbumTagsSheet(String albumTitle, List<String> tags) {

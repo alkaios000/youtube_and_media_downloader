@@ -2479,12 +2479,9 @@ class _FilesScreenState extends State<FilesScreen> {
     );
     if (ok != true) return;
 
-    final deleted = await widget.manager.deleteMultipleManagedFiles(selected);
+    await widget.manager.deleteMultipleManagedFiles(selected);
     if (!mounted) return;
     if (_isSelectionMode) _exitSelectionMode();
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text('$deleted file berhasil dihapus.')),
-    );
   }
 
   void _showAlbumInfoAndTagsSheet(_PixivAlbumGroup album) {
