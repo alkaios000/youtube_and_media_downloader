@@ -14,22 +14,41 @@ class MediaExtractorService {
     DirectExtractors? directExtractors,
   }) : _direct = directExtractors ?? DirectExtractors();
 
+  DirectExtractors get directExtractors => _direct;
+
   Future<MediaInfo> analyzeLink({
     required String rawInput,
     String? cookiesPath,
   }) async {
-    final cleanUrl = UrlParser.extractUrl(rawInput);
-    if (cleanUrl == null) {
+    final detection = UrlParser.inspect(rawInput);
+    if (detection == null) {
       throw Exception(
-        'Link tidak valid. Tempelkan URL dari YouTube, TikTok, Douyin, Instagram, atau X.',
+        'Link tidak valid. Tempelkan tautan media atau profil (YouTube, TikTok, Douyin, Instagram, X, Pixiv, Facebook).',
       );
     }
 
-    final platform = UrlParser.detectPlatform(cleanUrl);
+    final cleanUrl = detection.cleanUrl;
+    final platform = detection.platform;
 
-    // Strategy 1: Douyin (v.douyin.com / douyin.com / iesdouyin.com)
-    // 1) Fast direct HTML/API attempt -> 2) Native Android Chromium WebView Sniffer
-    // (solves v.douyin.com redirect + Argus JS challenge!) -> 3) yt-dlp fallback.
+    // 1. Pixiv (single artwork OR user profile / username bulk!)
+    if (platform == MediaPlatform.pixiv) {
+      final cookieHeader = await _safeCookieHeader('https://www.pixiv.net/');
+      final pixivInfo = await _direct.extractPixiv(
+        cleanUrl,
+        cookieHeader: cookieHeader,
+      );
+      if (pixivInfo != null) return pixivInfo;
+      throw Exception(
+        'Gagal memuat karya/profil Pixiv. Untuk karya khusus member/R-18, login dulu lewat Pengaturan -> Login Browser (Pixiv).',
+      );
+    }
+
+    // 2. Profile / Playlist Bulk Extraction (YouTube, TikTok, Instagram, X, Facebook, Douyin)
+    if (detection.isBulk) {
+      return _analyzeProfileOrPlaylist(detection, cookiesPath: cookiesPath);
+    }
+
+    // 3. Douyin single post (v.douyin.com / douyin.com / iesdouyin.com)
     if (platform == MediaPlatform.douyin) {
       final directDouyin = await _direct.extractDouyin(cleanUrl);
       if (directDouyin != null && directDouyin.options.isNotEmpty) {
@@ -47,63 +66,101 @@ class MediaExtractorService {
           platform: MediaPlatform.douyin,
           sniffed: sniffed,
           extractorLabel: 'Douyin Browser Engine',
+          strictVideoOnly: false,
         );
         if (fromSniffer != null) return fromSniffer;
-      } catch (_) {
-        // Fall through to yt-dlp fallback
-      }
+      } catch (_) {}
 
       try {
         return await _extractWithYtDlp(cleanUrl, platform, cookiesPath);
       } catch (e) {
         throw Exception(
-          'Gagal mengambil video Douyin ($cleanUrl). Coba login singkat lewat Pengaturan -> Login Browser Douyin, lalu coba lagi.\n(${_friendlyError(e)})',
+          'Gagal mengambil video Douyin. Coba login singkat lewat Pengaturan -> Login Browser (Douyin), lalu ulangi.\n(${_friendlyError(e)})',
         );
       }
     }
 
-    // Strategy 2: Instagram (Reels, Posts, Carousels, /share/ short links)
-    // 1) Canonicalize /share/... -> 2) yt-dlp (uses synced browser cookies too!)
-    // -> 3) Direct GraphQL/Embed -> 4) Native Android Chromium WebView Sniffer!
+    // 4. Instagram single Reel / Post / Carousel
     if (platform == MediaPlatform.instagram) {
       final canonicalUrl = await _direct.resolveInstagramUrl(cleanUrl);
+      final lowerCanon = canonicalUrl.toLowerCase();
+      final isReelUrl = lowerCanon.contains('/reel/') ||
+          lowerCanon.contains('/reels/') ||
+          lowerCanon.contains('/tv/');
 
-      // Try yt-dlp first (fast & supports HD audio+video merge when cookies or public API allow)
+      // Attempt A: yt-dlp (returns real MP4 video+audio for Reels when accessible / logged in)
       try {
         final ytInfo = await _extractWithYtDlp(canonicalUrl, platform, cookiesPath);
         if (ytInfo.options.isNotEmpty) return ytInfo;
-      } catch (_) {
-        // Fall through to direct & WebView extractors
-      }
+      } catch (_) {}
 
-      // Try direct anonymous GraphQL + Embed (handles photos & carousels too)
-      final directIg = await _direct.extractInstagramDirect(canonicalUrl);
+      // Attempt B: Direct GraphQL + Embed (with synced WebView IG cookies! Strictly rejects cover-only photo for Reels!)
+      final igCookie = await _safeCookieHeader('https://www.instagram.com/');
+      final directIg = await _direct.extractInstagramDirect(
+        canonicalUrl,
+        cookieHeader: igCookie,
+      );
       if (directIg != null && directIg.options.isNotEmpty) {
-        return directIg;
+        final hasVideo = directIg.options.any((o) => o.kind == MediaKind.video);
+        if (!isReelUrl || hasVideo) {
+          return directIg;
+        }
       }
 
-      // Fallback to native Android Chromium WebView Sniffer
+      // Attempt C: Native Android Chromium WebView Sniffer (extracts embedded `video_versions` JSON for Reels!)
       try {
         final sniffed = await bridge.sniffMedia(
           url: canonicalUrl,
           platform: 'instagram',
-          timeoutMs: 15000,
+          timeoutMs: 16000,
         );
         final fromSniffer = _buildMediaInfoFromSniff(
           originalUrl: canonicalUrl,
           platform: MediaPlatform.instagram,
           sniffed: sniffed,
           extractorLabel: 'Instagram Browser Engine',
+          strictVideoOnly: isReelUrl,
         );
         if (fromSniffer != null) return fromSniffer;
       } catch (_) {}
 
       throw Exception(
-        'Instagram membatasi akses anonim untuk konten ini. Buka tab Pengaturan -> Login Browser (Instagram) sekali saja, lalu tempel ulang link ini.',
+        isReelUrl
+            ? 'Instagram membatasi stream video Reel ini tanpa login. Tekan tombol Login Browser Instagram sekali saja, lalu coba lagi.'
+            : 'Instagram membatasi akses anonim untuk post ini. Login lewat Pengaturan -> Login Browser (Instagram) sekali saja, lalu ulangi.',
       );
     }
 
-    // Strategy 3: TikTok — try yt-dlp first, fall back to TikWM (slideshows & rate-limits).
+    // 5. Facebook Reel / Watch / Video / Photo
+    if (platform == MediaPlatform.facebook) {
+      final canonicalUrl = await _direct.resolveFacebookUrl(cleanUrl);
+      try {
+        final ytInfo = await _extractWithYtDlp(canonicalUrl, platform, cookiesPath);
+        if (ytInfo.options.isNotEmpty) return ytInfo;
+      } catch (_) {}
+
+      try {
+        final sniffed = await bridge.sniffMedia(
+          url: canonicalUrl,
+          platform: 'facebook',
+          timeoutMs: 16000,
+        );
+        final fromSniffer = _buildMediaInfoFromSniff(
+          originalUrl: canonicalUrl,
+          platform: MediaPlatform.facebook,
+          sniffed: sniffed,
+          extractorLabel: 'Facebook Browser Engine',
+          strictVideoOnly: false,
+        );
+        if (fromSniffer != null) return fromSniffer;
+      } catch (_) {}
+
+      throw Exception(
+        'Gagal mengambil media Facebook. Pastikan postingan bersifat publik, atau login sekali di Pengaturan -> Login Browser (Facebook).',
+      );
+    }
+
+    // 6. TikTok — yt-dlp first, fallback to TikWM (great for photo slideshows & rate-limits)
     if (platform == MediaPlatform.tiktok) {
       try {
         final info = await _extractWithYtDlp(cleanUrl, platform, cookiesPath);
@@ -114,11 +171,11 @@ class MediaExtractorService {
         return fallback;
       }
       throw Exception(
-        'Gagal mengambil media TikTok. Pastikan tautan video publik dan coba lagi.',
+        'Gagal mengambil media TikTok. Pastikan tautan publik dan coba lagi.',
       );
     }
 
-    // Strategy 4: X (Twitter) — yt-dlp first, seamless fallback to vxtwitter/fxtwitter (videos + photos!).
+    // 7. X (Twitter) — yt-dlp first, fallback to vxtwitter/fxtwitter (videos + multi-photo picker!)
     if (platform == MediaPlatform.x) {
       try {
         final info = await _extractWithYtDlp(cleanUrl, platform, cookiesPath);
@@ -133,7 +190,7 @@ class MediaExtractorService {
       );
     }
 
-    // Strategy 5: YouTube and all other supported sites via native yt-dlp engine.
+    // 8. YouTube and other supported sites via native yt-dlp engine
     try {
       return await _extractWithYtDlp(cleanUrl, platform, cookiesPath);
     } catch (e) {
@@ -141,11 +198,131 @@ class MediaExtractorService {
     }
   }
 
+  Future<MediaInfo> _analyzeProfileOrPlaylist(
+    LinkDetection detection, {
+    String? cookiesPath,
+  }) async {
+    final cleanUrl = detection.cleanUrl;
+    final platform = detection.platform;
+
+    // 1. Try yt-dlp --flat-playlist (works on YouTube channels/playlists, TikTok, IG, X, FB, Douyin)
+    try {
+      final rawJson = await bridge.extractProfileItems(
+        url: cleanUrl,
+        cookiesPath: cookiesPath,
+        limit: 30,
+      );
+      final parsed = parseYtDlpFlatPlaylistJson(
+        rawJson,
+        cleanUrl,
+        platform,
+        usernameHint: detection.usernameHint,
+      );
+      if (parsed != null && parsed.selectableItems.isNotEmpty) {
+        return parsed;
+      }
+    } catch (_) {}
+
+    // 2. TikTok profile fallback via TikWM user/posts API
+    if (platform == MediaPlatform.tiktok &&
+        (detection.usernameHint?.isNotEmpty ?? false)) {
+      final ttProfile = await _direct.extractTikTokProfileFallback(
+        cleanUrl,
+        detection.usernameHint!,
+      );
+      if (ttProfile != null && ttProfile.selectableItems.isNotEmpty) {
+        return ttProfile;
+      }
+    }
+
+    throw Exception(
+      'Gagal memuat daftar media dari profil ${platform.label}. Pastikan akun bersifat publik atau login lewat Pengaturan -> Login Browser terlebih dahulu.',
+    );
+  }
+
+  MediaInfo? parseYtDlpFlatPlaylistJson(
+    String rawJson,
+    String originalUrl,
+    MediaPlatform platform, {
+    String? usernameHint,
+  }) {
+    final dynamic decoded = jsonDecode(rawJson);
+    if (decoded is! Map) return null;
+
+    final entries = decoded['entries'];
+    if (entries is! List || entries.isEmpty) return null;
+
+    final creator = (decoded['uploader']?.toString() ??
+            decoded['channel']?.toString() ??
+            decoded['title']?.toString() ??
+            usernameHint ??
+            platform.label)
+        .replaceFirst('@', '')
+        .trim();
+
+    final items = <SelectableMediaItem>[];
+    for (int i = 0; i < entries.length; i++) {
+      final entry = entries[i];
+      if (entry is! Map) continue;
+
+      final id = entry['id']?.toString() ?? '$i';
+      String? entryUrl = entry['webpage_url']?.toString() ?? entry['url']?.toString();
+      if (entryUrl != null && !entryUrl.startsWith('http')) {
+        if (platform == MediaPlatform.youtube) {
+          entryUrl = 'https://www.youtube.com/watch?v=$entryUrl';
+        }
+      }
+      if (entryUrl == null || !entryUrl.startsWith('http')) continue;
+
+      String? thumb = entry['thumbnail']?.toString();
+      if ((thumb == null || thumb.isEmpty) && entry['thumbnails'] is List) {
+        final tList = entry['thumbnails'] as List;
+        if (tList.isNotEmpty && tList.last is Map) {
+          thumb = (tList.last as Map)['url']?.toString();
+        }
+      }
+
+      final title = (entry['title']?.toString() ?? '${platform.label}_$id').trim();
+      final durSec = (entry['duration'] as num?)?.round() ?? 0;
+      final badge = durSec > 0 ? _fmtSec(durSec) : '#${i + 1}';
+
+      items.add(
+        SelectableMediaItem(
+          id: 'bulk_${platform.name}_$id',
+          title: title,
+          thumbnailUrl: thumb,
+          sourcePostUrl: entryUrl,
+          extension: 'mp4',
+          kind: MediaKind.video,
+          engine: DownloadEngine.ytDlp,
+          badgeLabel: badge,
+          author: creator,
+        ),
+      );
+    }
+
+    if (items.isEmpty) return null;
+
+    final collectionTitle = (decoded['title']?.toString() ?? 'Profil $creator').trim();
+    return MediaInfo(
+      originalUrl: originalUrl,
+      platform: platform,
+      title: '$collectionTitle (${items.length} media)',
+      author: creator,
+      thumbnailUrl: items.first.thumbnailUrl,
+      extractorLabel: '${platform.label} Mode Massal',
+      options: const [],
+      selectableItems: items,
+      isBulkProfile: true,
+    );
+  }
+
   MediaInfo? _buildMediaInfoFromSniff({
     required String originalUrl,
     required MediaPlatform platform,
     required SniffedMediaResult sniffed,
     required String extractorLabel,
+    required bool strictVideoOnly,
   }) {
     final headers = <String, String>{
       if (sniffed.userAgent.isNotEmpty) 'User-Agent': sniffed.userAgent,
@@ -154,6 +331,15 @@ class MediaExtractorService {
     };
 
     final options = <MediaFormatOption>[];
+    final selectableItems = <SelectableMediaItem>[];
+
+    final rawTitle = sniffed.title.trim();
+    final title = rawTitle.isNotEmpty
+        ? rawTitle
+        : '${platform.label}_${DateTime.now().millisecondsSinceEpoch}';
+    final author = sniffed.author.trim().isNotEmpty
+        ? sniffed.author.trim()
+        : platform.label;
 
     for (int i = 0; i < sniffed.videos.length && i < 4; i++) {
       final videoUrl = sniffed.videos[i];
@@ -175,8 +361,25 @@ class MediaExtractorService {
       );
     }
 
-    if (sniffed.images.isNotEmpty) {
+    if (!strictVideoOnly && sniffed.images.isNotEmpty) {
       final uniqueImages = sniffed.images.take(15).toList();
+      for (int i = 0; i < uniqueImages.length; i++) {
+        final ext = _guessImageExt(uniqueImages[i]);
+        selectableItems.add(
+          SelectableMediaItem(
+            id: 'sniff_img_$i',
+            title: uniqueImages.length > 1 ? '$title (${i + 1})' : title,
+            thumbnailUrl: uniqueImages[i],
+            directUrl: uniqueImages[i],
+            extension: ext,
+            kind: MediaKind.image,
+            engine: DownloadEngine.directHttp,
+            headers: headers,
+            badgeLabel: 'Foto ${i + 1}',
+            author: author,
+          ),
+        );
+      }
       options.add(
         MediaFormatOption(
           id: 'sniff_images',
@@ -196,13 +399,6 @@ class MediaExtractorService {
 
     if (options.isEmpty) return null;
 
-    final rawTitle = sniffed.title.trim();
-    final title = rawTitle.isNotEmpty
-        ? rawTitle
-        : '${platform.label}_${DateTime.now().millisecondsSinceEpoch}';
-    final author = sniffed.author.trim().isNotEmpty
-        ? sniffed.author.trim()
-        : platform.label;
     final thumb = sniffed.thumbnail.startsWith('http')
         ? sniffed.thumbnail
         : (sniffed.images.isNotEmpty ? sniffed.images.first : null);
@@ -215,8 +411,17 @@ class MediaExtractorService {
       thumbnailUrl: thumb,
       extractorLabel: extractorLabel,
       options: options,
+      selectableItems: selectableItems,
       thumbnailHeaders: headers,
     );
+  }
+
+  Future<String> _safeCookieHeader(String url) async {
+    try {
+      return await bridge.getCookieHeader(url);
+    } catch (_) {
+      return '';
+    }
   }
 
   String _guessImageExt(String url) {
@@ -224,6 +429,12 @@ class MediaExtractorService {
     if (lower.contains('.png')) return 'png';
     if (lower.contains('.webp')) return 'webp';
     return 'jpg';
+  }
+
+  String _fmtSec(int sec) {
+    final m = sec ~/ 60;
+    final s = sec % 60;
+    return '${m.toString().padLeft(2, '0')}:${s.toString().padLeft(2, '0')}';
   }
 
   Future<MediaInfo> _extractWithYtDlp(
@@ -238,7 +449,6 @@ class MediaExtractorService {
     return parseYtDlpJson(rawJson, url, platform);
   }
 
-  /// Parses raw JSON returned by `yt-dlp --dump-single-json`.
   MediaInfo parseYtDlpJson(
     String rawJson,
     String originalUrl,
@@ -251,7 +461,6 @@ class MediaExtractorService {
 
     Map<String, dynamic> data = Map<String, dynamic>.from(decoded);
 
-    // Handle playlists/carousels by picking the first playable entry when top-level has no formats.
     final entries = data['entries'];
     if ((data['formats'] == null || (data['formats'] as List).isEmpty) &&
         entries is List &&
@@ -266,9 +475,11 @@ class MediaExtractorService {
             'Media ${platform.label}')
         .trim();
     final author = (data['uploader']?.toString() ??
+            data['uploader_id']?.toString() ??
             data['channel']?.toString() ??
             data['creator']?.toString() ??
             platform.label)
+        .replaceFirst('@', '')
         .trim();
 
     final durationSec = (data['duration'] as num?)?.round();
@@ -289,7 +500,6 @@ class MediaExtractorService {
 
     final rawFormats = (data['formats'] as List?)?.whereType<Map>().toList() ?? [];
 
-    // Discover best audio size & available video heights
     int? bestAudioBytes;
     final heightToVideoBytes = <int, int>{};
     final detectedHeights = <int>{};
@@ -325,7 +535,6 @@ class MediaExtractorService {
 
     final options = <MediaFormatOption>[];
 
-    // Always offer "Best HD Auto" first
     final maxHeight = detectedHeights.isEmpty
         ? null
         : detectedHeights.reduce((a, b) => a > b ? a : b);
@@ -353,7 +562,6 @@ class MediaExtractorService {
       ),
     );
 
-    // Add clean standard resolution buckets actually supported by this media
     const standardTiers = [2160, 1440, 1080, 720, 480, 360];
     for (final tier in standardTiers) {
       final matchingHeights = detectedHeights
@@ -388,7 +596,6 @@ class MediaExtractorService {
       );
     }
 
-    // Audio extraction presets
     options.add(
       MediaFormatOption(
         id: 'ytdlp_mp3',

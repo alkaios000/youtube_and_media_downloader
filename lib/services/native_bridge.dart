@@ -1,5 +1,7 @@
 import 'package:flutter/services.dart';
 
+import '../models/managed_file.dart';
+
 class EngineStatus {
   final bool initialized;
   final String version;
@@ -20,7 +22,7 @@ class EngineStatus {
         version: 'memuat...',
         ffmpegReady: false,
         aria2cReady: false,
-        downloadFolder: 'Pictures/all_download',
+        downloadFolder: 'Pictures/all_download/<Aplikasi>/<Username>',
       );
 
   factory EngineStatus.fromMap(Map<dynamic, dynamic> map) {
@@ -29,7 +31,8 @@ class EngineStatus {
       version: map['version']?.toString() ?? 'bundled',
       ffmpegReady: map['ffmpegReady'] as bool? ?? false,
       aria2cReady: map['aria2cReady'] as bool? ?? false,
-      downloadFolder: map['downloadFolder']?.toString() ?? 'Pictures/all_download',
+      downloadFolder: map['downloadFolder']?.toString() ??
+          'Pictures/all_download/<Aplikasi>/<Username>',
     );
   }
 }
@@ -41,6 +44,8 @@ class SavedFileResult {
   final int fileSize;
   final String mimeType;
   final String folderLabel;
+  final String platformFolder;
+  final String creatorFolder;
 
   const SavedFileResult({
     required this.savedPath,
@@ -49,6 +54,8 @@ class SavedFileResult {
     required this.fileSize,
     required this.mimeType,
     required this.folderLabel,
+    required this.platformFolder,
+    required this.creatorFolder,
   });
 
   factory SavedFileResult.fromMap(Map<dynamic, dynamic> map) {
@@ -59,6 +66,8 @@ class SavedFileResult {
       fileSize: (map['fileSize'] as num?)?.toInt() ?? 0,
       mimeType: map['mimeType']?.toString() ?? 'video/mp4',
       folderLabel: map['folderLabel']?.toString() ?? 'Pictures/all_download',
+      platformFolder: map['platformFolder']?.toString() ?? 'Lainnya',
+      creatorFolder: map['creatorFolder']?.toString() ?? 'Umum',
     );
   }
 }
@@ -229,7 +238,7 @@ class NativeBridge {
   Future<SniffedMediaResult> sniffMedia({
     required String url,
     required String platform,
-    int timeoutMs = 15000,
+    int timeoutMs = 16000,
   }) async {
     final result = await _channel.invokeMethod<Map<dynamic, dynamic>>(
       'sniffMedia',
@@ -259,7 +268,14 @@ class NativeBridge {
     return {
       'instagram': result?['instagram'] as bool? ?? false,
       'douyin': result?['douyin'] as bool? ?? false,
+      'facebook': result?['facebook'] as bool? ?? false,
+      'pixiv': result?['pixiv'] as bool? ?? false,
     };
+  }
+
+  Future<String> getCookieHeader(String url) async {
+    final res = await _channel.invokeMethod<String>('getCookieHeader', {'url': url});
+    return res ?? '';
   }
 
   Future<bool> clearBrowserSessions() async {
@@ -293,6 +309,22 @@ class NativeBridge {
     return result;
   }
 
+  Future<String> extractProfileItems({
+    required String url,
+    String? cookiesPath,
+    int limit = 30,
+  }) async {
+    final result = await _channel.invokeMethod<String>('extractProfileItems', {
+      'url': url,
+      'cookiesPath': cookiesPath,
+      'limit': limit,
+    });
+    if (result == null || result.trim().isEmpty) {
+      throw Exception('Tidak ada daftar media ditemukan pada profil ini.');
+    }
+    return result;
+  }
+
   Future<SavedFileResult> downloadWithYtDlp({
     required String taskId,
     required String url,
@@ -301,6 +333,8 @@ class NativeBridge {
     required String audioFormat,
     String? cookiesPath,
     required bool useAria2c,
+    required String platformFolder,
+    required String creatorFolder,
   }) async {
     final result = await _channel.invokeMethod<Map<dynamic, dynamic>>(
       'downloadWithYtDlp',
@@ -312,6 +346,8 @@ class NativeBridge {
         'audioFormat': audioFormat,
         'cookiesPath': cookiesPath,
         'useAria2c': useAria2c,
+        'platformFolder': platformFolder,
+        'creatorFolder': creatorFolder,
       },
     );
     if (result == null) {
@@ -331,6 +367,8 @@ class NativeBridge {
     required String sourcePath,
     required String fileName,
     String? mimeType,
+    required String platformFolder,
+    required String creatorFolder,
   }) async {
     final result = await _channel.invokeMethod<Map<dynamic, dynamic>>(
       'saveFileToDownloads',
@@ -338,12 +376,23 @@ class NativeBridge {
         'sourcePath': sourcePath,
         'fileName': fileName,
         'mimeType': mimeType,
+        'platformFolder': platformFolder,
+        'creatorFolder': creatorFolder,
       },
     );
     if (result == null) {
       throw Exception('Gagal menyimpan file ke penyimpanan publik.');
     }
     return SavedFileResult.fromMap(result);
+  }
+
+  Future<List<ManagedFile>> listManagedFiles() async {
+    final result = await _channel.invokeMethod<List<dynamic>>('listManagedFiles');
+    if (result == null) return const [];
+    return result
+        .whereType<Map>()
+        .map(ManagedFile.fromMap)
+        .toList(growable: false);
   }
 
   Future<bool> openFile({

@@ -8,6 +8,7 @@ import 'package:path_provider/path_provider.dart';
 
 import '../models/app_settings.dart';
 import '../models/download_item.dart';
+import '../models/managed_file.dart';
 import '../models/media_info.dart';
 import '../models/media_platform.dart';
 import 'media_extractor_service.dart';
@@ -24,13 +25,17 @@ class DownloadManager extends ChangeNotifier {
   PermissionStatusInfo _permissionStatus = PermissionStatusInfo.unknown();
   AppSettings _settings = const AppSettings();
   List<DownloadItem> _items = [];
+  List<ManagedFile> _managedFiles = [];
 
   bool _isInitializing = true;
   bool _isAnalyzing = false;
   bool _isUpdatingEngine = false;
+  bool _isLoadingFiles = false;
   bool _permissionChecked = false;
   bool _instagramLoggedIn = false;
   bool _douyinLoggedIn = false;
+  bool _facebookLoggedIn = false;
+  bool _pixivLoggedIn = false;
   String? _engineError;
   String? _analyzeError;
   MediaInfo? _currentPreview;
@@ -63,6 +68,7 @@ class DownloadManager extends ChangeNotifier {
   bool get permissionChecked => _permissionChecked;
   AppSettings get settings => _settings;
   List<DownloadItem> get items => List.unmodifiable(_items);
+  List<ManagedFile> get managedFiles => List.unmodifiable(_managedFiles);
   List<DownloadItem> get activeDownloads =>
       _items.where((i) => i.isActive).toList(growable: false);
   List<DownloadItem> get historyItems =>
@@ -70,8 +76,11 @@ class DownloadManager extends ChangeNotifier {
   bool get isInitializing => _isInitializing;
   bool get isAnalyzing => _isAnalyzing;
   bool get isUpdatingEngine => _isUpdatingEngine;
+  bool get isLoadingFiles => _isLoadingFiles;
   bool get instagramLoggedIn => _instagramLoggedIn;
   bool get douyinLoggedIn => _douyinLoggedIn;
+  bool get facebookLoggedIn => _facebookLoggedIn;
+  bool get pixivLoggedIn => _pixivLoggedIn;
   String? get engineError => _engineError;
   String? get analyzeError => _analyzeError;
   MediaInfo? get currentPreview => _currentPreview;
@@ -105,6 +114,7 @@ class DownloadManager extends ChangeNotifier {
 
     await refreshPermissions();
     await refreshBrowserSessions();
+    unawaited(refreshManagedFiles());
 
     try {
       _engineStatus = await _bridge.initEngine();
@@ -117,7 +127,6 @@ class DownloadManager extends ChangeNotifier {
       notifyListeners();
     }
 
-    // Check if app was launched via Android Share Sheet
     try {
       final initialShared = await _bridge.getInitialSharedText();
       if (initialShared != null && initialShared.trim().isNotEmpty) {
@@ -140,6 +149,7 @@ class DownloadManager extends ChangeNotifier {
       _permissionStatus = await _bridge.requestPermissions();
       _permissionChecked = true;
       notifyListeners();
+      unawaited(refreshManagedFiles());
     } catch (_) {}
     return _permissionStatus;
   }
@@ -157,6 +167,8 @@ class DownloadManager extends ChangeNotifier {
       final status = await _bridge.getBrowserSessionStatus();
       _instagramLoggedIn = status['instagram'] ?? false;
       _douyinLoggedIn = status['douyin'] ?? false;
+      _facebookLoggedIn = status['facebook'] ?? false;
+      _pixivLoggedIn = status['pixiv'] ?? false;
       notifyListeners();
     } catch (_) {}
   }
@@ -176,8 +188,23 @@ class DownloadManager extends ChangeNotifier {
       await _bridge.clearBrowserSessions();
       _instagramLoggedIn = false;
       _douyinLoggedIn = false;
+      _facebookLoggedIn = false;
+      _pixivLoggedIn = false;
       notifyListeners();
     } catch (_) {}
+  }
+
+  Future<void> refreshManagedFiles() async {
+    _isLoadingFiles = true;
+    notifyListeners();
+    try {
+      _managedFiles = await _bridge.listManagedFiles();
+    } catch (_) {
+      // Keep previous list if plugin unavailable (e.g. unit tests)
+    } finally {
+      _isLoadingFiles = false;
+      notifyListeners();
+    }
   }
 
   void clearPreview() {
@@ -189,7 +216,8 @@ class DownloadManager extends ChangeNotifier {
   Future<MediaInfo?> analyzeLink(String rawInput) async {
     final cleanUrl = UrlParser.extractUrl(rawInput);
     if (cleanUrl == null) {
-      _analyzeError = 'Tautan tidak valid. Tempel link dari YouTube, TikTok, Douyin, Instagram, atau X.';
+      _analyzeError =
+          'Tautan tidak valid. Tempel link dari YouTube, TikTok, Douyin, Instagram, X, Pixiv, atau Facebook.';
       _currentPreview = null;
       notifyListeners();
       return null;
@@ -219,7 +247,6 @@ class DownloadManager extends ChangeNotifier {
     }
   }
 
-  /// Picks the user's preferred default option from a MediaInfo and downloads immediately.
   MediaFormatOption pickDefaultOption(MediaInfo info) {
     final options = info.options;
     if (options.isEmpty) {
@@ -292,6 +319,199 @@ class DownloadManager extends ChangeNotifier {
     return initialItem;
   }
 
+  /// Downloads ONLY the user-selected photos from a multi-photo post (Pixiv, X, IG, TikTok, Douyin).
+  Future<void> downloadSelectedPhotos(
+    MediaInfo info,
+    List<SelectableMediaItem> selected,
+  ) async {
+    if (selected.isEmpty) return;
+    if (_permissionChecked && !_permissionStatus.granted && _permissionStatus.sdkInt <= 28) {
+      await requestStoragePermissions();
+    }
+
+    final urls = selected
+        .map((e) => e.directUrl)
+        .whereType<String>()
+        .where((u) => u.startsWith('http'))
+        .toList();
+    if (urls.isEmpty) return;
+
+    final first = selected.first;
+    final customOption = MediaFormatOption(
+      id: 'selected_photos_${DateTime.now().millisecondsSinceEpoch}',
+      label: selected.length > 1
+          ? '${selected.length} Foto Terpilih'
+          : 'Foto Terpilih',
+      subtitle: '${first.extension.toUpperCase()} • ${info.author}',
+      extension: first.extension,
+      kind: MediaKind.image,
+      engine: DownloadEngine.directHttp,
+      directUrl: urls.first,
+      galleryUrls: urls,
+      headers: first.headers,
+    );
+
+    await startDownload(info, customOption);
+  }
+
+  /// Bulk downloads selected items from a Profile or Playlist URL (Pixiv, YouTube, TikTok, IG, X, FB, Douyin).
+  /// Runs items sequentially so memory & bandwidth stay stable and every file lands in `<Platform>/<Username>/`.
+  Future<void> startBulkDownloads(
+    MediaInfo collectionInfo,
+    List<SelectableMediaItem> selected, {
+    bool audioOnly = false,
+  }) async {
+    if (selected.isEmpty) return;
+    if (_permissionChecked && !_permissionStatus.granted && _permissionStatus.sdkInt <= 28) {
+      await requestStoragePermissions();
+    }
+
+    final queuedPairs = <(String, SelectableMediaItem)>[];
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
+    final newItems = <DownloadItem>[];
+
+    for (int i = 0; i < selected.length; i++) {
+      final sel = selected[i];
+      final taskId = '${nowMs}_bulk_$i';
+      final isAudio = audioOnly && sel.kind == MediaKind.video;
+      final ext = isAudio ? 'mp3' : sel.extension;
+      final kind = isAudio ? MediaKind.audio : sel.kind;
+
+      newItems.add(
+        DownloadItem(
+          id: taskId,
+          sourceUrl: sel.sourcePostUrl ?? sel.directUrl ?? collectionInfo.originalUrl,
+          platform: collectionInfo.platform,
+          title: sel.title,
+          author: sel.author ?? collectionInfo.author,
+          thumbnailUrl: sel.thumbnailUrl,
+          formatLabel: isAudio ? 'Audio MP3 (Massal)' : 'Massal (${ext.toUpperCase()})',
+          extension: ext,
+          mediaKind: kind,
+          status: DownloadStatus.queued,
+          progress: 0,
+          statusText: 'Dalam antrean massal (${i + 1}/${selected.length})...',
+          createdAt: DateTime.now(),
+        ),
+      );
+      queuedPairs.add((taskId, sel));
+    }
+
+    _items = [...newItems.reversed, ..._items];
+    notifyListeners();
+
+    unawaited(_processBulkQueue(collectionInfo, queuedPairs, audioOnly: audioOnly));
+  }
+
+  Future<void> _processBulkQueue(
+    MediaInfo collectionInfo,
+    List<(String, SelectableMediaItem)> queue, {
+    required bool audioOnly,
+  }) async {
+    final pixivCookie = collectionInfo.platform == MediaPlatform.pixiv
+        ? await _safeCookieHeader('https://www.pixiv.net/')
+        : '';
+
+    for (final (taskId, sel) in queue) {
+      final existing = _items.where((it) => it.id == taskId).firstOrNull;
+      if (existing == null || existing.status == DownloadStatus.cancelled) {
+        continue;
+      }
+
+      _updateItem(
+        taskId,
+        (item) => item.copyWith(
+          status: DownloadStatus.downloading,
+          statusText: 'Memulai unduhan...',
+        ),
+      );
+
+      final itemAuthor = sel.author ?? collectionInfo.author;
+      final singleInfo = MediaInfo(
+        originalUrl: sel.sourcePostUrl ?? sel.directUrl ?? collectionInfo.originalUrl,
+        platform: collectionInfo.platform,
+        title: sel.title,
+        author: itemAuthor,
+        thumbnailUrl: sel.thumbnailUrl,
+        extractorLabel: collectionInfo.extractorLabel,
+        options: const [],
+      );
+
+      // Pixiv artwork inside a profile: expand ALL original full-resolution pages!
+      if (sel.pixivIllustId != null && sel.pixivIllustId!.isNotEmpty) {
+        final origUrls = await _extractor.directExtractors.fetchPixivIllustOriginalUrls(
+          sel.pixivIllustId!,
+          cookieHeader: pixivCookie,
+        );
+        if (origUrls.isEmpty) {
+          _updateItem(
+            taskId,
+            (item) => item.copyWith(
+              status: DownloadStatus.failed,
+              statusText: 'Gagal mengambil halaman Pixiv',
+              errorMessage: 'Karya mungkin khusus member/R-18 (login Pixiv di Pengaturan).',
+            ),
+          );
+          await _storage.saveHistory(_items);
+          continue;
+        }
+        final ext = origUrls.first.toLowerCase().contains('.png') ? 'png' : 'jpg';
+        final opt = MediaFormatOption(
+          id: 'px_bulk_${sel.pixivIllustId}',
+          label: origUrls.length > 1 ? '${origUrls.length} Halaman' : 'Original HD',
+          subtitle: 'Pixiv',
+          extension: ext,
+          kind: MediaKind.image,
+          engine: DownloadEngine.directHttp,
+          directUrl: origUrls.first,
+          galleryUrls: origUrls,
+          headers: sel.headers,
+        );
+        await _runDirectHttpDownload(taskId, singleInfo, opt);
+        continue;
+      }
+
+      if (sel.engine == DownloadEngine.directHttp &&
+          sel.directUrl != null &&
+          sel.directUrl!.startsWith('http')) {
+        final opt = MediaFormatOption(
+          id: 'bulk_direct_${sel.id}',
+          label: sel.extension.toUpperCase(),
+          subtitle: 'Direct',
+          extension: sel.extension,
+          kind: sel.kind,
+          engine: DownloadEngine.directHttp,
+          directUrl: sel.directUrl,
+          galleryUrls: sel.kind == MediaKind.image ? [sel.directUrl!] : const [],
+          headers: sel.headers,
+        );
+        await _runDirectHttpDownload(taskId, singleInfo, opt);
+      } else {
+        final isAudio = audioOnly && sel.kind == MediaKind.video;
+        final opt = MediaFormatOption(
+          id: 'bulk_ytdlp_${sel.id}',
+          label: isAudio ? 'Audio MP3' : 'Video HD MP4',
+          subtitle: 'yt-dlp',
+          extension: isAudio ? 'mp3' : 'mp4',
+          kind: isAudio ? MediaKind.audio : MediaKind.video,
+          engine: DownloadEngine.ytDlp,
+          ytDlpFormatSelector: isAudio
+              ? null
+              : 'bestvideo[vcodec^=avc1][ext=mp4]+bestaudio[ext=m4a]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+        );
+        await _runYtDlpDownload(taskId, singleInfo, opt);
+      }
+    }
+  }
+
+  Future<String> _safeCookieHeader(String url) async {
+    try {
+      return await _bridge.getCookieHeader(url);
+    } catch (_) {
+      return '';
+    }
+  }
+
   Future<void> _runYtDlpDownload(
     String taskId,
     MediaInfo info,
@@ -307,6 +527,8 @@ class DownloadManager extends ChangeNotifier {
         audioFormat: option.extension,
         cookiesPath: cookiesPath,
         useAria2c: _settings.useAria2c,
+        platformFolder: info.platform.folderName,
+        creatorFolder: info.author,
       );
 
       _updateItem(
@@ -324,6 +546,7 @@ class DownloadManager extends ChangeNotifier {
       );
       await _storage.saveHistory(_items);
       await refreshStorageInfo();
+      unawaited(refreshManagedFiles());
     } catch (e) {
       final rawMsg = e.toString();
       final isCancelled = rawMsg.contains('CANCELLED');
@@ -366,8 +589,9 @@ class DownloadManager extends ChangeNotifier {
         final targetUrl = urlsToDownload[i];
         final suffix = urlsToDownload.length > 1 ? '_${i + 1}' : '';
         final safeBase = _sanitizeBaseName(info.title);
-        final fileName = '$safeBase$suffix.${option.extension}';
-        final tempPath = p.join(cacheDir.path, 'direct_${taskId}_$i.${option.extension}');
+        final fileExt = _detectExtFromUrlOrDefault(targetUrl, option.extension);
+        final fileName = '$safeBase$suffix.$fileExt';
+        final tempPath = p.join(cacheDir.path, 'direct_${taskId}_$i.$fileExt');
 
         await _dio.download(
           targetUrl,
@@ -407,7 +631,7 @@ class DownloadManager extends ChangeNotifier {
             status: DownloadStatus.saving,
             statusText: urlsToDownload.length > 1
                 ? 'Menyimpan file ${i + 1}/${urlsToDownload.length}...'
-                : 'Menyimpan ke folder Download...',
+                : 'Menyimpan ke folder ${info.platform.folderName}...',
           ),
         );
 
@@ -415,10 +639,11 @@ class DownloadManager extends ChangeNotifier {
           sourcePath: tempPath,
           fileName: fileName,
           mimeType: option.mimeType,
+          platformFolder: info.platform.folderName,
+          creatorFolder: info.author,
         );
         totalBytesSaved += lastSaved.fileSize;
 
-        // Clean temp file just in case native didn't delete it
         final tempFile = File(tempPath);
         if (await tempFile.exists()) {
           await tempFile.delete().catchError((_) => tempFile);
@@ -436,7 +661,7 @@ class DownloadManager extends ChangeNotifier {
           status: DownloadStatus.completed,
           progress: 100,
           statusText: urlsToDownload.length > 1
-              ? '${urlsToDownload.length} gambar tersimpan di ${finalSaved.folderLabel}'
+              ? '${urlsToDownload.length} file tersimpan di ${finalSaved.folderLabel}'
               : 'Tersimpan di ${finalSaved.folderLabel}',
           savedPath: finalSaved.savedPath,
           contentUri: finalSaved.contentUri,
@@ -447,6 +672,7 @@ class DownloadManager extends ChangeNotifier {
       );
       await _storage.saveHistory(_items);
       await refreshStorageInfo();
+      unawaited(refreshManagedFiles());
     } on DioException catch (e) {
       final cancelled = CancelToken.isCancel(e);
       _updateItem(
@@ -471,6 +697,17 @@ class DownloadManager extends ChangeNotifier {
     } finally {
       _directCancelTokens.remove(taskId);
     }
+  }
+
+  String _detectExtFromUrlOrDefault(String url, String fallback) {
+    final lower = url.toLowerCase();
+    if (fallback == 'jpg' || fallback == 'png' || fallback == 'webp') {
+      if (lower.contains('.png')) return 'png';
+      if (lower.contains('.webp')) return 'webp';
+      if (lower.contains('.gif')) return 'gif';
+      if (lower.contains('.jpg') || lower.contains('.jpeg')) return 'jpg';
+    }
+    return fallback;
   }
 
   void _handleNativeProgress(NativeProgressEvent event) {
@@ -498,7 +735,8 @@ class DownloadManager extends ChangeNotifier {
     if (lower.contains('[merger]') || lower.contains('merging formats')) {
       return 'Menggabungkan video & audio (FFmpeg)...';
     }
-    if (lower.contains('[extractaudio]') || lower.contains('destination:') && lower.contains('.mp3')) {
+    if (lower.contains('[extractaudio]') ||
+        (lower.contains('destination:') && lower.contains('.mp3'))) {
       return 'Mengonversi audio (FFmpeg)...';
     }
     if (progress >= 0) {
@@ -552,12 +790,39 @@ class DownloadManager extends ChangeNotifier {
     );
   }
 
+  Future<bool> openManagedFile(ManagedFile file) async {
+    return _bridge.openFile(
+      filePath: file.savedPath,
+      contentUri: file.contentUri,
+      mimeType: file.mimeType,
+    );
+  }
+
+  Future<bool> shareManagedFile(ManagedFile file) async {
+    return _bridge.shareFile(
+      filePath: file.savedPath,
+      contentUri: file.contentUri,
+      mimeType: file.mimeType,
+      title: file.fileName,
+    );
+  }
+
+  Future<bool> deleteManagedFile(ManagedFile file) async {
+    final ok = await _bridge.deleteFile(
+      filePath: file.savedPath,
+      contentUri: file.contentUri,
+    );
+    await refreshManagedFiles();
+    return ok;
+  }
+
   Future<void> removeHistoryItem(DownloadItem item, {bool deleteFromDevice = false}) async {
     if (deleteFromDevice) {
       await _bridge.deleteFile(
         filePath: item.savedPath,
         contentUri: item.contentUri,
       );
+      unawaited(refreshManagedFiles());
     }
     _items = _items.where((i) => i.id != item.id).toList();
     notifyListeners();

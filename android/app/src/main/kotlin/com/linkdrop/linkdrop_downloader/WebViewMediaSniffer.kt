@@ -45,7 +45,7 @@ class WebViewMediaSniffer(private val context: Context) {
         activity: Activity,
         url: String,
         platform: String,
-        timeoutMs: Long = 15000L,
+        timeoutMs: Long = 16000L,
         onResult: (Map<String, Any?>) -> Unit,
         onError: (String, String) -> Unit,
     ) {
@@ -58,6 +58,12 @@ class WebViewMediaSniffer(private val context: Context) {
             var pageAuthor = ""
             var pageThumb = ""
             var pageLoaded = false
+
+            val lowerInput = url.lowercase()
+            val isStrictVideoUrl = (platform.equals("instagram", ignoreCase = true) &&
+                (lowerInput.contains("/reel/") || lowerInput.contains("/reels/") || lowerInput.contains("/tv/"))) ||
+                (platform.equals("facebook", ignoreCase = true) &&
+                    (lowerInput.contains("/reel/") || lowerInput.contains("/watch") || lowerInput.contains("/videos/")))
 
             val userAgent = if (platform.equals("douyin", ignoreCase = true)) {
                 MOBILE_IOS_UA
@@ -73,7 +79,6 @@ class WebViewMediaSniffer(private val context: Context) {
                 return@post
             }
 
-            // Attach off-screen 1x1 so Chromium actually executes JS, video layout & network requests
             val holder = FrameLayout(activity).apply {
                 alpha = 0f
                 isClickable = false
@@ -107,14 +112,21 @@ class WebViewMediaSniffer(private val context: Context) {
                 exportAllCookiesToNetscapeFile()
 
                 val videos = synchronized(capturedVideos) { capturedVideos.toList() }
-                val images = synchronized(capturedImages) { capturedImages.toList() }
+                // For strict video URLs (like Instagram Reels), NEVER return cover images if no video found!
+                val images = if (isStrictVideoUrl && videos.isEmpty()) {
+                    emptyList()
+                } else {
+                    synchronized(capturedImages) { capturedImages.toList() }
+                }
                 cleanup()
 
                 if (videos.isEmpty() && images.isEmpty()) {
-                    onError(
-                        "SNIFF_EMPTY",
-                        "Tidak menemukan stream video/foto di halaman ini. Konten mungkin memerlukan login (coba Login Browser di Pengaturan).",
-                    )
+                    val hint = if (isStrictVideoUrl) {
+                        "Stream video Reel tidak ditemukan tanpa login. Coba Login Browser di menu Pengaturan lalu ulangi."
+                    } else {
+                        "Tidak menemukan stream video/foto di halaman ini. Konten mungkin memerlukan login (coba Login Browser di Pengaturan)."
+                    }
+                    onError("SNIFF_EMPTY", hint)
                 } else {
                     onResult(
                         mapOf(
@@ -156,7 +168,6 @@ class WebViewMediaSniffer(private val context: Context) {
                         request: WebResourceRequest?,
                     ): Boolean {
                         val target = request?.url?.toString() ?: return false
-                        // Block custom app schemes (snssdk1128://, instagram://, intent://, etc.)
                         if (!target.startsWith("http://") && !target.startsWith("https://")) {
                             return true
                         }
@@ -182,9 +193,8 @@ class WebViewMediaSniffer(private val context: Context) {
                     }
                 }
 
-                // Periodic DOM inspection to grab <video>, <img>, og:tags, & Douyin _ROUTER_DATA
                 val startTime = System.currentTimeMillis()
-                var stableEmptyPolls = 0
+                var stableImagePolls = 0
 
                 val poller = object : Runnable {
                     override fun run() {
@@ -205,7 +215,6 @@ class WebViewMediaSniffer(private val context: Context) {
                             if (finished.get()) return@evaluateJavascript
                             runCatching {
                                 if (!rawJs.isNullOrBlank() && rawJs != "null") {
-                                    // evaluateJavascript wraps string return values in JSON quotes
                                     val unquoted = if (rawJs.startsWith("\"") && rawJs.endsWith("\"")) {
                                         JSONObject("{\"v\":$rawJs}").getString("v")
                                     } else {
@@ -229,12 +238,14 @@ class WebViewMediaSniffer(private val context: Context) {
                                         }
                                     }
 
-                                    val domImages = json.optJSONArray("images")
-                                    if (domImages != null) {
-                                        for (i in 0 until domImages.length()) {
-                                            val img = domImages.optString(i, "").trim()
-                                            if (isValidMediaImage(img, platform)) {
-                                                capturedImages.add(img)
+                                    if (!isStrictVideoUrl) {
+                                        val domImages = json.optJSONArray("images")
+                                        if (domImages != null) {
+                                            for (i in 0 until domImages.length()) {
+                                                val img = domImages.optString(i, "").trim()
+                                                if (isValidMediaImage(img, platform)) {
+                                                    capturedImages.add(img)
+                                                }
                                             }
                                         }
                                     }
@@ -245,12 +256,10 @@ class WebViewMediaSniffer(private val context: Context) {
                             val hasImages = synchronized(capturedImages) { capturedImages.isNotEmpty() }
 
                             if (hasVideos && elapsed >= 1800L) {
-                                // Video stream found and page metadata settled -> finish immediately!
                                 completeNow()
-                            } else if (hasImages && elapsed >= 4500L) {
-                                // Give video 4.5s to load first; if only images exist, return photo post!
-                                stableEmptyPolls++
-                                if (stableEmptyPolls >= 2) {
+                            } else if (!isStrictVideoUrl && hasImages && elapsed >= 5000L) {
+                                stableImagePolls++
+                                if (stableImagePolls >= 2) {
                                     completeNow()
                                 } else {
                                     mainHandler.postDelayed(this, 800L)
@@ -284,11 +293,15 @@ class WebViewMediaSniffer(private val context: Context) {
             val targetUrl = when (platform.lowercase()) {
                 "douyin" -> "https://www.douyin.com/"
                 "tiktok" -> "https://www.tiktok.com/login"
+                "facebook" -> "https://m.facebook.com/login/"
+                "pixiv" -> "https://accounts.pixiv.net/login"
                 else -> "https://www.instagram.com/accounts/login/"
             }
             val label = when (platform.lowercase()) {
                 "douyin" -> "Login Douyin"
                 "tiktok" -> "Login TikTok"
+                "facebook" -> "Login Facebook"
+                "pixiv" -> "Login Pixiv"
                 else -> "Login Instagram"
             }
 
@@ -388,22 +401,21 @@ class WebViewMediaSniffer(private val context: Context) {
     fun hasPlatformCookies(platform: String): Boolean {
         val cm = CookieManager.getInstance()
         return when (platform.lowercase()) {
-            "instagram" -> {
-                val c = cm.getCookie("https://www.instagram.com").orEmpty()
-                c.contains("sessionid=")
-            }
+            "instagram" -> cm.getCookie("https://www.instagram.com").orEmpty().contains("sessionid=")
             "douyin" -> {
                 val c = cm.getCookie("https://www.douyin.com").orEmpty() +
                     cm.getCookie("https://www.iesdouyin.com").orEmpty()
                 c.contains("ttwid=") || c.contains("sessionid=") || c.contains("odin_tt=")
             }
+            "facebook" -> cm.getCookie("https://www.facebook.com").orEmpty().contains("c_user=") ||
+                cm.getCookie("https://m.facebook.com").orEmpty().contains("c_user=")
+            "pixiv" -> cm.getCookie("https://www.pixiv.net").orEmpty().contains("PHPSESSID=")
             else -> false
         }
     }
 
-    fun getWebViewCookiesFilePath(): String? {
-        val file = exportAllCookiesToNetscapeFile()
-        return if (file != null && file.exists() && file.length() > 30) file.absolutePath else null
+    fun getCookieHeaderForUrl(url: String): String {
+        return runCatching { CookieManager.getInstance().getCookie(url).orEmpty() }.getOrDefault("")
     }
 
     fun clearWebViewCookies(onDone: () -> Unit) {
@@ -426,6 +438,8 @@ class WebViewMediaSniffer(private val context: Context) {
                 ".tiktok.com" to "https://www.tiktok.com",
                 ".youtube.com" to "https://www.youtube.com",
                 ".x.com" to "https://x.com",
+                ".facebook.com" to "https://www.facebook.com",
+                ".pixiv.net" to "https://www.pixiv.net",
             )
             val lines = mutableListOf("# Netscape HTTP Cookie File")
             val seen = HashSet<String>()
@@ -458,12 +472,18 @@ class WebViewMediaSniffer(private val context: Context) {
         val cm = CookieManager.getInstance()
         val parts = LinkedHashSet<String>()
         val urls = mutableListOf(finalUrl, originalUrl)
-        if (platform.equals("douyin", ignoreCase = true)) {
-            urls.add("https://www.douyin.com")
-            urls.add("https://www.iesdouyin.com")
-            urls.add("https://aweme.snssdk.com")
-        } else if (platform.equals("instagram", ignoreCase = true)) {
-            urls.add("https://www.instagram.com")
+        when (platform.lowercase()) {
+            "douyin" -> {
+                urls.add("https://www.douyin.com")
+                urls.add("https://www.iesdouyin.com")
+                urls.add("https://aweme.snssdk.com")
+            }
+            "instagram" -> urls.add("https://www.instagram.com")
+            "facebook" -> {
+                urls.add("https://www.facebook.com")
+                urls.add("https://m.facebook.com")
+            }
+            "pixiv" -> urls.add("https://www.pixiv.net")
         }
         for (u in urls) {
             val c = cm.getCookie(u).orEmpty().trim()
@@ -487,9 +507,9 @@ class WebViewMediaSniffer(private val context: Context) {
             val isDouyinVideo = (lower.contains("douyinvod.com") ||
                 lower.contains("aweme.snssdk.com/aweme/v1/play") ||
                 lower.contains("snssdk.com/aweme/v1/play") ||
-                lower.contains("zjcdn.com") && lower.contains("video") ||
-                lower.contains("bytegoofy.com") && lower.contains(".mp4") ||
-                lower.contains("amemv.com") && lower.contains("play") ||
+                (lower.contains("zjcdn.com") && lower.contains("video")) ||
+                (lower.contains("bytegoofy.com") && lower.contains(".mp4")) ||
+                (lower.contains("amemv.com") && lower.contains("play")) ||
                 (lower.contains(".mp4") && !lower.contains("static"))) &&
                 !lower.contains(".js") && !lower.contains(".css")
             if (isDouyinVideo) {
@@ -503,16 +523,18 @@ class WebViewMediaSniffer(private val context: Context) {
             ) {
                 images.add(rawUrl.replaceFirst("http://", "https://"))
             }
-        } else if (platform.equals("instagram", ignoreCase = true)) {
-            val isIgHost = lower.contains("cdninstagram.com") || lower.contains("fbcdn.net")
-            if (!isIgHost || lower.contains("/rsrc.php/") || lower.contains("static.")) return
+        } else if (platform.equals("instagram", ignoreCase = true) ||
+            platform.equals("facebook", ignoreCase = true)
+        ) {
+            val isMetaHost = lower.contains("cdninstagram.com") || lower.contains("fbcdn.net")
+            if (!isMetaHost || lower.contains("/rsrc.php/") || lower.contains("static.")) return
 
-            if (lower.contains(".mp4") || lower.contains("mime_type=video") || lower.contains("/v/t50.") || lower.contains("/o1/v/t16/")) {
-                // Strip byte-range query params if Instagram requested a chunked DASH segment
-                val cleaned = stripRangeParams(rawUrl)
-                if (!lower.contains("bytestart=") || !videos.any { it == cleaned }) {
-                    videos.add(cleaned)
-                }
+            // Skip tiny DASH audio-only segments if identifiable, keep progressive MP4 streams
+            if ((lower.contains(".mp4") || lower.contains("mime_type=video") ||
+                    lower.contains("/v/t50.") || lower.contains("/o1/v/t16/")) &&
+                !lower.contains("bytestart=")
+            ) {
+                videos.add(stripRangeParams(rawUrl))
                 return
             }
 
@@ -554,13 +576,17 @@ class WebViewMediaSniffer(private val context: Context) {
         if (lower.contains("/rsrc.php/") || lower.contains("static.") || lower.contains(".svg") ||
             lower.contains("favicon") || lower.contains("logo") || lower.contains("avatar") ||
             lower.contains("150x150") || lower.contains("s150x150") || lower.contains("p150x150") ||
-            lower.contains("100x100") || lower.contains("emoji") || lower.contains("sprite")
+            lower.contains("100x100") || lower.contains("emoji") || lower.contains("sprite") ||
+            lower.contains("profile_pic")
         ) {
             return false
         }
-        if (platform.equals("instagram", ignoreCase = true)) {
+        if (platform.equals("instagram", ignoreCase = true) ||
+            platform.equals("facebook", ignoreCase = true)
+        ) {
             return (lower.contains("cdninstagram.com") || lower.contains("fbcdn.net")) &&
-                (lower.contains("t51.2885-15") || lower.contains("t51.29350-15") || lower.contains(".jpg") || lower.contains(".webp"))
+                (lower.contains("t51.2885-15") || lower.contains("t51.29350-15") ||
+                    lower.contains("scontent") || lower.contains(".jpg") || lower.contains(".webp"))
         }
         if (platform.equals("douyin", ignoreCase = true)) {
             return lower.contains("douyinpic.com") || lower.contains("byteimg.com")
@@ -568,6 +594,11 @@ class WebViewMediaSniffer(private val context: Context) {
         return true
     }
 
+    /**
+     * Extracts direct media URLs from rendered DOM + embedded `<script type="application/json">`
+     * (crucial for Instagram Reels where `<video src>` is an MSE `blob:` URL, while the real
+     * progressive MP4 lives inside Instagram's embedded `video_versions` JSON!).
+     */
     private fun buildDomExtractionJs(): String {
         return """
         (function() {
@@ -591,7 +622,7 @@ class WebViewMediaSniffer(private val context: Context) {
               videos.push(ogVideo.content);
             }
 
-            // Extract <video> and <source> elements
+            // 1. Inspect <video> elements (ignoring blob: MSE placeholders)
             var vEls = document.querySelectorAll('video');
             for (var i = 0; i < vEls.length; i++) {
               var v = vEls[i];
@@ -604,26 +635,115 @@ class WebViewMediaSniffer(private val context: Context) {
               }
             }
 
-            // Try Douyin _ROUTER_DATA if present after hydration
+            // 2. Scan embedded JSON script blocks (Instagram Reels video_versions / carousel_media / Facebook playable_url)
+            function walkJson(node, depth) {
+              if (!node || depth > 14) return;
+              if (Array.isArray(node)) {
+                for (var idx = 0; idx < node.length && idx < 40; idx++) {
+                  walkJson(node[idx], depth + 1);
+                }
+                return;
+              }
+              if (typeof node !== 'object') return;
+
+              // Instagram / Facebook video_versions array (pick highest resolution)
+              if (Array.isArray(node.video_versions) && node.video_versions.length > 0) {
+                var best = node.video_versions[0];
+                for (var vi = 1; vi < node.video_versions.length; vi++) {
+                  var cand = node.video_versions[vi];
+                  if (cand && cand.url && ((cand.width || 0) > (best.width || 0))) {
+                    best = cand;
+                  }
+                }
+                if (best && best.url && best.url.indexOf('http') === 0) {
+                  videos.push(best.url);
+                }
+              }
+
+              // Direct video_url / playable_url_quality_hd / playable_url
+              var vKeys = ['video_url', 'playable_url_quality_hd', 'playable_url', 'browser_native_hd_url', 'browser_native_sd_url'];
+              for (var vk = 0; vk < vKeys.length; vk++) {
+                var val = node[vKeys[vk]];
+                if (typeof val === 'string' && val.indexOf('http') === 0) {
+                  videos.push(val);
+                }
+              }
+
+              // Author / username
+              if (!author && node.user && typeof node.user.username === 'string' && node.user.username) {
+                author = node.user.username;
+              }
+              if (!author && node.owner && typeof node.owner.username === 'string' && node.owner.username) {
+                author = node.owner.username;
+              }
+              if (!title && node.caption && typeof node.caption.text === 'string' && node.caption.text) {
+                title = node.caption.text;
+              }
+
+              // Instagram carousel_media photos & videos
+              if (Array.isArray(node.carousel_media) && node.carousel_media.length > 0) {
+                for (var ci = 0; ci < node.carousel_media.length; ci++) {
+                  var item = node.carousel_media[ci];
+                  if (item && Array.isArray(item.video_versions) && item.video_versions.length > 0 && item.video_versions[0].url) {
+                    videos.push(item.video_versions[0].url);
+                  } else if (item && item.image_versions2 && Array.isArray(item.image_versions2.candidates) && item.image_versions2.candidates.length > 0) {
+                    images.push(item.image_versions2.candidates[0].url);
+                  }
+                }
+              }
+
+              // Single post image_versions2 thumbnail/photo
+              if (node.image_versions2 && Array.isArray(node.image_versions2.candidates) && node.image_versions2.candidates.length > 0) {
+                var imgUrl = node.image_versions2.candidates[0].url;
+                if (imgUrl && imgUrl.indexOf('http') === 0) {
+                  if (!thumbnail) thumbnail = imgUrl;
+                  if (!node.video_versions) images.push(imgUrl);
+                }
+              }
+
+              var keys = Object.keys(node);
+              for (var k = 0; k < keys.length; k++) {
+                var key = keys[k];
+                if (key === 'extensions' || key === 'styles' || key === 'rsrcMap') continue;
+                var child = node[key];
+                if (child && typeof child === 'object') {
+                  walkJson(child, depth + 1);
+                }
+              }
+            }
+
+            var scripts = document.querySelectorAll('script[type="application/json"]');
+            for (var s = 0; s < scripts.length; s++) {
+              var txt = scripts[s].textContent || '';
+              if (txt.indexOf('video_versions') !== -1 || txt.indexOf('video_url') !== -1 ||
+                  txt.indexOf('playable_url') !== -1 || txt.indexOf('carousel_media') !== -1 ||
+                  txt.indexOf('xdt_shortcode_media') !== -1) {
+                try {
+                  walkJson(JSON.parse(txt), 0);
+                } catch (e) {}
+              }
+            }
+
+            // 3. Try Douyin _ROUTER_DATA if hydrated
             try {
               if (window._ROUTER_DATA && window._ROUTER_DATA.loaderData) {
                 var ld = window._ROUTER_DATA.loaderData;
-                for (var k in ld) {
-                  var page = ld[k];
+                for (var dk in ld) {
+                  var page = ld[dk];
                   if (page && page.videoInfoRes && page.videoInfoRes.item_list && page.videoInfoRes.item_list.length > 0) {
-                    var item = page.videoInfoRes.item_list[0];
-                    if (item.desc) title = item.desc;
-                    if (item.author && item.author.nickname) author = item.author.nickname;
-                    if (item.video && item.video.play_addr && item.video.play_addr.url_list && item.video.play_addr.url_list.length > 0) {
-                      videos.push(item.video.play_addr.url_list[0]);
+                    var dItem = page.videoInfoRes.item_list[0];
+                    if (dItem.desc) title = dItem.desc;
+                    if (dItem.author && dItem.author.nickname) author = dItem.author.nickname;
+                    if (dItem.video && dItem.video.play_addr && dItem.video.play_addr.url_list && dItem.video.play_addr.url_list.length > 0) {
+                      videos.push(dItem.video.play_addr.url_list[0]);
                     }
-                    if (item.video && item.video.cover && item.video.cover.url_list && item.video.cover.url_list.length > 0) {
-                      thumbnail = item.video.cover.url_list[0];
+                    if (dItem.video && dItem.video.cover && dItem.video.cover.url_list && dItem.video.cover.url_list.length > 0) {
+                      thumbnail = dItem.video.cover.url_list[0];
                     }
-                    if (item.images && item.images.length > 0) {
-                      for (var m = 0; m < item.images.length; m++) {
-                        if (item.images[m].url_list && item.images[m].url_list.length > 0) {
-                          images.push(item.images[m].url_list[0]);
+                    if (dItem.images && dItem.images.length > 0) {
+                      for (var dm = 0; dm < dItem.images.length; dm++) {
+                        if (dItem.images[dm].url_list && dItem.images[dm].url_list.length > 0) {
+                          images.push(dItem.images[dm].url_list[0]);
                         }
                       }
                     }
@@ -632,7 +752,7 @@ class WebViewMediaSniffer(private val context: Context) {
               }
             } catch (e) {}
 
-            // Extract large content images (for Instagram posts & Douyin slides)
+            // 4. Fallback large DOM images
             var imgEls = document.querySelectorAll('article img, main img, img');
             for (var n = 0; n < imgEls.length; n++) {
               var im = imgEls[n];

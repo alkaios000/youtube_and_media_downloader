@@ -1,33 +1,23 @@
 # all_download — All-in-One Android Media Downloader (Flutter)
 
-Aplikasi Android berbasis **Flutter + Native Kotlin (`youtubedl-android` / yt-dlp + FFmpeg + Aria2c)** untuk mengunduh video, audio (MP3/M4A), dan foto cukup dengan menempelkan tautan (atau langsung *Share* dari aplikasi media sosial).
+Aplikasi Android berbasis **Flutter + Native Kotlin (`youtubedl-android` / yt-dlp + FFmpeg + Chromium WebView Sniffer)** untuk mengunduh video, audio (MP3/M4A), dan foto (termasuk pilih foto tertentu & unduh massal profil) hanya dari tautan.
 
 ## Platform yang Didukung
-- **YouTube** (Video HD/Full HD/4K, Shorts, Audio MP3/M4A via `yt-dlp` + `FFmpeg` native)
-- **TikTok** (Tanpa watermark, video HD/SD, audio, & slideshow foto via `yt-dlp` + fallback cepat)
-- **Douyin (抖音)** (Pembersihan teks share bahasa Mandarin otomatis, video tanpa watermark, foto & audio via extractor langsung `_ROUTER_DATA` + fallback `yt-dlp`)
-- **Instagram** (Reels, Post, Video via `yt-dlp`, mendukung *cookies* opsional untuk konten login/privat)
-- **X (Twitter)** (Video, GIF, dan foto via `yt-dlp` + fallback `vxtwitter`/`fxtwitter`)
+- **YouTube**: Video H.264 ramah WhatsApp (hingga 4K/1080p/720p), Shorts, Audio MP3/M4A, serta unduh massal Channel/Playlist.
+- **TikTok**: Video tanpa watermark, slideshow foto (bisa pilih foto tertentu), audio MP3, serta unduh massal profil `@username`.
+- **Douyin (抖音)**: Pembersihan otomatis teks share Mandarin (`v.douyin.com`), video tanpa watermark, foto & profil.
+- **Instagram**: Reels (video HD MP4), Post, Carousel foto (bisa pilih foto), serta unduh massal profil.
+- **X (Twitter)**: Video, GIF, multi-foto (bisa pilih foto), serta unduh massal profil.
+- **Pixiv**: Karya tunggal/multi-halaman resolusi original (bisa pilih halaman tertentu) serta unduh massal dari URL profil (`pixiv.net/users/...`) atau shortcut `pixiv:username`.
+- **Facebook**: Reels, Watch, Video, Share link, dan Halaman/Profil.
 
 ## Fitur Utama
-- **Hanya dari Link**: Cukup tempel link (termasuk teks share acak dari Douyin/TikTok) atau kirim lewat menu **Bagikan / Share** Android langsung ke **all_download**.
-- **Deteksi Otomatis Clipboard**: Banner 1-klik saat membuka aplikasi dengan tautan media di clipboard.
-- **Pilih Kualitas atau Unduh Cepat**: Pilih resolusi spesifik (4K / 1080p / 720p / 480p / MP3 / M4A) atau tekan **Unduh Cepat** dengan kualitas default.
-- **Langsung Masuk Galeri, WhatsApp & Folder Tersendiri**: Video dan foto otomatis tersimpan di album/folder tersendiri **`Pictures/all_download`** (audio di **`Music/all_download`**) via Android `MediaStore`, dengan metadata `creation_time` MP4 diperbarui ke waktu saat ini lewat FFmpeg (`-c copy`) sehingga langsung muncul paling atas di Galeri dan WhatsApp.
-- **Update Engine yt-dlp di Dalam Aplikasi**: Perbarui binary `yt-dlp` (Stable / Nightly) langsung dari tab **Pengaturan** tanpa harus install ulang APK.
+- **Antarmuka Minimalis & Ramah Jempol**: Input tautan di tengah layar dengan tombol Tempel di dalam kolom input dan deteksi platform otomatis saat menempel tautan.
+- **4 Menu Navigasi**: **Unduh**, **File** (penjelajah folder otomatis per *Nama Aplikasi → Username*), **Riwayat**, dan **Pengaturan**.
+- **Folder Terpisah & Waktu Terbaru di Galeri/WA**: Semua video & foto disimpan ke `Pictures/all_download/<Aplikasi>/<Username>/` (audio di `Music/all_download/<Aplikasi>/<Username>/`), dengan metadata `creation_time` & atom MP4 (`mvhd`/`tkhd`/`mdhd`) diperbarui ke waktu saat ini agar selalu tampil paling atas di WhatsApp dan Galeri.
 
-## Cara Menjalankan di Android Studio / CLI
-1. Buka folder proyek ini di **Android Studio** atau terminal.
-2. Pastikan emulator Android atau HP Android (USB Debugging aktif) terhubung:
-   ```bash
-   flutter devices
-   ```
-3. Jalankan aplikasi:
-   ```bash
-   flutter run
-   ```
-4. Build file APK siap install (split per ABI agar ukuran APK lebih ringkas):
-   ```bash
-   flutter build apk --release --split-per-abi
-   ```
-   APK hasil build berada di `build/app/outputs/flutter-apk/`.
+## Build APK
+```bash
+flutter build apk --release --split-per-abi
+```
+APK hasil build berada di `build/app/outputs/flutter-apk/`.

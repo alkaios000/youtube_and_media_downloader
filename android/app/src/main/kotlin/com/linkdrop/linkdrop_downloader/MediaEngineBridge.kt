@@ -1,5 +1,6 @@
 package com.linkdrop.linkdrop_downloader
 
+import android.content.ContentUris
 import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
@@ -105,11 +106,6 @@ class MediaEngineBridge(private val context: Context) {
         isInitialized = true
     }
 
-    /**
-     * Workaround for upstream youtubedl-android 0.18.1 regression where libc++_shared.so
-     * was omitted from the FFmpeg AAR while librubberband.so & libaria2c.so depend on it.
-     * Copies our bundled NDK libc++_shared.so into extracted package usr/lib folders too.
-     */
     private fun ensureCppSharedLibCopied() {
         runCatching {
             val nativeLibDir = File(context.applicationInfo.nativeLibraryDir)
@@ -212,6 +208,44 @@ class MediaEngineBridge(private val context: Context) {
         }
     }
 
+    fun extractProfileItems(
+        url: String,
+        cookiesPath: String?,
+        limit: Int = 30,
+        onSuccess: (String) -> Unit,
+        onError: (String, String) -> Unit,
+    ) {
+        scope.launch {
+            try {
+                ensureInitialized()
+                val effectiveCookies = resolveEffectiveCookiesPath(cookiesPath)
+                val request = YoutubeDLRequest(url)
+                request.addOption("--flat-playlist")
+                request.addOption("--dump-single-json")
+                request.addOption("--playlist-end", limit.coerceIn(5, 60).toString())
+                request.addOption("--no-warnings")
+                request.addOption("--skip-download")
+                request.addOption("--socket-timeout", "30")
+                if (effectiveCookies != null) {
+                    request.addOption("--cookies", effectiveCookies)
+                }
+
+                val response = YoutubeDL.getInstance().execute(request)
+                val rawOut = response.out?.trim().orEmpty()
+                if (rawOut.isEmpty()) {
+                    val errText = response.err?.trim().orEmpty()
+                    throw IllegalStateException(
+                        if (errText.isNotEmpty()) errText else "Tidak menemukan daftar media pada profil ini.",
+                    )
+                }
+                postToMain { onSuccess(rawOut) }
+            } catch (t: Throwable) {
+                Log.e(TAG, "extractProfileItems failed", t)
+                postToMain { onError("PROFILE_ERROR", sanitizeError(t.message)) }
+            }
+        }
+    }
+
     fun downloadWithYtDlp(
         taskId: String,
         url: String,
@@ -220,6 +254,8 @@ class MediaEngineBridge(private val context: Context) {
         audioFormat: String,
         cookiesPath: String?,
         useAria2c: Boolean,
+        platformFolder: String,
+        creatorFolder: String,
         onSuccess: (Map<String, Any?>) -> Unit,
         onError: (String, String) -> Unit,
     ) {
@@ -233,7 +269,6 @@ class MediaEngineBridge(private val context: Context) {
                     it.contains("youtube.com") || it.contains("youtu.be")
                 }
 
-                // Build ordered fallback attempts for YouTube resilience (SABR/403/merge/WhatsApp compat)
                 val attempts = mutableListOf<DownloadAttempt>()
                 val primarySelector = formatSelector?.takeIf { it.isNotBlank() }
                     ?: "bestvideo[vcodec^=avc1][ext=mp4]+bestaudio[ext=m4a]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best[ext=mp4]/best"
@@ -354,7 +389,7 @@ class MediaEngineBridge(private val context: Context) {
 
                 val initialMime = detectMimeType(primaryFile.name)
                 val preparedFile = if (initialMime.startsWith("video/", ignoreCase = true)) {
-                    emitProgress(taskId, 99.0, 0, "Memperbarui waktu media agar tampil terbaru di Galeri & WA...")
+                    emitProgress(taskId, 99.0, 0, "Memperbarui waktu media agar tampil paling atas...")
                     stampFreshVideoMetadata(primaryFile, workDir)
                 } else {
                     primaryFile
@@ -367,7 +402,13 @@ class MediaEngineBridge(private val context: Context) {
                     primaryFile.name
                 }
                 val mimeType = detectMimeType(finalName)
-                val exported = exportFileToPublicDownloads(preparedFile, finalName, mimeType)
+                val exported = exportFileToPublicStorage(
+                    sourceFile = preparedFile,
+                    requestedName = finalName,
+                    mimeType = mimeType,
+                    platformFolder = platformFolder,
+                    creatorFolder = creatorFolder,
+                )
 
                 postToMain { onSuccess(exported) }
             } catch (t: Throwable) {
@@ -413,6 +454,8 @@ class MediaEngineBridge(private val context: Context) {
         sourcePath: String,
         fileName: String,
         mimeType: String?,
+        platformFolder: String,
+        creatorFolder: String,
         onSuccess: (Map<String, Any?>) -> Unit,
         onError: (String, String) -> Unit,
     ) {
@@ -435,7 +478,13 @@ class MediaEngineBridge(private val context: Context) {
                 } else {
                     sourceFile
                 }
-                val exported = exportFileToPublicDownloads(fileToExport, safeName, resolvedMime)
+                val exported = exportFileToPublicStorage(
+                    sourceFile = fileToExport,
+                    requestedName = safeName,
+                    mimeType = resolvedMime,
+                    platformFolder = platformFolder,
+                    creatorFolder = creatorFolder,
+                )
                 runCatching { sourceFile.delete() }
                 runCatching { stampedTemp?.delete() }
                 postToMain { onSuccess(exported) }
@@ -448,52 +497,74 @@ class MediaEngineBridge(private val context: Context) {
     }
 
     /**
-     * Rewrites the MP4 container's embedded creation_time metadata to NOW (UTC) using stream-copy
-     * (`-c copy`, zero re-encoding, < 0.3s) + `-movflags +faststart`.
-     *
-     * Why this is essential for YouTube & WhatsApp:
-     * YouTube MP4 files carry an embedded old `creation_time` (the original upload/encode date).
-     * Android MediaStore's scanner reads `creation_time` from the container and sets DATE_TAKEN to
-     * that old date — causing WhatsApp's "Recent" picker (sorted by DATE_TAKEN DESC) to bury YouTube
-     * videos far below recent items. Rewriting `creation_time` to NOW fixes it permanently.
+     * Double-locked fresh MP4 timestamp writer:
+     * 1) Runs FFmpeg stream-copy (`-map 0:v? -map 0:a? -map_metadata -1 -map_chapters -1
+     *    -metadata creation_time=<NOW_UTC> -metadata:s:v creation_time=<NOW_UTC>
+     *    -metadata:s:a creation_time=<NOW_UTC> -c copy -movflags +faststart`) to wipe ALL
+     *    embedded YouTube/upload dates & optimize for WhatsApp.
+     * 2) Runs pure-Kotlin [Mp4TimestampPatcher.patchToNow] directly on the output MP4 binary
+     *    to guarantee every `mvhd`, `tkhd`, and `mdhd` box holds RIGHT NOW even if FFmpeg skipped!
      */
     private fun stampFreshVideoMetadata(inputFile: File, workDir: File): File {
-        if (!ffmpegReady) return inputFile
         val ext = inputFile.extension.lowercase(Locale.US)
-        if (ext != "mp4" && ext != "m4v" && ext != "mov") {
-            return inputFile
+        var resultFile = inputFile
+
+        if (ffmpegReady && (ext == "mp4" || ext == "m4v" || ext == "mov" || ext == "mkv" || ext == "webm")) {
+            val remuxed = tryFfmpegFreshRemux(inputFile, workDir)
+            if (remuxed != null) {
+                resultFile = remuxed
+            }
         }
+
+        // Always enforce MP4 binary box timestamps directly in pure Kotlin as lock #2!
+        Mp4TimestampPatcher.patchToNow(resultFile)
+        return resultFile
+    }
+
+    private fun tryFfmpegFreshRemux(inputFile: File, workDir: File): File? {
         return try {
             ensureCppSharedLibCopied()
             val nativeLibDir = File(context.applicationInfo.nativeLibraryDir)
             val ffmpegBin = File(nativeLibDir, "libffmpeg.so")
-            if (!ffmpegBin.exists()) return inputFile
+            if (!ffmpegBin.exists()) return null
 
             val ffmpegLibDir = File(context.noBackupFilesDir, "youtubedl-android/packages/ffmpeg/usr/lib")
-            val outFile = File(workDir, "fresh_${System.currentTimeMillis()}.mp4")
+            val isAlreadyMp4Like = inputFile.extension.lowercase(Locale.US) in setOf("mp4", "m4v", "mov")
+            val outExt = if (isAlreadyMp4Like) "mp4" else inputFile.extension.lowercase(Locale.US)
+            val outFile = File(workDir, "fresh_${System.currentTimeMillis()}.$outExt")
 
             val isoFmt = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.US).apply {
                 timeZone = TimeZone.getTimeZone("UTC")
             }
             val nowIso = isoFmt.format(Date())
 
-            val cmd = listOf(
+            val cmd = mutableListOf(
                 ffmpegBin.absolutePath,
                 "-y",
                 "-i",
                 inputFile.absolutePath,
                 "-map",
-                "0",
+                "0:v?",
+                "-map",
+                "0:a?",
                 "-map_metadata",
+                "-1",
+                "-map_chapters",
                 "-1",
                 "-metadata",
                 "creation_time=$nowIso",
+                "-metadata:s:v",
+                "creation_time=$nowIso",
+                "-metadata:s:a",
+                "creation_time=$nowIso",
                 "-c",
                 "copy",
-                "-movflags",
-                "+faststart",
-                outFile.absolutePath,
             )
+            if (outExt == "mp4") {
+                cmd.add("-movflags")
+                cmd.add("+faststart")
+            }
+            cmd.add(outFile.absolutePath)
 
             val pb = ProcessBuilder(cmd)
             pb.redirectErrorStream(true)
@@ -506,37 +577,48 @@ class MediaEngineBridge(private val context: Context) {
             pb.environment()["LD_LIBRARY_PATH"] = ldParts.joinToString(":")
 
             val proc = pb.start()
-            // Drain output so process never blocks on stdout/stderr buffer
+            val logBuf = StringBuilder()
             val drainThread = Thread {
-                runCatching { proc.inputStream.bufferedReader().use { it.readText() } }
+                runCatching {
+                    proc.inputStream.bufferedReader().use { r ->
+                        logBuf.append(r.readText().takeLast(500))
+                    }
+                }
             }
             drainThread.start()
             val finished = proc.waitFor(25, TimeUnit.SECONDS)
             if (!finished) {
                 proc.destroyForcibly()
                 runCatching { outFile.delete() }
-                return inputFile
+                return null
             }
             drainThread.join(1500)
 
             if (proc.exitValue() == 0 && outFile.exists() && outFile.length() > 1024L) {
                 outFile
             } else {
+                Log.w(TAG, "FFmpeg fresh remux exit=${proc.exitValue()}: $logBuf")
                 runCatching { outFile.delete() }
-                inputFile
+                null
             }
         } catch (t: Throwable) {
-            Log.w(TAG, "stampFreshVideoMetadata skipped", t)
-            inputFile
+            Log.w(TAG, "tryFfmpegFreshRemux failed", t)
+            null
         }
     }
 
-    private fun exportFileToPublicDownloads(
+    private fun exportFileToPublicStorage(
         sourceFile: File,
         requestedName: String,
         mimeType: String,
+        platformFolder: String,
+        creatorFolder: String,
     ): Map<String, Any?> {
         val cleanName = sanitizeFileName(requestedName)
+        val safePlatform = sanitizeFolderSegment(platformFolder, "Lainnya")
+        val safeCreator = sanitizeFolderSegment(creatorFolder, "Umum")
+        val subFolder = "all_download/$safePlatform/$safeCreator"
+
         val fileSize = sourceFile.length()
         val nowMs = System.currentTimeMillis()
         val nowSec = nowMs / 1000L
@@ -549,57 +631,54 @@ class MediaEngineBridge(private val context: Context) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             val resolver = context.contentResolver
 
-            // Use Pictures/all_download/ for BOTH videos & photos so Gallery and WhatsApp
-            // ALWAYS display a dedicated standalone album named "all_download" (unlike DCIM/*
-            // which many OEM phones merge into the Camera album!).
             val targets = when {
                 isVideo -> listOf(
                     Triple(
                         MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
-                        "${Environment.DIRECTORY_PICTURES}/all_download/",
-                        "Pictures/all_download",
+                        "${Environment.DIRECTORY_PICTURES}/$subFolder/",
+                        "Pictures/$subFolder",
                     ),
                     Triple(
                         MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
-                        "${Environment.DIRECTORY_MOVIES}/all_download/",
-                        "Movies/all_download",
+                        "${Environment.DIRECTORY_MOVIES}/$subFolder/",
+                        "Movies/$subFolder",
                     ),
                     Triple(
                         MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
-                        "${Environment.DIRECTORY_DCIM}/all_download/",
-                        "DCIM/all_download",
+                        "${Environment.DIRECTORY_DCIM}/$subFolder/",
+                        "DCIM/$subFolder",
                     ),
                 )
                 isImage -> listOf(
                     Triple(
                         MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
-                        "${Environment.DIRECTORY_PICTURES}/all_download/",
-                        "Pictures/all_download",
+                        "${Environment.DIRECTORY_PICTURES}/$subFolder/",
+                        "Pictures/$subFolder",
                     ),
                     Triple(
                         MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
-                        "${Environment.DIRECTORY_DCIM}/all_download/",
-                        "DCIM/all_download",
+                        "${Environment.DIRECTORY_DCIM}/$subFolder/",
+                        "DCIM/$subFolder",
                     ),
                 )
                 isAudio -> listOf(
                     Triple(
                         MediaStore.Audio.Media.EXTERNAL_CONTENT_URI,
-                        "${Environment.DIRECTORY_MUSIC}/all_download/",
-                        "Music/all_download",
+                        "${Environment.DIRECTORY_MUSIC}/$subFolder/",
+                        "Music/$subFolder",
                     ),
                 )
                 else -> listOf(
                     Triple(
                         MediaStore.Downloads.EXTERNAL_CONTENT_URI,
-                        "${Environment.DIRECTORY_DOWNLOADS}/all_download/",
-                        "Download/all_download",
+                        "${Environment.DIRECTORY_DOWNLOADS}/$subFolder/",
+                        "Download/$subFolder",
                     ),
                 )
             }
 
             var insertedUri: Uri? = null
-            var chosenFolderLabel = "Pictures/all_download"
+            var chosenFolderLabel = "Pictures/$subFolder"
             var lastInsertError: Throwable? = null
 
             for ((collectionUri, relativePath, folderLabel) in targets) {
@@ -692,7 +771,6 @@ class MediaEngineBridge(private val context: Context) {
                     resolver.update(uri, refreshValues, null, null)
                 }
 
-                // Notify MediaScanner so WhatsApp & Gallery refresh album "all_download" immediately
                 if (!realFilePath.isNullOrBlank()) {
                     runCatching {
                         MediaScannerConnection.scanFile(
@@ -711,6 +789,8 @@ class MediaEngineBridge(private val context: Context) {
                     "fileSize" to fileSize,
                     "mimeType" to mimeType,
                     "folderLabel" to chosenFolderLabel,
+                    "platformFolder" to safePlatform,
+                    "creatorFolder" to safeCreator,
                 )
             } catch (t: Throwable) {
                 runCatching { resolver.delete(uri, null, null) }
@@ -724,18 +804,18 @@ class MediaEngineBridge(private val context: Context) {
                 else -> Environment.DIRECTORY_DOWNLOADS
             }
             val folderLabel = when {
-                isVideo || isImage -> "Pictures/all_download"
-                isAudio -> "Music/all_download"
-                else -> "Download/all_download"
+                isVideo || isImage -> "Pictures/$subFolder"
+                isAudio -> "Music/$subFolder"
+                else -> "Download/$subFolder"
             }
             @Suppress("DEPRECATION")
             val publicBase = Environment.getExternalStoragePublicDirectory(rootType)
-            val targetDir = File(publicBase, "all_download")
+            val targetDir = File(publicBase, subFolder)
             val dirReady = (targetDir.exists() || targetDir.mkdirs()) && targetDir.canWrite()
             val finalDir = if (dirReady) {
                 targetDir
             } else {
-                File(context.getExternalFilesDir(rootType), "all_download").apply { mkdirs() }
+                File(context.getExternalFilesDir(rootType), subFolder).apply { mkdirs() }
             }
 
             val destFile = resolveUniqueFile(finalDir, cleanName)
@@ -773,8 +853,149 @@ class MediaEngineBridge(private val context: Context) {
                 "fileSize" to destFile.length(),
                 "mimeType" to mimeType,
                 "folderLabel" to folderLabel,
+                "platformFolder" to safePlatform,
+                "creatorFolder" to safeCreator,
             )
         }
+    }
+
+    /**
+     * Scans Android MediaStore for all files saved inside `all_download/<Platform>/<Username>/`
+     * so the in-app File Explorer tab always reflects the real device storage structure.
+     */
+    fun listManagedFiles(
+        onSuccess: (List<Map<String, Any?>>) -> Unit,
+        onError: (String, String) -> Unit,
+    ) {
+        scope.launch {
+            try {
+                val results = mutableListOf<Map<String, Any?>>()
+                val seenPaths = HashSet<String>()
+
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    val resolver = context.contentResolver
+                    val collections = listOf(
+                        MediaStore.Video.Media.EXTERNAL_CONTENT_URI to "video",
+                        MediaStore.Images.Media.EXTERNAL_CONTENT_URI to "image",
+                        MediaStore.Audio.Media.EXTERNAL_CONTENT_URI to "audio",
+                    )
+
+                    @Suppress("DEPRECATION")
+                    val projection = arrayOf(
+                        MediaStore.MediaColumns._ID,
+                        MediaStore.MediaColumns.DISPLAY_NAME,
+                        MediaStore.MediaColumns.MIME_TYPE,
+                        MediaStore.MediaColumns.SIZE,
+                        MediaStore.MediaColumns.DATE_MODIFIED,
+                        MediaStore.MediaColumns.RELATIVE_PATH,
+                        MediaStore.MediaColumns.DATA,
+                    )
+
+                    val selection = "${MediaStore.MediaColumns.RELATIVE_PATH} LIKE ?"
+                    val selectionArgs = arrayOf("%all_download%")
+                    val sortOrder = "${MediaStore.MediaColumns.DATE_MODIFIED} DESC"
+
+                    for ((collectionUri, mediaKind) in collections) {
+                        runCatching {
+                            resolver.query(collectionUri, projection, selection, selectionArgs, sortOrder)?.use { cursor ->
+                                val idIdx = cursor.getColumnIndex(MediaStore.MediaColumns._ID)
+                                val nameIdx = cursor.getColumnIndex(MediaStore.MediaColumns.DISPLAY_NAME)
+                                val mimeIdx = cursor.getColumnIndex(MediaStore.MediaColumns.MIME_TYPE)
+                                val sizeIdx = cursor.getColumnIndex(MediaStore.MediaColumns.SIZE)
+                                val modIdx = cursor.getColumnIndex(MediaStore.MediaColumns.DATE_MODIFIED)
+                                val relIdx = cursor.getColumnIndex(MediaStore.MediaColumns.RELATIVE_PATH)
+                                @Suppress("DEPRECATION")
+                                val dataIdx = cursor.getColumnIndex(MediaStore.MediaColumns.DATA)
+
+                                while (cursor.moveToNext()) {
+                                    val id = if (idIdx >= 0) cursor.getLong(idIdx) else continue
+                                    val name = if (nameIdx >= 0) cursor.getString(nameIdx) ?: continue else continue
+                                    val mime = if (mimeIdx >= 0) cursor.getString(mimeIdx) ?: detectMimeType(name) else detectMimeType(name)
+                                    val size = if (sizeIdx >= 0) cursor.getLong(sizeIdx) else 0L
+                                    val modSec = if (modIdx >= 0) cursor.getLong(modIdx) else 0L
+                                    val relPath = if (relIdx >= 0) cursor.getString(relIdx) ?: "" else ""
+                                    val dataPath = if (dataIdx >= 0) cursor.getString(dataIdx) ?: "" else ""
+
+                                    val contentUri = ContentUris.withAppendedId(collectionUri, id).toString()
+                                    val dedupKey = dataPath.ifBlank { contentUri }
+                                    if (!seenPaths.add(dedupKey)) continue
+
+                                    val (platformName, creatorName) = parseFolderHierarchy(relPath)
+                                    results.add(
+                                        mapOf(
+                                            "fileName" to name,
+                                            "mimeType" to mime,
+                                            "mediaKind" to mediaKind,
+                                            "fileSize" to size,
+                                            "modifiedMs" to (modSec * 1000L),
+                                            "relativePath" to relPath.trimEnd('/'),
+                                            "savedPath" to dataPath,
+                                            "contentUri" to contentUri,
+                                            "platformFolder" to platformName,
+                                            "creatorFolder" to creatorName,
+                                        ),
+                                    )
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    @Suppress("DEPRECATION")
+                    val roots = listOf(
+                        File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES), "all_download"),
+                        File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MOVIES), "all_download"),
+                        File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DCIM), "all_download"),
+                        File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MUSIC), "all_download"),
+                        File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "all_download"),
+                    )
+                    for (root in roots) {
+                        if (!root.exists()) continue
+                        root.walkTopDown().filter { it.isFile && it.length() > 0 }.forEach { f ->
+                            if (!seenPaths.add(f.absolutePath)) return@forEach
+                            val mime = detectMimeType(f.name)
+                            val kind = when {
+                                mime.startsWith("video/") -> "video"
+                                mime.startsWith("audio/") -> "audio"
+                                mime.startsWith("image/") -> "image"
+                                else -> "video"
+                            }
+                            val rel = f.parentFile?.absolutePath.orEmpty()
+                            val (platformName, creatorName) = parseFolderHierarchy(rel)
+                            results.add(
+                                mapOf(
+                                    "fileName" to f.name,
+                                    "mimeType" to mime,
+                                    "mediaKind" to kind,
+                                    "fileSize" to f.length(),
+                                    "modifiedMs" to f.lastModified(),
+                                    "relativePath" to rel,
+                                    "savedPath" to f.absolutePath,
+                                    "contentUri" to "",
+                                    "platformFolder" to platformName,
+                                    "creatorFolder" to creatorName,
+                                ),
+                            )
+                        }
+                    }
+                }
+
+                results.sortByDescending { (it["modifiedMs"] as? Long) ?: 0L }
+                postToMain { onSuccess(results) }
+            } catch (t: Throwable) {
+                Log.e(TAG, "listManagedFiles failed", t)
+                postToMain { onError("LIST_ERROR", t.message ?: "Gagal membaca folder file") }
+            }
+        }
+    }
+
+    private fun parseFolderHierarchy(path: String): Pair<String, String> {
+        val normalized = path.replace('\\', '/').trim('/')
+        val parts = normalized.split('/').filter { it.isNotBlank() }
+        val idx = parts.indexOfFirst { it.equals("all_download", ignoreCase = true) }
+        if (idx == -1) return "Lainnya" to "Umum"
+        val platform = parts.getOrNull(idx + 1)?.takeIf { it.isNotBlank() } ?: "Lainnya"
+        val creator = parts.getOrNull(idx + 2)?.takeIf { it.isNotBlank() } ?: "Umum"
+        return platform to creator
     }
 
     fun openFile(filePath: String?, contentUri: String?, mimeType: String?): Boolean {
@@ -888,7 +1109,7 @@ class MediaEngineBridge(private val context: Context) {
         return null
     }
 
-    private fun getPublicFolderLabel(): String = "Pictures/all_download (Video/Foto) & Music/all_download"
+    private fun getPublicFolderLabel(): String = "Pictures/all_download/<Aplikasi>/<Username>"
 
     private fun resolveUniqueFile(dir: File, name: String): File {
         var candidate = File(dir, name)
@@ -902,6 +1123,16 @@ class MediaEngineBridge(private val context: Context) {
             count++
         }
         return candidate
+    }
+
+    private fun sanitizeFolderSegment(raw: String?, fallback: String): String {
+        val cleaned = (raw ?: "")
+            .removePrefix("@")
+            .replace(Regex("[\\\\/:*?\"<>|\\r\\n\\t]+"), "_")
+            .replace(Regex("\\s+"), " ")
+            .trim()
+            .trim('.')
+        return if (cleaned.isEmpty()) fallback else cleaned.take(48).trim()
     }
 
     private fun sanitizeFileName(raw: String): String {

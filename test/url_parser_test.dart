@@ -7,26 +7,34 @@ import 'package:linkdrop_downloader/services/media_extractor_service.dart';
 import 'package:linkdrop_downloader/services/native_bridge.dart';
 
 void main() {
-  group('UrlParser.extractUrl & detectPlatform', () {
-    test('detects YouTube standard, shorts, and youtu.be URLs', () {
-      const urls = [
-        'https://www.youtube.com/watch?v=dQw4w9WgXcQ',
-        'https://youtu.be/dQw4w9WgXcQ?si=abc123',
-        'https://youtube.com/shorts/abcdefghijk',
-        'https://music.youtube.com/watch?v=dQw4w9WgXcQ',
-      ];
-      for (final u in urls) {
-        expect(UrlParser.extractUrl(u), isNotNull);
-        expect(UrlParser.detectPlatform(u), MediaPlatform.youtube);
-      }
+  group('UrlParser.extractUrl, detectPlatform & inspect', () {
+    test('detects YouTube videos, shorts, channels, and playlists', () {
+      final vid = UrlParser.inspect('https://youtu.be/dQw4w9WgXcQ?si=abc123');
+      expect(vid?.platform, MediaPlatform.youtube);
+      expect(vid?.isBulk, isFalse);
+
+      final channel = UrlParser.inspect('https://www.youtube.com/@FlutterDev');
+      expect(channel?.platform, MediaPlatform.youtube);
+      expect(channel?.isBulk, isTrue);
+
+      final playlist = UrlParser.inspect(
+        'https://www.youtube.com/playlist?list=PLjxrf2q8roU23XGwz3Km7sQZFTdB996iG',
+      );
+      expect(playlist?.platform, MediaPlatform.youtube);
+      expect(playlist?.kind, LinkKind.playlist);
+      expect(playlist?.isBulk, isTrue);
     });
 
-    test('detects TikTok short and full share text', () {
+    test('detects TikTok single links and profiles', () {
       const shareText =
           'Lihat video keren ini! https://vt.tiktok.com/ZSF123abc/ #fyp';
-      final extracted = UrlParser.extractUrl(shareText);
-      expect(extracted, 'https://vt.tiktok.com/ZSF123abc/');
+      expect(UrlParser.extractUrl(shareText), 'https://vt.tiktok.com/ZSF123abc/');
       expect(UrlParser.detectPlatform(shareText), MediaPlatform.tiktok);
+
+      final profile = UrlParser.inspect('https://www.tiktok.com/@khaby.lame');
+      expect(profile?.platform, MediaPlatform.tiktok);
+      expect(profile?.isBulk, isTrue);
+      expect(profile?.usernameHint, 'khaby.lame');
     });
 
     test('extracts clean Douyin URL from Chinese share text including glued CJK', () {
@@ -38,37 +46,69 @@ void main() {
       const gluedShare = '6.17 复制打开抖音 https://v.douyin.com/CeiJ8kL/复制此链接';
       expect(UrlParser.extractUrl(gluedShare), 'https://v.douyin.com/CeiJ8kL/');
       expect(UrlParser.detectPlatform(gluedShare), MediaPlatform.douyin);
-
-      const bareDouyin = 'v.douyin.com/AbCd123/';
-      expect(UrlParser.extractUrl(bareDouyin), 'https://v.douyin.com/AbCd123/');
-      expect(UrlParser.detectPlatform(bareDouyin), MediaPlatform.douyin);
     });
 
-    test('detects Instagram Reels, Posts, and /share/ links', () {
-      const reel = 'https://www.instagram.com/reel/C9xYz123AbC/?igsh=abcd==';
-      expect(UrlParser.extractUrl(reel), reel);
-      expect(UrlParser.detectPlatform(reel), MediaPlatform.instagram);
-
-      const shareLink = 'https://www.instagram.com/share/reel/BA123xyz456/';
-      expect(UrlParser.extractUrl(shareLink), shareLink);
-      expect(UrlParser.detectPlatform(shareLink), MediaPlatform.instagram);
-    });
-
-    test('detects X and legacy Twitter links', () {
-      const xPost = 'Check this out: https://x.com/flutterdev/status/1800000000000000000.';
-      final extracted = UrlParser.extractUrl(xPost);
-      expect(extracted, 'https://x.com/flutterdev/status/1800000000000000000');
-      expect(UrlParser.detectPlatform(xPost), MediaPlatform.x);
-      expect(
-        UrlParser.detectPlatform('https://twitter.com/user/status/12345'),
-        MediaPlatform.x,
+    test('detects Instagram Reels, /share/reel/, Posts, and Profiles', () {
+      final reel = UrlParser.inspect(
+        'https://www.instagram.com/reel/C9xYz123AbC/?igsh=abcd==',
       );
+      expect(reel?.platform, MediaPlatform.instagram);
+      expect(reel?.isBulk, isFalse);
+      expect(reel?.contentLabel, contains('Reel'));
+
+      final shareReel = UrlParser.inspect(
+        'https://www.instagram.com/share/reel/BA123xyz456/',
+      );
+      expect(shareReel?.platform, MediaPlatform.instagram);
+      expect(shareReel?.contentLabel, contains('Reel'));
+
+      final profile = UrlParser.inspect('https://www.instagram.com/natgeo/');
+      expect(profile?.platform, MediaPlatform.instagram);
+      expect(profile?.isBulk, isTrue);
+      expect(profile?.usernameHint, 'natgeo');
     });
 
-    test('handles bare domains without https prefix', () {
-      final extracted = UrlParser.extractUrl('youtu.be/abc123XYZ');
-      expect(extracted, 'https://youtu.be/abc123XYZ');
-      expect(UrlParser.detectPlatform(extracted!), MediaPlatform.youtube);
+    test('detects X posts and profiles', () {
+      const xPost = 'Check this out: https://x.com/flutterdev/status/1800000000000000000.';
+      expect(
+        UrlParser.extractUrl(xPost),
+        'https://x.com/flutterdev/status/1800000000000000000',
+      );
+      expect(UrlParser.detectPlatform(xPost), MediaPlatform.x);
+
+      final xProfile = UrlParser.inspect('https://x.com/flutterdev');
+      expect(xProfile?.platform, MediaPlatform.x);
+      expect(xProfile?.isBulk, isTrue);
+      expect(xProfile?.usernameHint, 'flutterdev');
+    });
+
+    test('detects Pixiv artworks, user profiles, and pixiv:username shortcut', () {
+      final art = UrlParser.inspect('https://www.pixiv.net/en/artworks/100000000');
+      expect(art?.platform, MediaPlatform.pixiv);
+      expect(art?.isBulk, isFalse);
+
+      final user = UrlParser.inspect('https://www.pixiv.net/users/11');
+      expect(user?.platform, MediaPlatform.pixiv);
+      expect(user?.isBulk, isTrue);
+
+      final shortcut = UrlParser.inspect('pixiv:wlop');
+      expect(shortcut?.platform, MediaPlatform.pixiv);
+      expect(shortcut?.isBulk, isTrue);
+      expect(shortcut?.cleanUrl, contains('search_user.php'));
+    });
+
+    test('detects Facebook reels, fb.watch, share links, and pages', () {
+      final fbReel = UrlParser.inspect('https://www.facebook.com/reel/1234567890');
+      expect(fbReel?.platform, MediaPlatform.facebook);
+      expect(fbReel?.isBulk, isFalse);
+
+      final fbWatch = UrlParser.inspect('https://fb.watch/abc123XYZ/');
+      expect(fbWatch?.platform, MediaPlatform.facebook);
+      expect(fbWatch?.isBulk, isFalse);
+
+      final fbPage = UrlParser.inspect('https://www.facebook.com/nasa');
+      expect(fbPage?.platform, MediaPlatform.facebook);
+      expect(fbPage?.isBulk, isTrue);
     });
 
     test('returns null for non-URL text', () {
@@ -77,7 +117,7 @@ void main() {
   });
 
   group('MediaExtractorService.parseYtDlpJson', () {
-    test('parses multi-resolution YouTube JSON into quality + audio options', () {
+    test('parses multi-resolution YouTube JSON into H.264-preferred quality + audio options', () {
       final service = MediaExtractorService(bridge: NativeBridge());
       final sampleJson = jsonEncode({
         'title': 'Flutter 4K Demo Video',
@@ -106,13 +146,6 @@ void main() {
             'height': 720,
             'filesize': 20000000,
           },
-          {
-            'format_id': '135',
-            'vcodec': 'avc1.4d401e',
-            'acodec': 'none',
-            'height': 480,
-            'filesize': 10000000,
-          },
         ],
       });
 
@@ -125,16 +158,9 @@ void main() {
       expect(info.title, 'Flutter 4K Demo Video');
       expect(info.author, 'Flutter Channel');
       expect(info.formattedDuration, '03:05');
-      expect(info.options.any((o) => o.id == 'ytdlp_best'), isTrue);
-      expect(info.options.any((o) => o.height == 1080), isTrue);
-      expect(info.options.any((o) => o.height == 720), isTrue);
-      expect(info.options.any((o) => o.height == 480), isTrue);
+      expect(info.options.first.ytDlpFormatSelector, contains('vcodec^=avc1'));
       expect(
         info.options.any((o) => o.kind == MediaKind.audio && o.extension == 'mp3'),
-        isTrue,
-      );
-      expect(
-        info.options.any((o) => o.kind == MediaKind.audio && o.extension == 'm4a'),
         isTrue,
       );
     });

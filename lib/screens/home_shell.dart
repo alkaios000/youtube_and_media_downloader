@@ -5,6 +5,7 @@ import '../models/media_platform.dart';
 import '../services/download_manager.dart';
 import 'downloader_screen.dart';
 import 'downloads_screen.dart';
+import 'files_screen.dart';
 import 'settings_screen.dart';
 
 class HomeShell extends StatefulWidget {
@@ -78,7 +79,8 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       final clean = UrlParser.extractUrl(raw);
       if (clean == null) return;
       if (!UrlParser.isCorePlatformUrl(clean)) return;
-      if (clean == _lastDismissedClipboardUrl || clean == _urlController.text.trim()) {
+      if (clean == _lastDismissedClipboardUrl ||
+          clean == _urlController.text.trim()) {
         return;
       }
       if (mounted) {
@@ -118,8 +120,9 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
                       _detectedClipboardUrl = null;
                     });
                   },
-                  onOpenDownloadsTab: () => setState(() => _tabIndex = 1),
+                  onOpenHistoryTab: () => setState(() => _tabIndex = 2),
                 ),
+                FilesScreen(manager: widget.manager),
                 DownloadsScreen(manager: widget.manager),
                 SettingsScreen(manager: widget.manager),
               ],
@@ -129,7 +132,9 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
             selectedIndex: _tabIndex,
             onDestinationSelected: (index) {
               setState(() => _tabIndex = index);
-              if (index == 2) {
+              if (index == 1) {
+                widget.manager.refreshManagedFiles();
+              } else if (index == 3) {
                 widget.manager.refreshStorageInfo();
               }
             },
@@ -139,16 +144,21 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
                 selectedIcon: Icon(Icons.download_rounded),
                 label: 'Unduh',
               ),
+              const NavigationDestination(
+                icon: Icon(Icons.folder_outlined),
+                selectedIcon: Icon(Icons.folder_rounded),
+                label: 'File',
+              ),
               NavigationDestination(
                 icon: Badge(
                   isLabelVisible: activeCount > 0,
                   label: Text('$activeCount'),
-                  child: const Icon(Icons.video_library_outlined),
+                  child: const Icon(Icons.history_outlined),
                 ),
                 selectedIcon: Badge(
                   isLabelVisible: activeCount > 0,
                   label: Text('$activeCount'),
-                  child: const Icon(Icons.video_library_rounded),
+                  child: const Icon(Icons.history_rounded),
                 ),
                 label: 'Riwayat',
               ),

@@ -1,13 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
-import '../models/download_item.dart';
 import '../models/media_platform.dart';
 import '../services/download_manager.dart';
 import '../widgets/clipboard_banner.dart';
-import '../widgets/download_tile.dart';
 import '../widgets/media_preview_card.dart';
-import '../widgets/platform_badge.dart';
 
 class DownloaderScreen extends StatefulWidget {
   final DownloadManager manager;
@@ -15,7 +12,7 @@ class DownloaderScreen extends StatefulWidget {
   final String? clipboardUrl;
   final VoidCallback onUseClipboard;
   final VoidCallback onDismissClipboard;
-  final VoidCallback onOpenDownloadsTab;
+  final VoidCallback onOpenHistoryTab;
 
   const DownloaderScreen({
     super.key,
@@ -24,7 +21,7 @@ class DownloaderScreen extends StatefulWidget {
     required this.clipboardUrl,
     required this.onUseClipboard,
     required this.onDismissClipboard,
-    required this.onOpenDownloadsTab,
+    required this.onOpenHistoryTab,
   });
 
   @override
@@ -32,8 +29,7 @@ class DownloaderScreen extends StatefulWidget {
 }
 
 class _DownloaderScreenState extends State<DownloaderScreen> {
-  MediaPlatform? _detectedPlatform;
-  bool _quickDownloading = false;
+  LinkDetection? _detection;
 
   @override
   void initState() {
@@ -50,10 +46,11 @@ class _DownloaderScreenState extends State<DownloaderScreen> {
 
   void _onTextChanged() {
     final text = widget.urlController.text;
-    final clean = UrlParser.extractUrl(text);
-    final nextPlatform = clean != null ? UrlParser.detectPlatform(clean) : null;
-    if (nextPlatform != _detectedPlatform) {
-      setState(() => _detectedPlatform = nextPlatform);
+    final next = UrlParser.inspect(text);
+    if (next?.cleanUrl != _detection?.cleanUrl ||
+        next?.platform != _detection?.platform ||
+        next?.contentLabel != _detection?.contentLabel) {
+      setState(() => _detection = next);
     }
   }
 
@@ -76,37 +73,14 @@ class _DownloaderScreenState extends State<DownloaderScreen> {
     FocusScope.of(context).unfocus();
     final raw = widget.urlController.text.trim();
     if (raw.isEmpty) {
-      _showSnack('Tempelkan link media terlebih dahulu.');
+      _showSnack('Tempelkan tautan atau username Pixiv terlebih dahulu.');
       return;
     }
     final clean = UrlParser.extractUrl(raw);
-    if (clean != null && clean != raw) {
+    if (clean != null && clean != raw && !raw.toLowerCase().startsWith('pixiv:')) {
       widget.urlController.text = clean;
     }
     await widget.manager.analyzeLink(raw);
-  }
-
-  Future<void> _quickDownload() async {
-    FocusScope.of(context).unfocus();
-    final raw = widget.urlController.text.trim();
-    if (raw.isEmpty) {
-      _showSnack('Tempelkan link media terlebih dahulu.');
-      return;
-    }
-    setState(() => _quickDownloading = true);
-    try {
-      final info = await widget.manager.analyzeLink(raw);
-      if (info == null) return;
-      final option = widget.manager.pickDefaultOption(info);
-      await widget.manager.startDownload(info, option);
-      widget.manager.clearPreview();
-      widget.urlController.clear();
-      _showSnack('Mulai mengunduh (${option.label})...');
-    } finally {
-      if (mounted) {
-        setState(() => _quickDownloading = false);
-      }
-    }
   }
 
   void _showSnack(String message) {
@@ -120,368 +94,417 @@ class _DownloaderScreenState extends State<DownloaderScreen> {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final manager = widget.manager;
-    final activeDownloads = manager.activeDownloads;
     final preview = manager.currentPreview;
-    final busy = manager.isAnalyzing || _quickDownloading;
+    final busy = manager.isAnalyzing;
+    final hasText = widget.urlController.text.trim().isNotEmpty;
+    final activeCount = manager.activeDownloads.length;
 
-    return CustomScrollView(
-      slivers: [
-        SliverAppBar(
-          floating: true,
-          title: Row(
-            children: [
-              ClipRRect(
-                borderRadius: BorderRadius.circular(10),
-                child: Image.asset(
-                  'assets/icon/app_icon.png',
-                  width: 34,
-                  height: 34,
-                  fit: BoxFit.cover,
-                ),
-              ),
-              const SizedBox(width: 10),
-              const Text('all_download'),
-            ],
-          ),
-          actions: [
-            Padding(
-              padding: const EdgeInsets.only(right: 14),
-              child: _EnginePill(manager: manager),
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final isCenteredIdle = preview == null;
+
+        return SingleChildScrollView(
+          padding: const EdgeInsets.fromLTRB(18, 12, 18, 24),
+          child: ConstrainedBox(
+            constraints: BoxConstraints(
+              minHeight: (constraints.maxHeight - 36).clamp(0, double.infinity),
             ),
-          ],
-        ),
-        SliverPadding(
-          padding: const EdgeInsets.fromLTRB(16, 4, 16, 28),
-          sliver: SliverList(
-            delegate: SliverChildListDelegate([
-              Text(
-                'Unduh video, audio, & foto hanya dari tautan.',
-                style: theme.textTheme.bodyMedium?.copyWith(
-                  color: theme.colorScheme.onSurfaceVariant,
-                ),
-              ),
-              const SizedBox(height: 14),
-              SupportedPlatformsStrip(activePlatform: _detectedPlatform),
-              const SizedBox(height: 16),
-
-              if (manager.permissionChecked && !manager.permissionStatus.granted) ...[
-                _PermissionBanner(
-                  permanentlyDenied: manager.permissionStatus.permanentlyDenied,
-                  onGrant: () async {
-                    if (manager.permissionStatus.permanentlyDenied) {
-                      await manager.openAppSettings();
-                    } else {
-                      final updated = await manager.requestStoragePermissions();
-                      if (!updated.granted && updated.permanentlyDenied) {
-                        _showSnack(
-                          'Buka Pengaturan Aplikasi untuk mengaktifkan izin penyimpanan & media.',
-                        );
-                      }
-                    }
-                  },
-                ),
-                const SizedBox(height: 14),
-              ],
-
-              if (widget.clipboardUrl != null) ...[
-                ClipboardLinkBanner(
-                  detectedUrl: widget.clipboardUrl!,
-                  platform: UrlParser.detectPlatform(widget.clipboardUrl!),
-                  onUse: widget.onUseClipboard,
-                  onDismiss: widget.onDismissClipboard,
-                ),
-                const SizedBox(height: 14),
-              ],
-
-              // Main Link Input Card
-              Card(
-                child: Padding(
-                  padding: const EdgeInsets.all(16),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      Row(
-                        children: [
-                          Text(
-                            'Tempel Link Media',
-                            style: theme.textTheme.titleSmall?.copyWith(
-                              fontWeight: FontWeight.w700,
-                            ),
-                          ),
-                          const Spacer(),
-                          if (_detectedPlatform != null)
-                            PlatformBadge(
-                              platform: _detectedPlatform!,
-                              compact: true,
-                            ),
-                        ],
-                      ),
-                      const SizedBox(height: 12),
-                      TextField(
-                        controller: widget.urlController,
-                        minLines: 1,
-                        maxLines: 3,
-                        keyboardType: TextInputType.url,
-                        textInputAction: TextInputAction.go,
-                        onSubmitted: (_) => _analyze(),
-                        decoration: InputDecoration(
-                          hintText:
-                              'https://youtube.com / tiktok / douyin / ig / x.com...',
-                          prefixIcon: const Icon(Icons.link_rounded),
-                          suffixIcon: widget.urlController.text.isNotEmpty
-                              ? IconButton(
-                                  onPressed: () {
-                                    widget.urlController.clear();
-                                    manager.clearPreview();
-                                    setState(() {});
-                                  },
-                                  icon: const Icon(Icons.clear_rounded),
-                                  tooltip: 'Bersihkan',
-                                )
-                              : IconButton(
-                                  onPressed: _pasteFromClipboard,
-                                  icon: const Icon(Icons.content_paste_rounded),
-                                  tooltip: 'Tempel dari clipboard',
-                                ),
-                        ),
-                      ),
-                      const SizedBox(height: 12),
-                      Row(
-                        children: [
-                          OutlinedButton.icon(
-                            onPressed: busy ? null : _pasteFromClipboard,
-                            style: OutlinedButton.styleFrom(
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 14,
-                                vertical: 13,
-                              ),
-                              shape: RoundedRectangleBorder(
-                                borderRadius: BorderRadius.circular(13),
-                              ),
-                            ),
-                            icon: const Icon(Icons.content_paste_rounded, size: 18),
-                            label: const Text('Tempel'),
-                          ),
-                          const SizedBox(width: 10),
-                          Expanded(
-                            child: FilledButton.icon(
-                              onPressed: busy ? null : _analyze,
-                              style: FilledButton.styleFrom(
-                                padding: const EdgeInsets.symmetric(vertical: 13),
-                                shape: RoundedRectangleBorder(
-                                  borderRadius: BorderRadius.circular(13),
-                                ),
-                              ),
-                              icon: busy
-                                  ? const SizedBox(
-                                      width: 17,
-                                      height: 17,
-                                      child: CircularProgressIndicator(
-                                        strokeWidth: 2.2,
-                                        color: Colors.white,
-                                      ),
-                                    )
-                                  : const Icon(Icons.search_rounded, size: 19),
-                              label: Text(
-                                busy ? 'Menganalisis...' : 'Cek Kualitas',
-                                style: const TextStyle(fontWeight: FontWeight.w700),
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 8),
-                      FilledButton.tonalIcon(
-                        onPressed: busy ? null : _quickDownload,
-                        style: FilledButton.styleFrom(
-                          padding: const EdgeInsets.symmetric(vertical: 12),
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(13),
-                          ),
-                        ),
-                        icon: const Icon(Icons.bolt_rounded, size: 19),
-                        label: const Text(
-                          'Unduh Cepat (Kualitas Default)',
-                          style: TextStyle(fontWeight: FontWeight.w700),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-
-              // Engine Init Error if any
-              if (manager.engineError != null) ...[
-                const SizedBox(height: 12),
-                _ErrorBanner(
-                  title: 'Engine yt-dlp belum siap',
-                  message: manager.engineError!,
-                ),
-              ],
-
-              // Link Analysis Error
-              if (manager.analyzeError != null) ...[
-                const SizedBox(height: 14),
-                _ErrorBanner(
-                  title: 'Gagal Memproses Tautan',
-                  message: manager.analyzeError!,
-                  actionLabel: _detectedPlatform == MediaPlatform.instagram
-                      ? 'Login Browser Instagram'
-                      : (_detectedPlatform == MediaPlatform.douyin
-                          ? 'Login Browser Douyin'
-                          : null),
-                  onAction: (_detectedPlatform == MediaPlatform.instagram ||
-                          _detectedPlatform == MediaPlatform.douyin)
-                      ? () async {
-                          final target = _detectedPlatform == MediaPlatform.douyin
-                              ? 'douyin'
-                              : 'instagram';
-                          final saved = await manager.openBrowserLogin(target);
-                          if (saved && mounted) {
-                            _showSnack('Sesi $target tersimpan! Mencoba ulang...');
-                            await _analyze();
-                          }
-                        }
-                      : null,
-                ),
-              ],
-
-              // Rich Media Preview & Quality Picker
-              if (preview != null) ...[
-                const SizedBox(height: 16),
-                MediaPreviewCard(
-                  info: preview,
-                  initialOption: manager.pickDefaultOption(preview),
-                  onDismiss: manager.clearPreview,
-                  onDownload: (selected) async {
-                    await manager.startDownload(preview, selected);
-                    manager.clearPreview();
-                    widget.urlController.clear();
-                    _showSnack('Mengunduh ${selected.label}...');
-                  },
-                ),
-              ],
-
-              // Active Downloads live feed
-              if (activeDownloads.isNotEmpty) ...[
-                const SizedBox(height: 22),
+            child: Column(
+              mainAxisAlignment: isCenteredIdle
+                  ? MainAxisAlignment.center
+                  : MainAxisAlignment.start,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                // Minimal Brand Header (no "Engine Siap", no subtitle, no platform icon bar)
                 Row(
+                  mainAxisAlignment: isCenteredIdle
+                      ? MainAxisAlignment.center
+                      : MainAxisAlignment.start,
                   children: [
-                    Text(
-                      'Sedang Mengunduh (${activeDownloads.length})',
-                      style: theme.textTheme.titleMedium?.copyWith(
-                        fontWeight: FontWeight.w800,
+                    ClipRRect(
+                      borderRadius: BorderRadius.circular(12),
+                      child: Image.asset(
+                        'assets/icon/app_icon.png',
+                        width: isCenteredIdle ? 44 : 34,
+                        height: isCenteredIdle ? 44 : 34,
+                        fit: BoxFit.cover,
                       ),
                     ),
-                    const Spacer(),
-                    TextButton(
-                      onPressed: widget.onOpenDownloadsTab,
-                      child: const Text('Lihat Semua'),
+                    const SizedBox(width: 10),
+                    Text(
+                      'all_download',
+                      style: theme.textTheme.headlineSmall?.copyWith(
+                        fontWeight: FontWeight.w800,
+                        letterSpacing: -0.5,
+                      ),
                     ),
                   ],
                 ),
-                const SizedBox(height: 8),
-                ...activeDownloads.map(
-                  (item) => Padding(
-                    padding: const EdgeInsets.only(bottom: 10),
-                    child: DownloadTile(
-                      item: item,
-                      onCancel: () => manager.cancelDownload(item.id),
+                SizedBox(height: isCenteredIdle ? 24 : 14),
+
+                if (manager.permissionChecked &&
+                    !manager.permissionStatus.granted) ...[
+                  _PermissionBanner(
+                    permanentlyDenied:
+                        manager.permissionStatus.permanentlyDenied,
+                    onGrant: () async {
+                      if (manager.permissionStatus.permanentlyDenied) {
+                        await manager.openAppSettings();
+                      } else {
+                        final updated =
+                            await manager.requestStoragePermissions();
+                        if (!updated.granted && updated.permanentlyDenied) {
+                          _showSnack(
+                            'Buka Pengaturan HP untuk mengaktifkan izin media.',
+                          );
+                        }
+                      }
+                    },
+                  ),
+                  const SizedBox(height: 12),
+                ],
+
+                if (widget.clipboardUrl != null && preview == null) ...[
+                  ClipboardLinkBanner(
+                    detectedUrl: widget.clipboardUrl!,
+                    platform: UrlParser.detectPlatform(widget.clipboardUrl!),
+                    onUse: widget.onUseClipboard,
+                    onDismiss: widget.onDismissClipboard,
+                  ),
+                  const SizedBox(height: 12),
+                ],
+
+                // Centered Thumb-Friendly Link Input Card
+                Card(
+                  child: Padding(
+                    padding: const EdgeInsets.all(16),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        // Live platform & link-type detection banner when link pasted!
+                        AnimatedSwitcher(
+                          duration: const Duration(milliseconds: 200),
+                          child: _detection != null
+                              ? Padding(
+                                  key: ValueKey(_detection!.summaryLabel),
+                                  padding: const EdgeInsets.only(bottom: 12),
+                                  child: _DetectedPlatformStrip(
+                                    detection: _detection!,
+                                  ),
+                                )
+                              : const SizedBox.shrink(),
+                        ),
+
+                        // Input with Paste button ONLY inside the field (and Clear when filled)
+                        TextField(
+                          controller: widget.urlController,
+                          minLines: 1,
+                          maxLines: 3,
+                          keyboardType: TextInputType.url,
+                          textInputAction: TextInputAction.go,
+                          onSubmitted: (_) => _analyze(),
+                          decoration: InputDecoration(
+                            hintText: 'Tempel link media / profil / pixiv:user...',
+                            prefixIcon: Icon(
+                              _detection?.platform.icon ?? Icons.link_rounded,
+                              color: _detection?.platform.brandColor,
+                            ),
+                            suffixIcon: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                if (hasText)
+                                  IconButton(
+                                    onPressed: () {
+                                      widget.urlController.clear();
+                                      manager.clearPreview();
+                                      setState(() {});
+                                    },
+                                    icon: const Icon(Icons.close_rounded, size: 20),
+                                    tooltip: 'Hapus',
+                                  ),
+                                IconButton(
+                                  onPressed: busy ? null : _pasteFromClipboard,
+                                  icon: const Icon(
+                                    Icons.content_paste_rounded,
+                                    size: 20,
+                                  ),
+                                  tooltip: 'Tempel',
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 12),
+
+                        // Single clean primary CTA (no Paste button below, no Quick Download)
+                        SizedBox(
+                          height: 48,
+                          child: FilledButton.icon(
+                            onPressed: busy ? null : _analyze,
+                            style: FilledButton.styleFrom(
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(14),
+                              ),
+                            ),
+                            icon: busy
+                                ? const SizedBox(
+                                    width: 18,
+                                    height: 18,
+                                    child: CircularProgressIndicator(
+                                      strokeWidth: 2.2,
+                                      color: Colors.white,
+                                    ),
+                                  )
+                                : Icon(
+                                    _detection?.isBulk == true
+                                        ? Icons.collections_rounded
+                                        : Icons.download_rounded,
+                                    size: 20,
+                                  ),
+                            label: Text(
+                              busy
+                                  ? 'Memeriksa tautan...'
+                                  : (_detection?.isBulk == true
+                                      ? 'Muat Media Profil (Massal)'
+                                      : 'Proses Link'),
+                              style: const TextStyle(
+                                fontSize: 15,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ],
                     ),
                   ),
                 ),
-              ],
 
-              // Recent 2 Completed items shortcut or Quick Tips when idle
-              if (preview == null && activeDownloads.isEmpty) ...[
-                const SizedBox(height: 20),
-                if (manager.historyItems.isNotEmpty) ...[
-                  Row(
-                    children: [
-                      Text(
-                        'Unduhan Terakhir',
-                        style: theme.textTheme.titleSmall?.copyWith(
-                          fontWeight: FontWeight.w800,
+                // Compact live download pill linking to Riwayat tab (keeps Unduh clean of history!)
+                if (activeCount > 0 && preview == null) ...[
+                  const SizedBox(height: 12),
+                  InkWell(
+                    onTap: widget.onOpenHistoryTab,
+                    borderRadius: BorderRadius.circular(14),
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 14,
+                        vertical: 11,
+                      ),
+                      decoration: BoxDecoration(
+                        color: theme.colorScheme.primary.withValues(alpha: 0.12),
+                        borderRadius: BorderRadius.circular(14),
+                        border: Border.all(
+                          color: theme.colorScheme.primary.withValues(alpha: 0.35),
                         ),
                       ),
-                      const Spacer(),
-                      TextButton(
-                        onPressed: widget.onOpenDownloadsTab,
-                        child: const Text('Riwayat Lengkap'),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 6),
-                  ...manager.historyItems.take(2).map(
-                        (item) => Padding(
-                          padding: const EdgeInsets.only(bottom: 10),
-                          child: DownloadTile(
-                            item: item,
-                            onOpen: () => _openFile(item),
-                            onShare: () => manager.shareDownloadedItem(item),
-                            onDelete: () => manager.removeHistoryItem(item),
+                      child: Row(
+                        children: [
+                          SizedBox(
+                            width: 16,
+                            height: 16,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2.2,
+                              color: theme.colorScheme.primary,
+                            ),
                           ),
-                        ),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: Text(
+                              'Sedang mengunduh $activeCount media...',
+                              style: theme.textTheme.bodySmall?.copyWith(
+                                color: theme.colorScheme.primary,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                          ),
+                          Text(
+                            'Lihat Riwayat',
+                            style: theme.textTheme.labelMedium?.copyWith(
+                              color: theme.colorScheme.primary,
+                              fontWeight: FontWeight.w800,
+                            ),
+                          ),
+                          Icon(
+                            Icons.chevron_right_rounded,
+                            size: 18,
+                            color: theme.colorScheme.primary,
+                          ),
+                        ],
                       ),
-                ] else ...[
-                  const _TipsCard(),
+                    ),
+                  ),
                 ],
+
+                if (manager.engineError != null) ...[
+                  const SizedBox(height: 12),
+                  _ErrorBanner(
+                    title: 'Engine belum siap',
+                    message: manager.engineError!,
+                  ),
+                ],
+
+                if (manager.analyzeError != null) ...[
+                  const SizedBox(height: 12),
+                  _ErrorBanner(
+                    title: 'Gagal Memproses Tautan',
+                    message: manager.analyzeError!,
+                    actionLabel: _loginActionLabel(_detection?.platform),
+                    onAction: _canBrowserLogin(_detection?.platform)
+                        ? () async {
+                            final p = _detection!.platform.name;
+                            final saved = await manager.openBrowserLogin(p);
+                            if (saved && mounted) {
+                              _showSnack('Sesi tersimpan! Mencoba ulang...');
+                              await _analyze();
+                            }
+                          }
+                        : null,
+                  ),
+                ],
+
+                // Media Preview / Multi-Photo Picker / Profile Bulk Picker
+                if (preview != null) ...[
+                  const SizedBox(height: 14),
+                  MediaPreviewCard(
+                    info: preview,
+                    initialOption: preview.options.isNotEmpty
+                        ? manager.pickDefaultOption(preview)
+                        : null,
+                    onDismiss: manager.clearPreview,
+                    onDownloadOption: (selected) async {
+                      await manager.startDownload(preview, selected);
+                      manager.clearPreview();
+                      widget.urlController.clear();
+                      _showSnack('Mulai mengunduh ${selected.label}...');
+                    },
+                    onDownloadSelectedPhotos: (selected) async {
+                      await manager.downloadSelectedPhotos(preview, selected);
+                      manager.clearPreview();
+                      widget.urlController.clear();
+                      _showSnack(
+                        'Mulai mengunduh ${selected.length} foto terpilih...',
+                      );
+                    },
+                    onDownloadBulkProfile: (selected, audioOnly) async {
+                      await manager.startBulkDownloads(
+                        preview,
+                        selected,
+                        audioOnly: audioOnly,
+                      );
+                      manager.clearPreview();
+                      widget.urlController.clear();
+                      _showSnack(
+                        'Antrean unduh massal dimulai (${selected.length} media)...',
+                      );
+                    },
+                  ),
+                ],
+
+                // Gentle lower thumb balance when centered idle
+                if (isCenteredIdle) const SizedBox(height: 48),
               ],
-            ]),
+            ),
           ),
-        ),
-      ],
+        );
+      },
     );
   }
 
-  Future<void> _openFile(DownloadItem item) async {
-    final ok = await widget.manager.openDownloadedItem(item);
-    if (!ok) {
-      _showSnack('File tidak dapat dibuka atau sudah dipindahkan.');
+  bool _canBrowserLogin(MediaPlatform? platform) {
+    return platform == MediaPlatform.instagram ||
+        platform == MediaPlatform.douyin ||
+        platform == MediaPlatform.facebook ||
+        platform == MediaPlatform.pixiv;
+  }
+
+  String? _loginActionLabel(MediaPlatform? platform) {
+    switch (platform) {
+      case MediaPlatform.instagram:
+        return 'Login Browser Instagram';
+      case MediaPlatform.douyin:
+        return 'Login Browser Douyin';
+      case MediaPlatform.facebook:
+        return 'Login Browser Facebook';
+      case MediaPlatform.pixiv:
+        return 'Login Browser Pixiv';
+      default:
+        return null;
     }
   }
 }
 
-class _EnginePill extends StatelessWidget {
-  final DownloadManager manager;
+class _DetectedPlatformStrip extends StatelessWidget {
+  final LinkDetection detection;
 
-  const _EnginePill({required this.manager});
+  const _DetectedPlatformStrip({required this.detection});
 
   @override
   Widget build(BuildContext context) {
-    final ready = manager.engineStatus.initialized;
-    final loading = manager.isInitializing;
-    final color = loading
-        ? const Color(0xFFF59E0B)
-        : (ready ? const Color(0xFF22C55E) : const Color(0xFFEF4444));
-    final label = loading
-        ? 'Menyiapkan...'
-        : (ready ? 'Engine Siap' : 'Offline');
-
+    final platform = detection.platform;
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
       decoration: BoxDecoration(
-        color: color.withValues(alpha: 0.14),
-        borderRadius: BorderRadius.circular(999),
-        border: Border.all(color: color.withValues(alpha: 0.4)),
+        gradient: LinearGradient(
+          colors: platform.gradientColors
+              .map((c) => c.withValues(alpha: 0.16))
+              .toList(),
+        ),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(
+          color: platform.brandColor.withValues(alpha: 0.45),
+        ),
       ),
       child: Row(
-        mainAxisSize: MainAxisSize.min,
         children: [
           Container(
-            width: 7,
-            height: 7,
-            decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+            width: 26,
+            height: 26,
+            decoration: BoxDecoration(
+              gradient: LinearGradient(colors: platform.gradientColors),
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: Icon(platform.icon, size: 15, color: Colors.white),
           ),
-          const SizedBox(width: 6),
-          Text(
-            label,
-            style: TextStyle(
-              color: color,
-              fontSize: 11.5,
-              fontWeight: FontWeight.w700,
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Terdeteksi: ${platform.label}',
+                  style: TextStyle(
+                    fontSize: 12.5,
+                    fontWeight: FontWeight.w800,
+                    color: platform.brandColor,
+                  ),
+                ),
+                Text(
+                  detection.contentLabel,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                        fontSize: 11.5,
+                      ),
+                ),
+              ],
             ),
           ),
+          if (detection.isBulk)
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+              decoration: BoxDecoration(
+                color: platform.brandColor.withValues(alpha: 0.2),
+                borderRadius: BorderRadius.circular(6),
+              ),
+              child: Text(
+                'MASSAL',
+                style: TextStyle(
+                  fontSize: 10,
+                  fontWeight: FontWeight.w800,
+                  color: platform.brandColor,
+                ),
+              ),
+            ),
         ],
       ),
     );
@@ -502,39 +525,22 @@ class _PermissionBanner extends StatelessWidget {
     final theme = Theme.of(context);
     const accent = Color(0xFFF59E0B);
     return Container(
-      padding: const EdgeInsets.all(14),
+      padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
         color: accent.withValues(alpha: 0.12),
-        borderRadius: BorderRadius.circular(16),
+        borderRadius: BorderRadius.circular(14),
         border: Border.all(color: accent.withValues(alpha: 0.4)),
       ),
       child: Row(
-        crossAxisAlignment: CrossAxisAlignment.center,
         children: [
-          const Icon(Icons.folder_shared_outlined, color: accent, size: 22),
+          const Icon(Icons.folder_shared_outlined, color: accent, size: 20),
           const SizedBox(width: 10),
           Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  'Izin Penyimpanan & Media',
-                  style: theme.textTheme.labelLarge?.copyWith(
-                    color: accent,
-                    fontWeight: FontWeight.w700,
-                  ),
-                ),
-                const SizedBox(height: 2),
-                Text(
-                  permanentlyDenied
-                      ? 'Izin ditolak permanen. Aktifkan di Pengaturan HP agar hasil unduhan mudah diakses.'
-                      : 'Izinkan akses media agar video, audio, dan foto tersimpan lancar ke perangkat.',
-                  style: theme.textTheme.bodySmall?.copyWith(
-                    color: theme.colorScheme.onSurfaceVariant,
-                    height: 1.3,
-                  ),
-                ),
-              ],
+            child: Text(
+              permanentlyDenied
+                  ? 'Aktifkan izin media di Pengaturan HP.'
+                  : 'Izinkan akses media agar unduhan tersimpan lancar.',
+              style: theme.textTheme.bodySmall,
             ),
           ),
           const SizedBox(width: 8),
@@ -623,103 +629,6 @@ class _ErrorBanner extends StatelessWidget {
           ),
         ],
       ),
-    );
-  }
-}
-
-class _TipsCard extends StatelessWidget {
-  const _TipsCard();
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                Icon(
-                  Icons.auto_awesome_rounded,
-                  size: 19,
-                  color: theme.colorScheme.primary,
-                ),
-                const SizedBox(width: 8),
-                Text(
-                  'Cara Tercepat Mengunduh',
-                  style: theme.textTheme.titleSmall?.copyWith(
-                    fontWeight: FontWeight.w700,
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 12),
-            const _TipRow(
-              number: '1',
-              text:
-                  'Salin tautan dari YouTube, TikTok, Douyin (teks share bahasa Mandarin otomatis dibersihkan), Instagram, atau X.',
-            ),
-            const SizedBox(height: 8),
-            const _TipRow(
-              number: '2',
-              text:
-                  'Atau langsung tekan "Bagikan / Share" di aplikasi media sosial lalu pilih all_download.',
-            ),
-            const SizedBox(height: 8),
-            const _TipRow(
-              number: '3',
-              text:
-                  'Semua video & foto otomatis masuk ke album/folder Pictures/all_download dengan waktu terbaru agar langsung muncul paling atas di Galeri & WhatsApp.',
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _TipRow extends StatelessWidget {
-  final String number;
-  final String text;
-
-  const _TipRow({required this.number, required this.text});
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return Row(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Container(
-          width: 22,
-          height: 22,
-          alignment: Alignment.center,
-          decoration: BoxDecoration(
-            color: theme.colorScheme.primary.withValues(alpha: 0.16),
-            borderRadius: BorderRadius.circular(7),
-          ),
-          child: Text(
-            number,
-            style: TextStyle(
-              color: theme.colorScheme.primary,
-              fontSize: 12,
-              fontWeight: FontWeight.w800,
-            ),
-          ),
-        ),
-        const SizedBox(width: 10),
-        Expanded(
-          child: Text(
-            text,
-            style: theme.textTheme.bodySmall?.copyWith(
-              color: theme.colorScheme.onSurfaceVariant,
-              height: 1.4,
-            ),
-          ),
-        ),
-      ],
     );
   }
 }

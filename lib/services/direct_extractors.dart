@@ -14,6 +14,11 @@ class DirectExtractors {
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
       '(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 
+  static const Map<String, String> pixivHeaders = {
+    'User-Agent': _desktopChromeUa,
+    'Referer': 'https://www.pixiv.net/',
+  };
+
   final Dio _dio;
 
   DirectExtractors({Dio? dio})
@@ -27,8 +32,391 @@ class DirectExtractors {
               ),
             );
 
-  /// Direct watermark-free Douyin extractor via mobile share page `_ROUTER_DATA`.
-  /// Works without requiring Douyin login cookies on most public videos & notes.
+  // ===========================================================================
+  // PIXIV: Single Artwork (multi-page selectable!) & User Profile / Username Bulk
+  // ===========================================================================
+
+  Future<MediaInfo?> extractPixiv(String url, {String cookieHeader = ''}) async {
+    final headers = <String, String>{
+      ...pixivHeaders,
+      if (cookieHeader.isNotEmpty) 'Cookie': cookieHeader,
+    };
+
+    // 1. Check if artwork link
+    final illustId = _extractPixivIllustId(url);
+    if (illustId != null) {
+      return _extractPixivArtwork(url, illustId, headers);
+    }
+
+    // 2. Check if user profile link or username search
+    String? userId = _extractPixivUserId(url);
+    if (userId == null) {
+      final uri = Uri.tryParse(url);
+      final nick = uri?.queryParameters['nick']?.trim();
+      if (nick != null && nick.isNotEmpty) {
+        userId = await _findPixivUserIdByName(nick, headers);
+      }
+    }
+    if (userId != null) {
+      return _extractPixivUserProfile(url, userId, headers);
+    }
+
+    // 3. Direct i.pximg.net image URL
+    if (url.toLowerCase().contains('pximg.net')) {
+      final ext = _guessImageExt(url);
+      final item = SelectableMediaItem(
+        id: 'pximg_0',
+        title: 'Pixiv Image',
+        thumbnailUrl: url,
+        directUrl: url,
+        extension: ext,
+        kind: MediaKind.image,
+        engine: DownloadEngine.directHttp,
+        headers: headers,
+        badgeLabel: 'Foto 1',
+      );
+      return MediaInfo(
+        originalUrl: url,
+        platform: MediaPlatform.pixiv,
+        title: 'Pixiv Image',
+        author: 'Pixiv',
+        thumbnailUrl: url,
+        thumbnailHeaders: headers,
+        extractorLabel: 'Pixiv Direct',
+        selectableItems: [item],
+        options: [
+          MediaFormatOption(
+            id: 'pximg_dl',
+            label: 'Foto Original',
+            subtitle: ext.toUpperCase(),
+            extension: ext,
+            kind: MediaKind.image,
+            engine: DownloadEngine.directHttp,
+            directUrl: url,
+            galleryUrls: [url],
+            headers: headers,
+          ),
+        ],
+      );
+    }
+
+    return null;
+  }
+
+  Future<MediaInfo?> _extractPixivArtwork(
+    String originalUrl,
+    String illustId,
+    Map<String, String> headers,
+  ) async {
+    try {
+      final infoRes = await _dio.get<dynamic>(
+        'https://www.pixiv.net/ajax/illust/$illustId',
+        options: Options(headers: headers),
+      );
+      final infoBody =
+          infoRes.data is String ? jsonDecode(infoRes.data as String) : infoRes.data;
+      if (infoBody is! Map || infoBody['error'] == true) return null;
+      final meta = infoBody['body'] as Map?;
+      if (meta == null) return null;
+
+      final title = (meta['illustTitle']?.toString() ??
+              meta['title']?.toString() ??
+              'Pixiv_$illustId')
+          .trim();
+      final author = (meta['userName']?.toString() ??
+              meta['userAccount']?.toString() ??
+              'Pixiv')
+          .trim();
+
+      final pagesRes = await _dio.get<dynamic>(
+        'https://www.pixiv.net/ajax/illust/$illustId/pages',
+        options: Options(headers: headers),
+      );
+      final pagesBody = pagesRes.data is String
+          ? jsonDecode(pagesRes.data as String)
+          : pagesRes.data;
+
+      final items = <SelectableMediaItem>[];
+      final fullUrls = <String>[];
+
+      if (pagesBody is Map && pagesBody['error'] != true && pagesBody['body'] is List) {
+        final pages = pagesBody['body'] as List;
+        for (int i = 0; i < pages.length; i++) {
+          final page = pages[i];
+          if (page is! Map) continue;
+          final urls = page['urls'] as Map?;
+          final orig = urls?['original']?.toString() ??
+              urls?['regular']?.toString() ??
+              '';
+          final thumb = urls?['small']?.toString() ??
+              urls?['thumb_mini']?.toString() ??
+              orig;
+          if (!orig.startsWith('http')) continue;
+          fullUrls.add(orig);
+          final ext = _guessImageExt(orig);
+          items.add(
+            SelectableMediaItem(
+              id: 'pixiv_${illustId}_p$i',
+              title: pages.length > 1 ? '$title (Hal ${i + 1})' : title,
+              thumbnailUrl: thumb,
+              directUrl: orig,
+              extension: ext,
+              kind: MediaKind.image,
+              engine: DownloadEngine.directHttp,
+              headers: headers,
+              badgeLabel: 'Hal ${i + 1}',
+              author: author,
+            ),
+          );
+        }
+      }
+
+      // Fallback to meta.urls.original if /pages returned empty
+      if (items.isEmpty) {
+        final urls = meta['urls'] as Map?;
+        final orig = urls?['original']?.toString() ??
+            urls?['regular']?.toString() ??
+            '';
+        if (orig.startsWith('http')) {
+          fullUrls.add(orig);
+          final ext = _guessImageExt(orig);
+          items.add(
+            SelectableMediaItem(
+              id: 'pixiv_${illustId}_p0',
+              title: title,
+              thumbnailUrl: urls?['small']?.toString() ?? orig,
+              directUrl: orig,
+              extension: ext,
+              kind: MediaKind.image,
+              engine: DownloadEngine.directHttp,
+              headers: headers,
+              badgeLabel: 'Foto 1',
+              author: author,
+            ),
+          );
+        }
+      }
+
+      if (items.isEmpty) return null;
+
+      final firstExt = items.first.extension;
+      return MediaInfo(
+        originalUrl: originalUrl,
+        platform: MediaPlatform.pixiv,
+        title: title,
+        author: author,
+        thumbnailUrl: items.first.thumbnailUrl,
+        thumbnailHeaders: headers,
+        extractorLabel: 'Pixiv Original Engine',
+        selectableItems: items,
+        options: [
+          MediaFormatOption(
+            id: 'pixiv_all',
+            label: items.length > 1
+                ? 'Semua Halaman (${items.length} foto)'
+                : 'Gambar Original HD',
+            subtitle: '${firstExt.toUpperCase()} • Resolusi Asli Pixiv',
+            extension: firstExt,
+            kind: MediaKind.image,
+            engine: DownloadEngine.directHttp,
+            directUrl: fullUrls.first,
+            galleryUrls: fullUrls,
+            headers: headers,
+          ),
+        ],
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<MediaInfo?> _extractPixivUserProfile(
+    String originalUrl,
+    String userId,
+    Map<String, String> headers,
+  ) async {
+    try {
+      final profileRes = await _dio.get<dynamic>(
+        'https://www.pixiv.net/ajax/user/$userId/profile/all',
+        options: Options(headers: headers),
+      );
+      final profileBody = profileRes.data is String
+          ? jsonDecode(profileRes.data as String)
+          : profileRes.data;
+      if (profileBody is! Map || profileBody['error'] == true) return null;
+      final body = profileBody['body'] as Map?;
+      if (body == null) return null;
+
+      final ids = <String>[];
+      if (body['illusts'] is Map) {
+        ids.addAll((body['illusts'] as Map).keys.map((e) => e.toString()));
+      }
+      if (body['manga'] is Map) {
+        ids.addAll((body['manga'] as Map).keys.map((e) => e.toString()));
+      }
+
+      // Sort newest artwork ID first, take up to 48 for crisp fast browsing
+      ids.sort((a, b) => (int.tryParse(b) ?? 0).compareTo(int.tryParse(a) ?? 0));
+      final batchIds = ids.take(48).toList();
+      if (batchIds.isEmpty) return null;
+
+      final queryIds = batchIds.map((id) => 'ids[]=$id').join('&');
+      final worksRes = await _dio.get<dynamic>(
+        'https://www.pixiv.net/ajax/user/$userId/profile/illusts?$queryIds&work_category=illustManga&is_first_page=1',
+        options: Options(headers: headers),
+      );
+      final worksBody = worksRes.data is String
+          ? jsonDecode(worksRes.data as String)
+          : worksRes.data;
+      if (worksBody is! Map || worksBody['error'] == true) return null;
+      final worksMap = worksBody['body']?['works'] as Map?;
+      if (worksMap == null || worksMap.isEmpty) return null;
+
+      String creatorName = 'Pixiv_$userId';
+      final items = <SelectableMediaItem>[];
+
+      for (final id in batchIds) {
+        final work = worksMap[id];
+        if (work is! Map) continue;
+        final uName = work['userName']?.toString().trim() ?? '';
+        if (uName.isNotEmpty) creatorName = uName;
+
+        final workTitle = (work['title']?.toString() ?? 'Pixiv_$id').trim();
+        final thumb = work['url']?.toString() ?? '';
+        final pageCount = (work['pageCount'] as num?)?.toInt() ?? 1;
+
+        items.add(
+          SelectableMediaItem(
+            id: 'pixiv_work_$id',
+            title: workTitle,
+            thumbnailUrl: thumb.startsWith('http') ? thumb : null,
+            sourcePostUrl: 'https://www.pixiv.net/artworks/$id',
+            extension: 'jpg',
+            kind: MediaKind.image,
+            engine: DownloadEngine.directHttp,
+            headers: headers,
+            badgeLabel: pageCount > 1 ? '$pageCount Hal' : '1 Hal',
+            author: creatorName,
+            pixivIllustId: id,
+          ),
+        );
+      }
+
+      if (items.isEmpty) return null;
+
+      return MediaInfo(
+        originalUrl: 'https://www.pixiv.net/users/$userId',
+        platform: MediaPlatform.pixiv,
+        title: 'Karya $creatorName (${items.length} terbaru dari ${ids.length})',
+        author: creatorName,
+        thumbnailUrl: items.first.thumbnailUrl,
+        thumbnailHeaders: headers,
+        extractorLabel: 'Pixiv Profil Massal',
+        options: const [],
+        selectableItems: items,
+        isBulkProfile: true,
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Resolves all full-resolution page URLs for a Pixiv artwork ID (used during bulk downloads).
+  Future<List<String>> fetchPixivIllustOriginalUrls(
+    String illustId, {
+    String cookieHeader = '',
+  }) async {
+    final headers = <String, String>{
+      ...pixivHeaders,
+      if (cookieHeader.isNotEmpty) 'Cookie': cookieHeader,
+    };
+    try {
+      final res = await _dio.get<dynamic>(
+        'https://www.pixiv.net/ajax/illust/$illustId/pages',
+        options: Options(headers: headers),
+      );
+      final body = res.data is String ? jsonDecode(res.data as String) : res.data;
+      if (body is Map && body['error'] != true && body['body'] is List) {
+        final urls = <String>[];
+        for (final p in (body['body'] as List)) {
+          if (p is! Map) continue;
+          final u = p['urls']?['original']?.toString() ??
+              p['urls']?['regular']?.toString() ??
+              '';
+          if (u.startsWith('http')) urls.add(u);
+        }
+        return urls;
+      }
+    } catch (_) {}
+    return const [];
+  }
+
+  Future<String?> _findPixivUserIdByName(
+    String nickname,
+    Map<String, String> headers,
+  ) async {
+    try {
+      final res = await _dio.get<String>(
+        'https://www.pixiv.net/search_user.php',
+        queryParameters: {'s_mode': 's_usr', 'nick': nickname},
+        options: Options(
+          responseType: ResponseType.plain,
+          headers: headers,
+        ),
+      );
+      final html = res.data ?? '';
+      final match = RegExp(r'/users/(\d+)').firstMatch(html);
+      return match?.group(1);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  String? _extractPixivIllustId(String url) {
+    final patterns = [
+      RegExp(r'pixiv\.net/(?:en/)?artworks/(\d+)'),
+      RegExp(r'[?&]illust_id=(\d+)'),
+      RegExp(r'pixiv\.net/i/(\d+)'),
+    ];
+    for (final p in patterns) {
+      final m = p.firstMatch(url);
+      if (m != null) return m.group(1);
+    }
+    return null;
+  }
+
+  String? _extractPixivUserId(String url) {
+    final patterns = [
+      RegExp(r'pixiv\.net/(?:en/)?users/(\d+)'),
+      RegExp(r'member\.php\?[^#]*id=(\d+)'),
+    ];
+    for (final p in patterns) {
+      final m = p.firstMatch(url);
+      if (m != null) return m.group(1);
+    }
+    return null;
+  }
+
+  // ===========================================================================
+  // FACEBOOK: Share redirect resolution
+  // ===========================================================================
+
+  Future<String> resolveFacebookUrl(String url) async {
+    final lower = url.toLowerCase();
+    if (!lower.contains('fb.watch') && !lower.contains('/share/')) {
+      return url;
+    }
+    try {
+      return await _resolveRedirects(url, userAgent: _desktopChromeUa);
+    } catch (_) {
+      return url;
+    }
+  }
+
+  // ===========================================================================
+  // DOUYIN: Direct mobile share extractor
+  // ===========================================================================
+
   Future<MediaInfo?> extractDouyin(String url) async {
     try {
       final resolvedUrl = await _resolveRedirects(url, userAgent: _mobileSafariUa);
@@ -68,7 +456,7 @@ class DirectExtractors {
 
       final desc = (item['desc']?.toString() ?? '').trim();
       final authorMap = item['author'] as Map?;
-      final author = (authorMap?['nickname']?.toString() ?? 'Kreator Douyin').trim();
+      final author = (authorMap?['nickname']?.toString() ?? 'Douyin').trim();
       final title = desc.isNotEmpty ? desc : 'Douyin_$awemeId';
 
       final videoMap = item['video'] as Map?;
@@ -83,9 +471,9 @@ class DirectExtractors {
           _firstUrlFromMap(videoMap?['cover'] as Map?);
 
       final options = <MediaFormatOption>[];
+      final selectableItems = <SelectableMediaItem>[];
       const downloadHeaders = {'User-Agent': _mobileSafariUa};
 
-      // 1. Check photo/note gallery posts first
       final rawImages = item['images'] as List?;
       if (rawImages != null && rawImages.isNotEmpty) {
         final imageUrls = <String>[];
@@ -97,6 +485,23 @@ class DirectExtractors {
         }
         if (imageUrls.isNotEmpty) {
           coverUrl ??= imageUrls.first;
+          for (int i = 0; i < imageUrls.length; i++) {
+            final ext = _guessImageExt(imageUrls[i]);
+            selectableItems.add(
+              SelectableMediaItem(
+                id: 'dy_img_$i',
+                title: imageUrls.length > 1 ? '$title (${i + 1})' : title,
+                thumbnailUrl: imageUrls[i],
+                directUrl: imageUrls[i],
+                extension: ext,
+                kind: MediaKind.image,
+                engine: DownloadEngine.directHttp,
+                headers: downloadHeaders,
+                badgeLabel: 'Foto ${i + 1}',
+                author: author,
+              ),
+            );
+          }
           options.add(
             MediaFormatOption(
               id: 'douyin_images_all',
@@ -115,56 +520,15 @@ class DirectExtractors {
         }
       }
 
-      // 2. Video stream (replace playwm -> play for watermark-free video)
       if (videoMap != null) {
         final seenUrls = <String>{};
-        final bitRates = videoMap['bit_rate'] as List?;
-        if (bitRates != null && bitRates.isNotEmpty) {
-          for (final br in bitRates) {
-            if (br is! Map) continue;
-            final playAddr = br['play_addr'] as Map?;
-            final rawPlayUrl = _firstUrlFromMap(playAddr);
-            if (rawPlayUrl == null) continue;
-            final cleanUrl = _cleanDouyinVideoUrl(rawPlayUrl);
-            if (!seenUrls.add(cleanUrl)) continue;
-
-            final width = (playAddr?['width'] as num?)?.toInt();
-            final height = (playAddr?['height'] as num?)?.toInt();
-            final dataSize = (playAddr?['data_size'] as num?)?.toInt();
-            final gearName = br['gear_name']?.toString() ?? '';
-            final resLabel = (height != null && height > 0)
-                ? '${height}p MP4'
-                : (gearName.isNotEmpty ? 'Video ($gearName)' : 'Video HD');
-
-            options.add(
-              MediaFormatOption(
-                id: 'douyin_br_${options.length}',
-                label: '$resLabel • Tanpa Watermark',
-                subtitle: [
-                  if (width != null && height != null) '${width}x$height',
-                  if (dataSize != null && dataSize > 0) formatBytes(dataSize),
-                  'Direct CDN',
-                ].join(' • '),
-                extension: 'mp4',
-                kind: MediaKind.video,
-                engine: DownloadEngine.directHttp,
-                height: height,
-                estimatedBytes: dataSize,
-                directUrl: cleanUrl,
-                headers: downloadHeaders,
-              ),
-            );
-          }
-        }
-
         final primaryPlayUrl = _firstUrlFromMap(videoMap['play_addr'] as Map?);
         if (primaryPlayUrl != null) {
           final cleanUrl = _cleanDouyinVideoUrl(primaryPlayUrl);
           if (seenUrls.add(cleanUrl)) {
             final height = (videoMap['height'] as num?)?.toInt();
             final size = (videoMap['play_addr']?['data_size'] as num?)?.toInt();
-            options.insert(
-              0,
+            options.add(
               MediaFormatOption(
                 id: 'douyin_hd',
                 label: 'Video HD • Tanpa Watermark',
@@ -186,11 +550,9 @@ class DirectExtractors {
         }
       }
 
-      // 3. Background music / audio stream
       final musicMap = item['music'] as Map?;
       final musicUrl = _firstUrlFromMap(musicMap?['play_url'] as Map?);
       if (musicUrl != null) {
-        final secureAudio = musicUrl.replaceFirst('http://', 'https://');
         options.add(
           MediaFormatOption(
             id: 'douyin_audio',
@@ -201,7 +563,7 @@ class DirectExtractors {
             extension: 'mp3',
             kind: MediaKind.audio,
             engine: DownloadEngine.directHttp,
-            directUrl: secureAudio,
+            directUrl: musicUrl.replaceFirst('http://', 'https://'),
             headers: downloadHeaders,
           ),
         );
@@ -218,6 +580,7 @@ class DirectExtractors {
         duration: duration,
         extractorLabel: 'Douyin Direct Engine',
         options: options,
+        selectableItems: selectableItems,
         thumbnailHeaders: downloadHeaders,
       );
     } catch (_) {
@@ -225,48 +588,62 @@ class DirectExtractors {
     }
   }
 
-  /// Fallback extractor for TikTok (no-watermark HD video, slideshow photos, and audio)
-  /// via TikWM public JSON API if yt-dlp fails or for photo carousel posts.
+  // ===========================================================================
+  // TIKTOK: Fallback single post & profile bulk extractor (TikWM)
+  // ===========================================================================
+
   Future<MediaInfo?> extractTikTokFallback(String url) async {
     try {
       final response = await _dio.get<dynamic>(
         'https://www.tikwm.com/api/',
         queryParameters: {'url': url, 'hd': 1},
-        options: Options(
-          headers: {'User-Agent': _mobileSafariUa},
-        ),
+        options: Options(headers: {'User-Agent': _mobileSafariUa}),
       );
 
       final body = response.data is String
           ? jsonDecode(response.data as String)
           : response.data;
       if (body is! Map || body['code'] != 0) return null;
-
       final data = body['data'] as Map?;
       if (data == null) return null;
 
       final title = (data['title']?.toString() ?? '').trim();
       final authorMap = data['author'] as Map?;
-      final author = (authorMap?['nickname']?.toString() ??
-              authorMap?['unique_id']?.toString() ??
-              'Kreator TikTok')
+      final author = (authorMap?['unique_id']?.toString() ??
+              authorMap?['nickname']?.toString() ??
+              'TikTok')
           .trim();
       final cover = data['cover']?.toString() ?? data['origin_cover']?.toString();
       final durSec = (data['duration'] as num?)?.toInt() ?? 0;
 
       final options = <MediaFormatOption>[];
+      final selectableItems = <SelectableMediaItem>[];
 
-      // Slideshow images
       final images = (data['images'] as List?)
           ?.map((e) => e.toString())
           .where((e) => e.startsWith('http'))
           .toList();
       if (images != null && images.isNotEmpty) {
+        for (int i = 0; i < images.length; i++) {
+          selectableItems.add(
+            SelectableMediaItem(
+              id: 'tt_img_$i',
+              title: images.length > 1 ? '${title.isNotEmpty ? title : 'TikTok'} (${i + 1})' : (title.isNotEmpty ? title : 'TikTok'),
+              thumbnailUrl: images[i],
+              directUrl: images[i],
+              extension: 'jpg',
+              kind: MediaKind.image,
+              engine: DownloadEngine.directHttp,
+              badgeLabel: 'Foto ${i + 1}',
+              author: author,
+            ),
+          );
+        }
         options.add(
           MediaFormatOption(
             id: 'tt_images',
             label: images.length > 1
-                ? 'Slideshow Foto (${images.length} gambar)'
+                ? 'Semua Foto (${images.length} gambar)'
                 : 'Foto TikTok HD',
             subtitle: 'JPG • Tanpa Watermark',
             extension: 'jpg',
@@ -278,7 +655,6 @@ class DirectExtractors {
         );
       }
 
-      // HD no-watermark video
       final hdPlay = data['hdplay']?.toString();
       if (hdPlay != null && hdPlay.startsWith('http')) {
         final hdSize = (data['hd_size'] as num?)?.toInt();
@@ -300,7 +676,6 @@ class DirectExtractors {
         );
       }
 
-      // Standard no-watermark video
       final sdPlay = data['play']?.toString();
       if (sdPlay != null && sdPlay.startsWith('http') && sdPlay != hdPlay) {
         final sdSize = (data['size'] as num?)?.toInt();
@@ -322,7 +697,6 @@ class DirectExtractors {
         );
       }
 
-      // Audio
       final music = data['music']?.toString();
       if (music != null && music.startsWith('http')) {
         options.add(
@@ -349,14 +723,74 @@ class DirectExtractors {
         duration: durSec > 0 ? Duration(seconds: durSec) : null,
         extractorLabel: 'TikTok Fast Engine',
         options: options,
+        selectableItems: selectableItems,
       );
     } catch (_) {
       return null;
     }
   }
 
-  /// Fallback extractor for X (Twitter) supporting videos, GIFs, AND photo tweets
-  /// via public vxtwitter / fxtwitter JSON endpoints.
+  Future<MediaInfo?> extractTikTokProfileFallback(String originalUrl, String username) async {
+    try {
+      final cleanUser = username.replaceFirst('@', '').trim();
+      if (cleanUser.isEmpty) return null;
+      final res = await _dio.get<dynamic>(
+        'https://www.tikwm.com/api/user/posts',
+        queryParameters: {'unique_id': cleanUser, 'count': 30},
+        options: Options(headers: {'User-Agent': _mobileSafariUa}),
+      );
+      final body = res.data is String ? jsonDecode(res.data as String) : res.data;
+      if (body is! Map || body['code'] != 0) return null;
+      final videos = body['data']?['videos'] as List?;
+      if (videos == null || videos.isEmpty) return null;
+
+      final items = <SelectableMediaItem>[];
+      for (final v in videos) {
+        if (v is! Map) continue;
+        final vidId = v['video_id']?.toString() ?? '';
+        final playUrl = v['play']?.toString() ?? '';
+        if (!playUrl.startsWith('http')) continue;
+        final title = (v['title']?.toString() ?? 'TikTok_$vidId').trim();
+        final cover = v['cover']?.toString();
+        final dur = (v['duration'] as num?)?.toInt() ?? 0;
+        items.add(
+          SelectableMediaItem(
+            id: 'ttp_$vidId',
+            title: title.isNotEmpty ? title : 'TikTok_$vidId',
+            thumbnailUrl: cover,
+            directUrl: playUrl,
+            sourcePostUrl: 'https://www.tiktok.com/@$cleanUser/video/$vidId',
+            extension: 'mp4',
+            kind: MediaKind.video,
+            engine: DownloadEngine.directHttp,
+            badgeLabel: dur > 0 ? '${dur}s' : 'MP4',
+            author: cleanUser,
+          ),
+        );
+      }
+
+      if (items.isEmpty) return null;
+
+      return MediaInfo(
+        originalUrl: originalUrl,
+        platform: MediaPlatform.tiktok,
+        title: 'Profil TikTok @$cleanUser (${items.length} video)',
+        author: cleanUser,
+        thumbnailUrl: items.first.thumbnailUrl,
+        extractorLabel: 'TikTok Profil Massal',
+        options: const [],
+        selectableItems: items,
+        isBulkProfile: true,
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+
+  // ===========================================================================
+  // X (TWITTER): Direct fallback for videos, GIFs, and multi-photo tweets
+  // ===========================================================================
+
   Future<MediaInfo?> extractXFallback(String url) async {
     try {
       final resolvedUrl = url.contains('t.co/')
@@ -372,7 +806,6 @@ class DirectExtractors {
       final handle = statusMatch.group(1)!;
       final tweetId = statusMatch.group(2)!;
 
-      // Try vxtwitter first, then fxtwitter
       final vxInfo = await _tryVxTwitter(url, handle, tweetId);
       if (vxInfo != null) return vxInfo;
       return await _tryFxTwitter(url, handle, tweetId);
@@ -392,11 +825,12 @@ class DirectExtractors {
       if (data is! Map) return null;
 
       final text = (data['text']?.toString() ?? '').trim();
-      final authorName = (data['user_name']?.toString() ?? '@$handle').trim();
+      final authorName = (data['user_screen_name']?.toString() ?? handle).trim();
       final mediaExtended = data['media_extended'] as List?;
       if (mediaExtended == null || mediaExtended.isEmpty) return null;
 
       final options = <MediaFormatOption>[];
+      final selectableItems = <SelectableMediaItem>[];
       final photoUrls = <String>[];
       String? thumb;
       Duration? duration;
@@ -444,6 +878,23 @@ class DirectExtractors {
       }
 
       if (photoUrls.isNotEmpty) {
+        final baseTitle = text.isNotEmpty ? text : 'Post X @$authorName';
+        for (int i = 0; i < photoUrls.length; i++) {
+          final ext = _guessImageExt(photoUrls[i]);
+          selectableItems.add(
+            SelectableMediaItem(
+              id: 'x_photo_$i',
+              title: photoUrls.length > 1 ? '$baseTitle (${i + 1})' : baseTitle,
+              thumbnailUrl: photoUrls[i],
+              directUrl: photoUrls[i],
+              extension: ext,
+              kind: MediaKind.image,
+              engine: DownloadEngine.directHttp,
+              badgeLabel: 'Foto ${i + 1}',
+              author: authorName,
+            ),
+          );
+        }
         options.add(
           MediaFormatOption(
             id: 'x_photos',
@@ -465,12 +916,13 @@ class DirectExtractors {
       return MediaInfo(
         originalUrl: originalUrl,
         platform: MediaPlatform.x,
-        title: text.isNotEmpty ? text : 'Post X @$handle ($tweetId)',
+        title: text.isNotEmpty ? text : 'Post X @$authorName ($tweetId)',
         author: authorName,
         thumbnailUrl: thumb,
         duration: duration,
         extractorLabel: 'X Direct Engine',
         options: options,
+        selectableItems: selectableItems,
       );
     } catch (_) {
       return null;
@@ -488,11 +940,11 @@ class DirectExtractors {
       if (body is! Map) return null;
       final tweet = body['tweet'] as Map?;
       if (tweet == null) return null;
-
       final media = tweet['media'] as Map?;
       if (media == null) return null;
 
       final options = <MediaFormatOption>[];
+      final selectableItems = <SelectableMediaItem>[];
       String? thumb;
       Duration? duration;
 
@@ -526,6 +978,10 @@ class DirectExtractors {
         }
       }
 
+      final text = (tweet['text']?.toString() ?? '').trim();
+      final authorName =
+          (tweet['author']?['screen_name']?.toString() ?? handle).trim();
+
       final photos = media['photos'] as List?;
       if (photos != null && photos.isNotEmpty) {
         final photoUrls = photos
@@ -535,6 +991,23 @@ class DirectExtractors {
             .toList();
         if (photoUrls.isNotEmpty) {
           thumb ??= photoUrls.first;
+          final baseTitle = text.isNotEmpty ? text : 'Post X @$authorName';
+          for (int i = 0; i < photoUrls.length; i++) {
+            final ext = _guessImageExt(photoUrls[i]);
+            selectableItems.add(
+              SelectableMediaItem(
+                id: 'fx_photo_$i',
+                title: photoUrls.length > 1 ? '$baseTitle (${i + 1})' : baseTitle,
+                thumbnailUrl: photoUrls[i],
+                directUrl: photoUrls[i],
+                extension: ext,
+                kind: MediaKind.image,
+                engine: DownloadEngine.directHttp,
+                badgeLabel: 'Foto ${i + 1}',
+                author: authorName,
+              ),
+            );
+          }
           options.add(
             MediaFormatOption(
               id: 'fx_photos',
@@ -554,26 +1027,26 @@ class DirectExtractors {
 
       if (options.isEmpty) return null;
 
-      final text = (tweet['text']?.toString() ?? '').trim();
-      final authorName =
-          (tweet['author']?['name']?.toString() ?? '@$handle').trim();
-
       return MediaInfo(
         originalUrl: originalUrl,
         platform: MediaPlatform.x,
-        title: text.isNotEmpty ? text : 'Post X @$handle ($tweetId)',
+        title: text.isNotEmpty ? text : 'Post X @$authorName ($tweetId)',
         author: authorName,
         thumbnailUrl: thumb,
         duration: duration,
         extractorLabel: 'X Direct Engine',
         options: options,
+        selectableItems: selectableItems,
       );
     } catch (_) {
       return null;
     }
   }
 
-  /// Resolves Instagram `/share/...` or `instagr.am` short links to canonical `/reel/{code}/` or `/p/{code}/`.
+  // ===========================================================================
+  // INSTAGRAM: Canonical /share/ resolver + GraphQL + Embed (NEVER photo for Reel!)
+  // ===========================================================================
+
   Future<String> resolveInstagramUrl(String url) async {
     final lower = url.toLowerCase();
     if (!lower.contains('/share/') &&
@@ -588,11 +1061,17 @@ class DirectExtractors {
     }
   }
 
-  /// Fast anonymous Instagram extractor (Embed Captioned + GraphQL API).
-  /// Supports public Reels (MP4), Photo Posts, and Multi-slide Carousels.
-  Future<MediaInfo?> extractInstagramDirect(String url) async {
+  Future<MediaInfo?> extractInstagramDirect(
+    String url, {
+    String cookieHeader = '',
+  }) async {
     try {
       final canonical = await resolveInstagramUrl(url);
+      final lowerCanon = canonical.toLowerCase();
+      final isReelUrl = lowerCanon.contains('/reel/') ||
+          lowerCanon.contains('/reels/') ||
+          lowerCanon.contains('/tv/');
+
       final codeMatch = RegExp(
         r'/(?:reel|reels|p|tv)/([A-Za-z0-9_-]{5,30})',
         caseSensitive: false,
@@ -600,14 +1079,21 @@ class DirectExtractors {
       if (codeMatch == null) return null;
       final shortcode = codeMatch.group(1)!;
 
-      // 1. Try public GraphQL API with freshly extracted LSD token
-      final gqlInfo = await _tryInstagramGraphQl(canonical, shortcode);
+      final gqlInfo = await _tryInstagramGraphQl(
+        canonical,
+        shortcode,
+        isReelUrl: isReelUrl,
+        cookieHeader: cookieHeader,
+      );
       if (gqlInfo != null && gqlInfo.options.isNotEmpty) {
         return gqlInfo;
       }
 
-      // 2. Try /embed/captioned/ public HTML extraction
-      final embedInfo = await _tryInstagramEmbed(canonical, shortcode);
+      final embedInfo = await _tryInstagramEmbed(
+        canonical,
+        shortcode,
+        isReelUrl: isReelUrl,
+      );
       if (embedInfo != null && embedInfo.options.isNotEmpty) {
         return embedInfo;
       }
@@ -619,8 +1105,10 @@ class DirectExtractors {
 
   Future<MediaInfo?> _tryInstagramGraphQl(
     String canonicalUrl,
-    String shortcode,
-  ) async {
+    String shortcode, {
+    required bool isReelUrl,
+    String cookieHeader = '',
+  }) async {
     try {
       final pageRes = await _dio.get<String>(
         'https://www.instagram.com/p/$shortcode/',
@@ -630,6 +1118,7 @@ class DirectExtractors {
             'User-Agent': _desktopChromeUa,
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
             'Accept-Language': 'en-US,en;q=0.9',
+            if (cookieHeader.isNotEmpty) 'Cookie': cookieHeader,
           },
         ),
       );
@@ -640,6 +1129,7 @@ class DirectExtractors {
 
       final rawSetCookies = pageRes.headers['set-cookie'] ?? const <String>[];
       final cookiePairs = <String>[];
+      if (cookieHeader.isNotEmpty) cookiePairs.add(cookieHeader);
       String csrf = '';
       for (final sc in rawSetCookies) {
         final pair = sc.split(';').first.trim();
@@ -702,7 +1192,12 @@ class DirectExtractors {
         final media = body['data']?['xdt_shortcode_media'];
         if (media is! Map) continue;
 
-        final parsed = _parseInstagramMediaNode(canonicalUrl, shortcode, media);
+        final parsed = _parseInstagramMediaNode(
+          canonicalUrl,
+          shortcode,
+          media,
+          isReelUrl: isReelUrl,
+        );
         if (parsed != null) return parsed;
       }
       return null;
@@ -713,11 +1208,13 @@ class DirectExtractors {
 
   Future<MediaInfo?> _tryInstagramEmbed(
     String canonicalUrl,
-    String shortcode,
-  ) async {
+    String shortcode, {
+    required bool isReelUrl,
+  }) async {
     try {
+      final pathSegment = isReelUrl ? 'reel' : 'p';
       final res = await _dio.get<String>(
-        'https://www.instagram.com/p/$shortcode/embed/captioned/',
+        'https://www.instagram.com/$pathSegment/$shortcode/embed/captioned/',
         options: Options(
           responseType: ResponseType.plain,
           headers: {
@@ -737,6 +1234,11 @@ class DirectExtractors {
       if (displayMatch != null) {
         thumb = jsonDecode(displayMatch.group(1)!).toString();
       }
+      String author = 'Instagram';
+      final userMatch = RegExp(r'"username"\s*:\s*"([^"]+)"').firstMatch(html);
+      if (userMatch != null) {
+        author = userMatch.group(1)!;
+      }
 
       if (videoMatch != null) {
         final videoUrl = jsonDecode(videoMatch.group(1)!).toString();
@@ -754,7 +1256,8 @@ class DirectExtractors {
             ),
           );
         }
-      } else if (thumb != null && thumb.startsWith('http')) {
+      } else if (!isReelUrl && thumb != null && thumb.startsWith('http')) {
+        // CRITICAL FIX: Never return cover photo for a Reel URL when video_url is missing!
         options.add(
           MediaFormatOption(
             id: 'ig_embed_img',
@@ -776,7 +1279,7 @@ class DirectExtractors {
         originalUrl: canonicalUrl,
         platform: MediaPlatform.instagram,
         title: 'Instagram_$shortcode',
-        author: 'Instagram',
+        author: author,
         thumbnailUrl: thumb,
         extractorLabel: 'Instagram Direct Engine',
         options: options,
@@ -789,8 +1292,9 @@ class DirectExtractors {
   MediaInfo? _parseInstagramMediaNode(
     String canonicalUrl,
     String shortcode,
-    Map media,
-  ) {
+    Map media, {
+    required bool isReelUrl,
+  }) {
     final owner = media['owner'] as Map?;
     final author = (owner?['username']?.toString() ??
             owner?['full_name']?.toString() ??
@@ -808,6 +1312,7 @@ class DirectExtractors {
 
     final thumb = media['display_url']?.toString();
     final options = <MediaFormatOption>[];
+    final selectableItems = <SelectableMediaItem>[];
     final photoUrls = <String>[];
     int vidIndex = 1;
 
@@ -836,7 +1341,7 @@ class DirectExtractors {
         }
       }
     } else {
-      final isVid = media['is_video'] == true;
+      final isVid = media['is_video'] == true || media['video_url'] != null;
       if (isVid && media['video_url'] != null) {
         final durSec = (media['video_duration'] as num?)?.round();
         options.add(
@@ -855,18 +1360,34 @@ class DirectExtractors {
           originalUrl: canonicalUrl,
           platform: MediaPlatform.instagram,
           title: title,
-          author: '@$author',
+          author: author,
           thumbnailUrl: thumb,
           duration: durSec != null && durSec > 0 ? Duration(seconds: durSec) : null,
           extractorLabel: 'Instagram GraphQL',
           options: options,
         );
-      } else if (thumb != null && thumb.startsWith('http')) {
+      } else if (!isReelUrl && thumb != null && thumb.startsWith('http')) {
         photoUrls.add(thumb);
       }
     }
 
     if (photoUrls.isNotEmpty) {
+      for (int i = 0; i < photoUrls.length; i++) {
+        selectableItems.add(
+          SelectableMediaItem(
+            id: 'ig_photo_$i',
+            title: photoUrls.length > 1 ? '$title (${i + 1})' : title,
+            thumbnailUrl: photoUrls[i],
+            directUrl: photoUrls[i],
+            extension: 'jpg',
+            kind: MediaKind.image,
+            engine: DownloadEngine.directHttp,
+            headers: const {'User-Agent': _desktopChromeUa},
+            badgeLabel: 'Foto ${i + 1}',
+            author: author,
+          ),
+        );
+      }
       options.add(
         MediaFormatOption(
           id: 'ig_photos',
@@ -890,16 +1411,17 @@ class DirectExtractors {
       originalUrl: canonicalUrl,
       platform: MediaPlatform.instagram,
       title: title,
-      author: '@$author',
+      author: author,
       thumbnailUrl: thumb ?? (photoUrls.isNotEmpty ? photoUrls.first : null),
       extractorLabel: 'Instagram GraphQL',
       options: options,
+      selectableItems: selectableItems,
     );
   }
 
   Future<String> _resolveRedirects(String url, {required String userAgent}) async {
     String current = url;
-    for (int hop = 0; hop < 5; hop++) {
+    for (int hop = 0; hop < 6; hop++) {
       final response = await _dio.get<dynamic>(
         current,
         options: Options(

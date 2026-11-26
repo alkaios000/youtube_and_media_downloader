@@ -177,7 +177,7 @@ class MainActivity : FlutterActivity() {
                     "sniffMedia" -> {
                         val url = call.argument<String>("url")
                         val platform = call.argument<String>("platform") ?: "other"
-                        val timeoutMs = (call.argument<Int>("timeoutMs") ?: 15000).toLong()
+                        val timeoutMs = (call.argument<Int>("timeoutMs") ?: 16000).toLong()
                         if (url.isNullOrBlank()) {
                             result.error("INVALID_ARGS", "URL kosong", null)
                             return@setMethodCallHandler
@@ -206,8 +206,15 @@ class MainActivity : FlutterActivity() {
                             mapOf(
                                 "instagram" to sniffer.hasPlatformCookies("instagram"),
                                 "douyin" to sniffer.hasPlatformCookies("douyin"),
+                                "facebook" to sniffer.hasPlatformCookies("facebook"),
+                                "pixiv" to sniffer.hasPlatformCookies("pixiv"),
                             ),
                         )
+                    }
+
+                    "getCookieHeader" -> {
+                        val url = call.argument<String>("url") ?: ""
+                        result.success(sniffer.getCookieHeaderForUrl(url))
                     }
 
                     "clearBrowserSessions" -> {
@@ -247,6 +254,23 @@ class MainActivity : FlutterActivity() {
                         )
                     }
 
+                    "extractProfileItems" -> {
+                        val url = call.argument<String>("url")
+                        val cookiesPath = call.argument<String>("cookiesPath")
+                        val limit = call.argument<Int>("limit") ?: 30
+                        if (url.isNullOrBlank()) {
+                            result.error("INVALID_ARGS", "URL profil kosong", null)
+                            return@setMethodCallHandler
+                        }
+                        bridge.extractProfileItems(
+                            url = url,
+                            cookiesPath = cookiesPath,
+                            limit = limit,
+                            onSuccess = { json -> result.success(json) },
+                            onError = { code, message -> result.error(code, message, null) },
+                        )
+                    }
+
                     "downloadWithYtDlp" -> {
                         val taskId = call.argument<String>("taskId")
                         val url = call.argument<String>("url")
@@ -259,6 +283,8 @@ class MainActivity : FlutterActivity() {
                         val audioFormat = call.argument<String>("audioFormat") ?: "mp3"
                         val cookiesPath = call.argument<String>("cookiesPath")
                         val useAria2c = call.argument<Boolean>("useAria2c") ?: false
+                        val platformFolder = call.argument<String>("platformFolder") ?: "Lainnya"
+                        val creatorFolder = call.argument<String>("creatorFolder") ?: "Umum"
 
                         bridge.downloadWithYtDlp(
                             taskId = taskId,
@@ -268,6 +294,8 @@ class MainActivity : FlutterActivity() {
                             audioFormat = audioFormat,
                             cookiesPath = cookiesPath,
                             useAria2c = useAria2c,
+                            platformFolder = platformFolder,
+                            creatorFolder = creatorFolder,
                             onSuccess = { saved -> result.success(saved) },
                             onError = { code, message -> result.error(code, message, null) },
                         )
@@ -282,6 +310,8 @@ class MainActivity : FlutterActivity() {
                         val sourcePath = call.argument<String>("sourcePath")
                         val fileName = call.argument<String>("fileName") ?: "media.mp4"
                         val mimeType = call.argument<String>("mimeType")
+                        val platformFolder = call.argument<String>("platformFolder") ?: "Lainnya"
+                        val creatorFolder = call.argument<String>("creatorFolder") ?: "Umum"
                         if (sourcePath.isNullOrBlank()) {
                             result.error("INVALID_ARGS", "sourcePath kosong", null)
                             return@setMethodCallHandler
@@ -290,7 +320,16 @@ class MainActivity : FlutterActivity() {
                             sourcePath = sourcePath,
                             fileName = fileName,
                             mimeType = mimeType,
+                            platformFolder = platformFolder,
+                            creatorFolder = creatorFolder,
                             onSuccess = { saved -> result.success(saved) },
+                            onError = { code, message -> result.error(code, message, null) },
+                        )
+                    }
+
+                    "listManagedFiles" -> {
+                        bridge.listManagedFiles(
+                            onSuccess = { files -> result.success(files) },
                             onError = { code, message -> result.error(code, message, null) },
                         )
                     }

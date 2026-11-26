@@ -11,6 +11,67 @@ enum MediaKind {
   image,
 }
 
+/// Represents a single selectable photo (in a multi-photo post) OR a single
+/// post/artwork inside a profile/playlist bulk collection.
+class SelectableMediaItem {
+  final String id;
+  final String title;
+  final String? thumbnailUrl;
+  final String? directUrl;
+  final String? sourcePostUrl;
+  final String extension;
+  final MediaKind kind;
+  final DownloadEngine engine;
+  final Map<String, String> headers;
+  final String badgeLabel;
+  final String? author;
+
+  /// If non-null, downloading this item resolves all full-resolution pages of the Pixiv illust ID.
+  final String? pixivIllustId;
+
+  const SelectableMediaItem({
+    required this.id,
+    required this.title,
+    required this.extension,
+    required this.kind,
+    required this.engine,
+    this.thumbnailUrl,
+    this.directUrl,
+    this.sourcePostUrl,
+    this.headers = const {},
+    this.badgeLabel = '',
+    this.author,
+    this.pixivIllustId,
+  });
+
+  String get mimeType {
+    switch (extension.toLowerCase()) {
+      case 'mp4':
+      case 'm4v':
+        return 'video/mp4';
+      case 'webm':
+        return 'video/webm';
+      case 'mp3':
+        return 'audio/mpeg';
+      case 'm4a':
+        return 'audio/mp4';
+      case 'jpg':
+      case 'jpeg':
+        return 'image/jpeg';
+      case 'png':
+        return 'image/png';
+      case 'webp':
+        return 'image/webp';
+      case 'gif':
+        return 'image/gif';
+      default:
+        return kind == MediaKind.audio
+            ? 'audio/mpeg'
+            : (kind == MediaKind.image ? 'image/jpeg' : 'video/mp4');
+    }
+  }
+}
+
 class MediaFormatOption {
   final String id;
   final String label;
@@ -24,7 +85,7 @@ class MediaFormatOption {
   /// For yt-dlp downloads
   final String? ytDlpFormatSelector;
 
-  /// For direct HTTP downloads (Douyin no-watermark, TikWM, vxtwitter, images)
+  /// For direct HTTP downloads (Douyin no-watermark, TikWM, vxtwitter, Pixiv, images)
   final String? directUrl;
   final List<String> galleryUrls;
   final Map<String, String> headers;
@@ -89,6 +150,10 @@ class MediaInfo {
   final List<MediaFormatOption> options;
   final Map<String, String> thumbnailHeaders;
 
+  /// Non-empty when a link contains multiple selectable photos OR a profile/playlist collection.
+  final List<SelectableMediaItem> selectableItems;
+  final bool isBulkProfile;
+
   const MediaInfo({
     required this.originalUrl,
     required this.platform,
@@ -99,7 +164,11 @@ class MediaInfo {
     this.thumbnailUrl,
     this.duration,
     this.thumbnailHeaders = const {},
+    this.selectableItems = const [],
+    this.isBulkProfile = false,
   });
+
+  bool get hasSelectableGallery => selectableItems.length > 1 || isBulkProfile;
 
   String get formattedDuration {
     final d = duration;

@@ -1,19 +1,25 @@
 import 'package:flutter/material.dart';
 
 import '../models/media_info.dart';
+import '../models/media_platform.dart';
 import 'platform_badge.dart';
 
 class MediaPreviewCard extends StatefulWidget {
   final MediaInfo info;
-  final MediaFormatOption initialOption;
-  final void Function(MediaFormatOption selected) onDownload;
+  final MediaFormatOption? initialOption;
+  final void Function(MediaFormatOption selected) onDownloadOption;
+  final void Function(List<SelectableMediaItem> selected) onDownloadSelectedPhotos;
+  final void Function(List<SelectableMediaItem> selected, bool audioOnly)
+      onDownloadBulkProfile;
   final VoidCallback onDismiss;
 
   const MediaPreviewCard({
     super.key,
     required this.info,
     required this.initialOption,
-    required this.onDownload,
+    required this.onDownloadOption,
+    required this.onDownloadSelectedPhotos,
+    required this.onDownloadBulkProfile,
     required this.onDismiss,
   });
 
@@ -22,34 +28,389 @@ class MediaPreviewCard extends StatefulWidget {
 }
 
 class _MediaPreviewCardState extends State<MediaPreviewCard> {
-  late MediaFormatOption _selected;
+  MediaFormatOption? _selectedOption;
+  final Set<String> _selectedIds = {};
+  bool _bulkAudioOnly = false;
 
   @override
   void initState() {
     super.initState();
-    _selected = widget.initialOption;
+    _resetSelection();
   }
 
   @override
   void didUpdateWidget(covariant MediaPreviewCard oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.info.originalUrl != widget.info.originalUrl) {
-      _selected = widget.initialOption;
+      _resetSelection();
     }
+  }
+
+  void _resetSelection() {
+    _selectedOption = widget.initialOption ??
+        (widget.info.options.isNotEmpty ? widget.info.options.first : null);
+    _selectedIds
+      ..clear()
+      ..addAll(widget.info.selectableItems.map((e) => e.id));
+    _bulkAudioOnly = false;
   }
 
   @override
   Widget build(BuildContext context) {
+    if (widget.info.isBulkProfile) {
+      return _buildBulkProfileCard(context);
+    }
+    if (widget.info.selectableItems.length > 1) {
+      return _buildMultiPhotoPickerCard(context);
+    }
+    return _buildStandardSingleCard(context);
+  }
+
+  // =========================================================================
+  // MODE 1: PROFILE / PLAYLIST BULK DOWNLOADER
+  // =========================================================================
+  Widget _buildBulkProfileCard(BuildContext context) {
+    final theme = Theme.of(context);
+    final info = widget.info;
+    final items = info.selectableItems;
+    final allSelected = _selectedIds.length == items.length && items.isNotEmpty;
+    final hasVideoItems = items.any((i) => i.kind == MediaKind.video);
+
+    return Card(
+      clipBehavior: Clip.antiAlias,
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(
+              children: [
+                PlatformBadge(platform: info.platform),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    info.author,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: theme.textTheme.titleSmall?.copyWith(
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                ),
+                IconButton(
+                  onPressed: widget.onDismiss,
+                  visualDensity: VisualDensity.compact,
+                  icon: const Icon(Icons.close_rounded, size: 20),
+                ),
+              ],
+            ),
+            const SizedBox(height: 6),
+            Text(
+              info.title,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: theme.textTheme.bodyMedium?.copyWith(
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+            const SizedBox(height: 12),
+
+            // Select All / Clear & format toggle
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              crossAxisAlignment: WrapCrossAlignment.center,
+              children: [
+                FilledButton.tonalIcon(
+                  onPressed: () {
+                    setState(() {
+                      if (allSelected) {
+                        _selectedIds.clear();
+                      } else {
+                        _selectedIds.addAll(items.map((e) => e.id));
+                      }
+                    });
+                  },
+                  style: FilledButton.styleFrom(
+                    visualDensity: VisualDensity.compact,
+                  ),
+                  icon: Icon(
+                    allSelected ? Icons.deselect_rounded : Icons.select_all_rounded,
+                    size: 17,
+                  ),
+                  label: Text(allSelected ? 'Batal Semua' : 'Pilih Semua'),
+                ),
+                Text(
+                  '${_selectedIds.length} / ${items.length} dipilih',
+                  style: theme.textTheme.labelMedium?.copyWith(
+                    color: theme.colorScheme.primary,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ],
+            ),
+
+            if (hasVideoItems && info.platform != MediaPlatform.pixiv) ...[
+              const SizedBox(height: 10),
+              SegmentedButton<bool>(
+                segments: const [
+                  ButtonSegment(
+                    value: false,
+                    icon: Icon(Icons.videocam_rounded, size: 17),
+                    label: Text('Video MP4'),
+                  ),
+                  ButtonSegment(
+                    value: true,
+                    icon: Icon(Icons.audiotrack_rounded, size: 17),
+                    label: Text('Audio MP3'),
+                  ),
+                ],
+                selected: {_bulkAudioOnly},
+                onSelectionChanged: (s) => setState(() => _bulkAudioOnly = s.first),
+              ),
+            ],
+
+            const SizedBox(height: 12),
+
+            // Selectable visual grid
+            GridView.builder(
+              shrinkWrap: true,
+              physics: const NeverScrollableScrollPhysics(),
+              gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                crossAxisCount: 3,
+                crossAxisSpacing: 8,
+                mainAxisSpacing: 8,
+                childAspectRatio: 0.82,
+              ),
+              itemCount: items.length,
+              itemBuilder: (context, index) {
+                final item = items[index];
+                final isSelected = _selectedIds.contains(item.id);
+                return _SelectableGridTile(
+                  item: item,
+                  selected: isSelected,
+                  onTap: () {
+                    setState(() {
+                      if (isSelected) {
+                        _selectedIds.remove(item.id);
+                      } else {
+                        _selectedIds.add(item.id);
+                      }
+                    });
+                  },
+                );
+              },
+            ),
+
+            const SizedBox(height: 14),
+            SizedBox(
+              height: 50,
+              child: FilledButton.icon(
+                onPressed: _selectedIds.isEmpty
+                    ? null
+                    : () {
+                        final chosen = items
+                            .where((e) => _selectedIds.contains(e.id))
+                            .toList();
+                        widget.onDownloadBulkProfile(chosen, _bulkAudioOnly);
+                      },
+                style: FilledButton.styleFrom(
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(14),
+                  ),
+                ),
+                icon: const Icon(Icons.download_for_offline_rounded),
+                label: Text(
+                  'Unduh Massal (${_selectedIds.length} Media)',
+                  style: const TextStyle(
+                    fontSize: 15,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // =========================================================================
+  // MODE 2: MULTI-PHOTO PICKER (Pixiv multi-page, X photos, IG carousel, TikTok/Douyin)
+  // =========================================================================
+  Widget _buildMultiPhotoPickerCard(BuildContext context) {
+    final theme = Theme.of(context);
+    final info = widget.info;
+    final items = info.selectableItems;
+    final allSelected = _selectedIds.length == items.length && items.isNotEmpty;
+    final extraOptions = info.options.where((o) => !o.isImage).toList();
+
+    return Card(
+      clipBehavior: Clip.antiAlias,
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(
+              children: [
+                PlatformBadge(platform: info.platform),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    info.author,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: theme.colorScheme.onSurfaceVariant,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+                IconButton(
+                  onPressed: widget.onDismiss,
+                  visualDensity: VisualDensity.compact,
+                  icon: const Icon(Icons.close_rounded, size: 20),
+                ),
+              ],
+            ),
+            const SizedBox(height: 6),
+            Text(
+              info.title,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: theme.textTheme.titleSmall?.copyWith(
+                fontWeight: FontWeight.w700,
+                height: 1.3,
+              ),
+            ),
+            const SizedBox(height: 12),
+            Row(
+              children: [
+                Text(
+                  'Pilih Foto (${_selectedIds.length}/${items.length})',
+                  style: theme.textTheme.labelLarge?.copyWith(
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                const Spacer(),
+                TextButton.icon(
+                  onPressed: () {
+                    setState(() {
+                      if (allSelected) {
+                        _selectedIds.clear();
+                      } else {
+                        _selectedIds.addAll(items.map((e) => e.id));
+                      }
+                    });
+                  },
+                  style: TextButton.styleFrom(
+                    visualDensity: VisualDensity.compact,
+                  ),
+                  icon: Icon(
+                    allSelected ? Icons.deselect_rounded : Icons.select_all_rounded,
+                    size: 17,
+                  ),
+                  label: Text(allSelected ? 'Reset' : 'Pilih Semua'),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+
+            GridView.builder(
+              shrinkWrap: true,
+              physics: const NeverScrollableScrollPhysics(),
+              gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                crossAxisCount: 3,
+                crossAxisSpacing: 8,
+                mainAxisSpacing: 8,
+                childAspectRatio: 0.9,
+              ),
+              itemCount: items.length,
+              itemBuilder: (context, index) {
+                final item = items[index];
+                final isSelected = _selectedIds.contains(item.id);
+                return _SelectableGridTile(
+                  item: item,
+                  selected: isSelected,
+                  onTap: () {
+                    setState(() {
+                      if (isSelected) {
+                        _selectedIds.remove(item.id);
+                      } else {
+                        _selectedIds.add(item.id);
+                      }
+                    });
+                  },
+                );
+              },
+            ),
+
+            const SizedBox(height: 14),
+            SizedBox(
+              height: 48,
+              child: FilledButton.icon(
+                onPressed: _selectedIds.isEmpty
+                    ? null
+                    : () {
+                        final chosen = items
+                            .where((e) => _selectedIds.contains(e.id))
+                            .toList();
+                        widget.onDownloadSelectedPhotos(chosen);
+                      },
+                style: FilledButton.styleFrom(
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(14),
+                  ),
+                ),
+                icon: const Icon(Icons.download_rounded),
+                label: Text(
+                  'Unduh ${_selectedIds.length} Foto Terpilih',
+                  style: const TextStyle(
+                    fontSize: 15,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ),
+            ),
+
+            if (extraOptions.isNotEmpty) ...[
+              const SizedBox(height: 12),
+              const Divider(height: 1),
+              const SizedBox(height: 10),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: extraOptions.map((opt) {
+                  return OutlinedButton.icon(
+                    onPressed: () => widget.onDownloadOption(opt),
+                    icon: Icon(_iconForKind(opt.kind), size: 17),
+                    label: Text(opt.label),
+                  );
+                }).toList(),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  // =========================================================================
+  // MODE 3: SINGLE VIDEO / AUDIO / SINGLE PHOTO
+  // =========================================================================
+  Widget _buildStandardSingleCard(BuildContext context) {
     final theme = Theme.of(context);
     final isDark = theme.brightness == Brightness.dark;
     final info = widget.info;
+    final selected = _selectedOption ??
+        (info.options.isNotEmpty ? info.options.first : null);
 
     return Card(
       clipBehavior: Clip.antiAlias,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          // Thumbnail Header
           Stack(
             children: [
               AspectRatio(
@@ -99,7 +460,7 @@ class _MediaPreviewCardState extends State<MediaPreviewCard> {
                     foregroundColor: Colors.white,
                   ),
                   icon: const Icon(Icons.close_rounded, size: 18),
-                  tooltip: 'Tutup pratinjau',
+                  tooltip: 'Tutup',
                 ),
               ),
               if (info.formattedDuration.isNotEmpty)
@@ -125,31 +486,8 @@ class _MediaPreviewCardState extends State<MediaPreviewCard> {
                     ),
                   ),
                 ),
-              Positioned(
-                left: 12,
-                bottom: 12,
-                child: Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 8,
-                    vertical: 4,
-                  ),
-                  decoration: BoxDecoration(
-                    color: Colors.black.withValues(alpha: 0.65),
-                    borderRadius: BorderRadius.circular(8),
-                  ),
-                  child: Text(
-                    info.extractorLabel,
-                    style: const TextStyle(
-                      color: Color(0xFFE2E8F0),
-                      fontSize: 11,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                ),
-              ),
             ],
           ),
-
           Padding(
             padding: const EdgeInsets.all(16),
             child: Column(
@@ -186,20 +524,13 @@ class _MediaPreviewCardState extends State<MediaPreviewCard> {
                     ),
                   ],
                 ),
-                const SizedBox(height: 16),
-                Text(
-                  'Pilih Kualitas / Format',
-                  style: theme.textTheme.labelLarge?.copyWith(
-                    fontWeight: FontWeight.w700,
-                  ),
-                ),
-                const SizedBox(height: 10),
+                const SizedBox(height: 14),
                 ...info.options.map((opt) {
-                  final selected = opt.id == _selected.id;
+                  final isSel = selected?.id == opt.id;
                   return Padding(
                     padding: const EdgeInsets.only(bottom: 8),
                     child: InkWell(
-                      onTap: () => setState(() => _selected = opt),
+                      onTap: () => setState(() => _selectedOption = opt),
                       borderRadius: BorderRadius.circular(14),
                       child: AnimatedContainer(
                         duration: const Duration(milliseconds: 160),
@@ -208,7 +539,7 @@ class _MediaPreviewCardState extends State<MediaPreviewCard> {
                           vertical: 11,
                         ),
                         decoration: BoxDecoration(
-                          color: selected
+                          color: isSel
                               ? theme.colorScheme.primary.withValues(
                                   alpha: isDark ? 0.16 : 0.10,
                                 )
@@ -217,29 +548,29 @@ class _MediaPreviewCardState extends State<MediaPreviewCard> {
                                   : const Color(0xFFF3F6FB)),
                           borderRadius: BorderRadius.circular(14),
                           border: Border.all(
-                            color: selected
+                            color: isSel
                                 ? theme.colorScheme.primary
                                 : (isDark
                                     ? const Color(0xFF26324A)
                                     : const Color(0xFFDCE5F2)),
-                            width: selected ? 1.5 : 1,
+                            width: isSel ? 1.5 : 1,
                           ),
                         ),
                         child: Row(
                           children: [
                             Container(
-                              width: 36,
-                              height: 36,
+                              width: 34,
+                              height: 34,
                               decoration: BoxDecoration(
-                                color: selected
+                                color: isSel
                                     ? theme.colorScheme.primary
                                     : theme.colorScheme.surfaceContainerHighest,
                                 borderRadius: BorderRadius.circular(10),
                               ),
                               child: Icon(
                                 _iconForKind(opt.kind),
-                                size: 19,
-                                color: selected
+                                size: 18,
+                                color: isSel
                                     ? Colors.white
                                     : theme.colorScheme.onSurfaceVariant,
                               ),
@@ -265,32 +596,12 @@ class _MediaPreviewCardState extends State<MediaPreviewCard> {
                                 ],
                               ),
                             ),
-                            Container(
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 8,
-                                vertical: 3,
-                              ),
-                              decoration: BoxDecoration(
-                                color: isDark
-                                    ? Colors.white.withValues(alpha: 0.08)
-                                    : Colors.black.withValues(alpha: 0.06),
-                                borderRadius: BorderRadius.circular(6),
-                              ),
-                              child: Text(
-                                opt.extension.toUpperCase(),
-                                style: const TextStyle(
-                                  fontSize: 11,
-                                  fontWeight: FontWeight.w800,
-                                ),
-                              ),
-                            ),
-                            const SizedBox(width: 6),
                             Icon(
-                              selected
+                              isSel
                                   ? Icons.check_circle_rounded
                                   : Icons.radio_button_unchecked_rounded,
                               size: 20,
-                              color: selected
+                              color: isSel
                                   ? theme.colorScheme.primary
                                   : theme.colorScheme.onSurfaceVariant,
                             ),
@@ -300,27 +611,29 @@ class _MediaPreviewCardState extends State<MediaPreviewCard> {
                     ),
                   );
                 }),
-                const SizedBox(height: 8),
-                SizedBox(
-                  width: double.infinity,
-                  height: 50,
-                  child: FilledButton.icon(
-                    onPressed: () => widget.onDownload(_selected),
-                    style: FilledButton.styleFrom(
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(14),
+                if (selected != null) ...[
+                  const SizedBox(height: 8),
+                  SizedBox(
+                    width: double.infinity,
+                    height: 50,
+                    child: FilledButton.icon(
+                      onPressed: () => widget.onDownloadOption(selected),
+                      style: FilledButton.styleFrom(
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(14),
+                        ),
                       ),
-                    ),
-                    icon: const Icon(Icons.download_rounded),
-                    label: Text(
-                      'Unduh ${_selected.extension.toUpperCase()} Sekarang',
-                      style: const TextStyle(
-                        fontSize: 15,
-                        fontWeight: FontWeight.w700,
+                      icon: const Icon(Icons.download_rounded),
+                      label: Text(
+                        'Unduh ${selected.extension.toUpperCase()}',
+                        style: const TextStyle(
+                          fontSize: 15,
+                          fontWeight: FontWeight.w700,
+                        ),
                       ),
                     ),
                   ),
-                ),
+                ],
               ],
             ),
           ),
@@ -338,6 +651,121 @@ class _MediaPreviewCardState extends State<MediaPreviewCard> {
       case MediaKind.image:
         return Icons.photo_library_rounded;
     }
+  }
+}
+
+class _SelectableGridTile extends StatelessWidget {
+  final SelectableMediaItem item;
+  final bool selected;
+  final VoidCallback onTap;
+
+  const _SelectableGridTile({
+    required this.item,
+    required this.selected,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return GestureDetector(
+      onTap: onTap,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 150),
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(
+            color: selected
+                ? theme.colorScheme.primary
+                : theme.colorScheme.outlineVariant,
+            width: selected ? 2.2 : 1,
+          ),
+        ),
+        clipBehavior: Clip.antiAlias,
+        child: Stack(
+          fit: StackFit.expand,
+          children: [
+            if (item.thumbnailUrl != null && item.thumbnailUrl!.isNotEmpty)
+              Image.network(
+                item.thumbnailUrl!,
+                headers: item.headers.isEmpty ? null : item.headers,
+                fit: BoxFit.cover,
+                errorBuilder: (_, _, _) => _gridPlaceholder(theme),
+              )
+            else
+              _gridPlaceholder(theme),
+
+            // Dim overlay when unselected so selection pops immediately
+            if (!selected)
+              Container(color: Colors.black.withValues(alpha: 0.35)),
+
+            // Bottom gradient + badge/title
+            Positioned(
+              left: 0,
+              right: 0,
+              bottom: 0,
+              child: Container(
+                padding: const EdgeInsets.fromLTRB(6, 14, 6, 5),
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    begin: Alignment.topCenter,
+                    end: Alignment.bottomCenter,
+                    colors: [
+                      Colors.transparent,
+                      Colors.black.withValues(alpha: 0.78),
+                    ],
+                  ),
+                ),
+                child: Text(
+                  item.badgeLabel.isNotEmpty ? item.badgeLabel : item.title,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 10.5,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ),
+            ),
+
+            // Checkmark indicator
+            Positioned(
+              top: 6,
+              right: 6,
+              child: Container(
+                width: 24,
+                height: 24,
+                decoration: BoxDecoration(
+                  color: selected
+                      ? theme.colorScheme.primary
+                      : Colors.black.withValues(alpha: 0.5),
+                  shape: BoxShape.circle,
+                  border: Border.all(color: Colors.white, width: 1.5),
+                ),
+                child: Icon(
+                  selected ? Icons.check_rounded : Icons.add_rounded,
+                  size: 15,
+                  color: Colors.white,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _gridPlaceholder(ThemeData theme) {
+    return Container(
+      color: theme.colorScheme.surfaceContainerHighest,
+      child: Icon(
+        item.kind == MediaKind.image
+            ? Icons.image_outlined
+            : Icons.videocam_outlined,
+        color: theme.colorScheme.onSurfaceVariant,
+      ),
+    );
   }
 }
 

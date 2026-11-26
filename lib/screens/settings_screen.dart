@@ -203,87 +203,96 @@ class SettingsScreen extends StatelessWidget {
 
               const SizedBox(height: 16),
 
-              // Browser Session Login Card (1-Tap for Instagram & Douyin)
+              // Browser Session Login Card (1-Tap for Instagram, Douyin, Facebook & Pixiv)
               Card(
                 child: Column(
                   children: [
-                    ListTile(
-                      leading: const Icon(Icons.public_rounded),
-                      title: const Text('Login Browser (Instagram & Douyin)'),
-                      subtitle: const Text(
-                        'Opsional: login sekali langsung di aplikasi agar Reels/Post Instagram & video Douyin yang dibatasi terbuka penuh',
+                    const ListTile(
+                      leading: Icon(Icons.public_rounded),
+                      title: Text('Login Browser (IG, Douyin, FB, Pixiv)'),
+                      subtitle: Text(
+                        'Opsional: login sekali di aplikasi agar konten terbatas/profil/Reel terbuka penuh',
                       ),
                     ),
                     Padding(
                       padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
-                      child: Row(
+                      child: Column(
                         children: [
-                          Expanded(
-                            child: FilledButton.tonalIcon(
-                              onPressed: () async {
-                                final ok = await manager.openBrowserLogin('instagram');
-                                if (!context.mounted) return;
-                                ScaffoldMessenger.of(context).showSnackBar(
-                                  SnackBar(
-                                    content: Text(
-                                      ok
-                                          ? 'Sesi Instagram tersimpan!'
-                                          : 'Sesi Instagram ditutup.',
-                                    ),
+                          Row(
+                            children: [
+                              Expanded(
+                                child: _LoginChipBtn(
+                                  label: manager.instagramLoggedIn
+                                      ? 'IG Aktif'
+                                      : 'Login IG',
+                                  active: manager.instagramLoggedIn,
+                                  onTap: () => _doBrowserLogin(
+                                    context,
+                                    'instagram',
+                                    'Instagram',
                                   ),
-                                );
-                              },
-                              icon: Icon(
-                                manager.instagramLoggedIn
-                                    ? Icons.check_circle_rounded
-                                    : Icons.login_rounded,
-                                size: 18,
+                                ),
                               ),
-                              label: Text(
-                                manager.instagramLoggedIn
-                                    ? 'IG Aktif'
-                                    : 'Login IG',
+                              const SizedBox(width: 10),
+                              Expanded(
+                                child: _LoginChipBtn(
+                                  label: manager.douyinLoggedIn
+                                      ? 'Douyin Aktif'
+                                      : 'Login Douyin',
+                                  active: manager.douyinLoggedIn,
+                                  onTap: () => _doBrowserLogin(
+                                    context,
+                                    'douyin',
+                                    'Douyin',
+                                  ),
+                                ),
                               ),
-                            ),
+                            ],
                           ),
-                          const SizedBox(width: 10),
-                          Expanded(
-                            child: FilledButton.tonalIcon(
-                              onPressed: () async {
-                                final ok = await manager.openBrowserLogin('douyin');
-                                if (!context.mounted) return;
-                                ScaffoldMessenger.of(context).showSnackBar(
-                                  SnackBar(
-                                    content: Text(
-                                      ok
-                                          ? 'Sesi Douyin tersimpan!'
-                                          : 'Sesi Douyin ditutup.',
-                                    ),
+                          const SizedBox(height: 8),
+                          Row(
+                            children: [
+                              Expanded(
+                                child: _LoginChipBtn(
+                                  label: manager.facebookLoggedIn
+                                      ? 'FB Aktif'
+                                      : 'Login FB',
+                                  active: manager.facebookLoggedIn,
+                                  onTap: () => _doBrowserLogin(
+                                    context,
+                                    'facebook',
+                                    'Facebook',
                                   ),
-                                );
-                              },
-                              icon: Icon(
-                                manager.douyinLoggedIn
-                                    ? Icons.check_circle_rounded
-                                    : Icons.login_rounded,
-                                size: 18,
+                                ),
                               ),
-                              label: Text(
-                                manager.douyinLoggedIn
-                                    ? 'Douyin Aktif'
-                                    : 'Login Douyin',
+                              const SizedBox(width: 10),
+                              Expanded(
+                                child: _LoginChipBtn(
+                                  label: manager.pixivLoggedIn
+                                      ? 'Pixiv Aktif'
+                                      : 'Login Pixiv',
+                                  active: manager.pixivLoggedIn,
+                                  onTap: () => _doBrowserLogin(
+                                    context,
+                                    'pixiv',
+                                    'Pixiv',
+                                  ),
+                                ),
                               ),
-                            ),
+                            ],
                           ),
                         ],
                       ),
                     ),
-                    if (manager.instagramLoggedIn || manager.douyinLoggedIn) ...[
+                    if (manager.instagramLoggedIn ||
+                        manager.douyinLoggedIn ||
+                        manager.facebookLoggedIn ||
+                        manager.pixivLoggedIn) ...[
                       const Divider(height: 1),
                       ListTile(
                         dense: true,
                         leading: const Icon(Icons.logout_rounded, size: 20),
-                        title: const Text('Hapus Sesi Browser'),
+                        title: const Text('Hapus Semua Sesi Browser'),
                         onTap: () async {
                           await manager.clearBrowserSessions();
                           if (!context.mounted) return;
@@ -350,6 +359,22 @@ class SettingsScreen extends StatelessWidget {
           ),
         ),
       ],
+    );
+  }
+
+  Future<void> _doBrowserLogin(
+    BuildContext context,
+    String key,
+    String label,
+  ) async {
+    final ok = await manager.openBrowserLogin(key);
+    if (!context.mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          ok ? 'Sesi $label tersimpan!' : 'Sesi $label ditutup.',
+        ),
+      ),
     );
   }
 
@@ -523,6 +548,30 @@ class SettingsScreen extends StatelessWidget {
       case ThemeMode.system:
         return 'Ikuti Sistem';
     }
+  }
+}
+
+class _LoginChipBtn extends StatelessWidget {
+  final String label;
+  final bool active;
+  final VoidCallback onTap;
+
+  const _LoginChipBtn({
+    required this.label,
+    required this.active,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return FilledButton.tonalIcon(
+      onPressed: onTap,
+      icon: Icon(
+        active ? Icons.check_circle_rounded : Icons.login_rounded,
+        size: 18,
+      ),
+      label: Text(label),
+    );
   }
 }
 
