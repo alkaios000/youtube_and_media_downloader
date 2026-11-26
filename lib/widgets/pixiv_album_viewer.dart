@@ -200,6 +200,7 @@ class _PixivAlbumViewerState extends State<PixivAlbumViewer> {
   Offset? _lastDragGlobalPos;
   Timer? _autoScrollTimer;
   List<ManagedFile> _currentPages = const [];
+  final Set<String> _probedDimensionPaths = <String>{};
 
   @override
   void initState() {
@@ -987,20 +988,59 @@ class _PixivAlbumViewerState extends State<PixivAlbumViewer> {
   }
 
   // ===========================================================================
-  // VIEW 2: ALBUM GALLERY GRID (3 columns)
+  // VIEW 2: ALBUM MASONRY GRID (3 columns, original aspect ratio — ZERO crop!)
   // ===========================================================================
+  void _ensureGridDimensionsResolved(List<ManagedFile> pages) {
+    final pendingPaths = <String>[];
+    for (final p in pages) {
+      if (p.mediaKind != MediaKind.image || p.savedPath.isEmpty) continue;
+      if (ImageDimensionCache.peekAspectRatio(p.savedPath) != null) continue;
+      if (_probedDimensionPaths.add(p.savedPath)) {
+        pendingPaths.add(p.savedPath);
+      }
+    }
+    if (pendingPaths.isEmpty) return;
+
+    Future<void>(() async {
+      bool anyResolved = false;
+      const batchSize = 8;
+      for (int i = 0; i < pendingPaths.length; i += batchSize) {
+        if (!mounted) return;
+        final end = math.min(i + batchSize, pendingPaths.length);
+        final chunk = pendingPaths.sublist(i, end);
+        final results = await Future.wait(
+          chunk.map(ImageDimensionCache.resolve),
+        );
+        if (results.any((r) => r != null)) {
+          anyResolved = true;
+        }
+      }
+      if (anyResolved && mounted) {
+        setState(() {});
+      }
+    });
+  }
+
   Widget _buildGalleryGridSliver(List<ManagedFile> pages) {
     final theme = Theme.of(context);
     final bottomPad = _isSelectionMode ? 104.0 : 32.0;
 
+    _ensureGridDimensionsResolved(pages);
+
+    final aspectRatios = List<double>.generate(pages.length, (i) {
+      final page = pages[i];
+      if (page.mediaKind != MediaKind.image) return 0.85;
+      return ImageDimensionCache.peekAspectRatio(page.savedPath) ?? 0.88;
+    }, growable: false);
+
     return SliverPadding(
-      padding: EdgeInsets.fromLTRB(10, 2, 10, bottomPad),
+      padding: EdgeInsets.fromLTRB(8, 2, 8, bottomPad),
       sliver: SliverGrid(
-        gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+        gridDelegate: MasonrySliverGridDelegate(
           crossAxisCount: 3,
           crossAxisSpacing: 6,
           mainAxisSpacing: 6,
-          childAspectRatio: 0.88,
+          aspectRatios: aspectRatios,
         ),
         delegate: SliverChildBuilderDelegate(
           (context, index) {
@@ -1011,31 +1051,25 @@ class _PixivAlbumViewerState extends State<PixivAlbumViewer> {
               metaData: _PageHitMeta(index),
               behavior: HitTestBehavior.opaque,
               child: GestureDetector(
-                onTap: () {
-                  if (_isSelectionMode) {
-                    _togglePage(page);
-                  } else {
-                    _openFullscreenLightbox(pages, index);
-                  }
-                },
+                // Always open enlarged full-resolution preview on photo tap!
+                // In selection mode, unchecking/checking is done strictly via the checklist circle.
+                onTap: () => _openFullscreenLightbox(pages, index),
                 child: AnimatedContainer(
                   duration: const Duration(milliseconds: 120),
-                  padding: EdgeInsets.all(isSelected ? 4 : 0),
                   decoration: BoxDecoration(
                     borderRadius: BorderRadius.circular(11),
-                    color: isSelected
-                        ? theme.colorScheme.primary.withValues(alpha: 0.2)
-                        : Colors.transparent,
+                    color: theme.colorScheme.surfaceContainerHighest
+                        .withValues(alpha: 0.22),
                     border: Border.all(
                       color: isSelected
                           ? theme.colorScheme.primary
                           : theme.colorScheme.outlineVariant
                               .withValues(alpha: 0.35),
-                      width: isSelected ? 2 : 0.8,
+                      width: isSelected ? 2.2 : 0.8,
                     ),
                   ),
                   child: ClipRRect(
-                    borderRadius: BorderRadius.circular(isSelected ? 8 : 10),
+                    borderRadius: BorderRadius.circular(10),
                     child: Stack(
                       fit: StackFit.expand,
                       children: [
@@ -1065,9 +1099,10 @@ class _PixivAlbumViewerState extends State<PixivAlbumViewer> {
                               )
                             : Image.file(
                                 File(page.savedPath),
-                                cacheWidth: 400,
+                                cacheWidth: 420,
                                 filterQuality: FilterQuality.medium,
-                                fit: BoxFit.cover,
+                                fit: BoxFit.contain,
+                                gaplessPlayback: true,
                                 errorBuilder: (_, _, _) => Container(
                                   color:
                                       theme.colorScheme.surfaceContainerHighest,
@@ -1075,58 +1110,73 @@ class _PixivAlbumViewerState extends State<PixivAlbumViewer> {
                                 ),
                               ),
                         if (isSelected)
-                          Container(
-                            color:
-                                theme.colorScheme.primary.withValues(alpha: 0.16),
+                          IgnorePointer(
+                            child: Container(
+                              color: theme.colorScheme.primary
+                                  .withValues(alpha: 0.16),
+                            ),
                           ),
                         Positioned(
                           top: 4,
                           left: 4,
-                          child: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              _PrivacyMiniBadge(
-                                isPrivate: page.isPrivate,
-                                iconOnly: true,
-                              ),
-                              if (widget.manager.getPhotoRating(page) !=
-                                  ContentRating.normal) ...[
-                                const SizedBox(width: 3),
-                                ContentRatingBadge(
-                                  rating: widget.manager.getPhotoRating(page),
-                                  compact: true,
+                          child: IgnorePointer(
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                _PrivacyMiniBadge(
+                                  isPrivate: page.isPrivate,
+                                  iconOnly: true,
                                 ),
+                                if (widget.manager.getPhotoRating(page) !=
+                                    ContentRating.normal) ...[
+                                  const SizedBox(width: 3),
+                                  ContentRatingBadge(
+                                    rating: widget.manager.getPhotoRating(page),
+                                    compact: true,
+                                  ),
+                                ],
                               ],
-                            ],
+                            ),
                           ),
                         ),
                         Positioned(
                           left: 4,
                           bottom: 4,
-                          child: Container(
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 5,
-                              vertical: 1.5,
-                            ),
-                            decoration: BoxDecoration(
-                              color: Colors.black.withValues(alpha: 0.65),
-                              borderRadius: BorderRadius.circular(5),
-                            ),
-                            child: Text(
-                              '${index + 1}',
-                              style: const TextStyle(
-                                color: Colors.white,
-                                fontSize: 10,
-                                fontWeight: FontWeight.w800,
+                          child: IgnorePointer(
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 5,
+                                vertical: 1.5,
+                              ),
+                              decoration: BoxDecoration(
+                                color: Colors.black.withValues(alpha: 0.65),
+                                borderRadius: BorderRadius.circular(5),
+                              ),
+                              child: Text(
+                                '${index + 1}',
+                                style: const TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 10,
+                                  fontWeight: FontWeight.w800,
+                                ),
                               ),
                             ),
                           ),
                         ),
                         if (_isSelectionMode)
                           Positioned(
-                            top: 4,
-                            right: 4,
-                            child: _PageSelectCircle(selected: isSelected),
+                            top: 0,
+                            right: 0,
+                            child: GestureDetector(
+                              key: ValueKey<String>('grid_select_circle_$index'),
+                              behavior: HitTestBehavior.opaque,
+                              onTap: () => _togglePage(page),
+                              child: Padding(
+                                padding:
+                                    const EdgeInsets.fromLTRB(10, 4, 4, 10),
+                                child: _PageSelectCircle(selected: isSelected),
+                              ),
+                            ),
                           )
                         else
                           Positioned(
@@ -1148,6 +1198,8 @@ class _PixivAlbumViewerState extends State<PixivAlbumViewer> {
             );
           },
           childCount: pages.length,
+          addAutomaticKeepAlives: false,
+          addRepaintBoundaries: true,
         ),
       ),
     );
@@ -2168,6 +2220,192 @@ class _AlbumTagsStrip extends StatelessWidget {
         ],
       ),
     );
+  }
+}
+
+/// Pure-Flutter virtualized Masonry / Waterfall [SliverGridDelegate] that preserves
+/// each photo's exact original aspect ratio (`width / height`, zero cropping!) while
+/// packing every item into the shortest column so columns interlock tightly and fit.
+class MasonrySliverGridDelegate extends SliverGridDelegate {
+  final int crossAxisCount;
+  final double mainAxisSpacing;
+  final double crossAxisSpacing;
+  final List<double> aspectRatios;
+
+  const MasonrySliverGridDelegate({
+    required this.crossAxisCount,
+    required this.aspectRatios,
+    this.mainAxisSpacing = 6.0,
+    this.crossAxisSpacing = 6.0,
+  }) : assert(crossAxisCount > 0);
+
+  @override
+  SliverGridLayout getLayout(SliverConstraints constraints) {
+    final usableCrossAxis = math.max(
+      0.0,
+      constraints.crossAxisExtent - crossAxisSpacing * (crossAxisCount - 1),
+    );
+    final columnWidth = usableCrossAxis / crossAxisCount;
+    return _MasonrySliverGridLayout(
+      crossAxisCount: crossAxisCount,
+      columnWidth: columnWidth,
+      mainAxisSpacing: mainAxisSpacing,
+      crossAxisSpacing: crossAxisSpacing,
+      aspectRatios: aspectRatios,
+    );
+  }
+
+  @override
+  bool shouldRelayout(covariant MasonrySliverGridDelegate oldDelegate) {
+    if (oldDelegate.crossAxisCount != crossAxisCount ||
+        oldDelegate.mainAxisSpacing != mainAxisSpacing ||
+        oldDelegate.crossAxisSpacing != crossAxisSpacing ||
+        oldDelegate.aspectRatios.length != aspectRatios.length) {
+      return true;
+    }
+    for (int i = 0; i < aspectRatios.length; i++) {
+      if ((oldDelegate.aspectRatios[i] - aspectRatios[i]).abs() > 0.001) {
+        return true;
+      }
+    }
+    return false;
+  }
+}
+
+class _MasonrySliverGridLayout extends SliverGridLayout {
+  final int crossAxisCount;
+  final double columnWidth;
+  final double mainAxisSpacing;
+  final double crossAxisSpacing;
+  final List<double> _tops;
+  final List<double> _bottoms;
+  final List<double> _extents;
+  final List<double> _crossOffsets;
+  final double _maxExtent;
+
+  _MasonrySliverGridLayout({
+    required this.crossAxisCount,
+    required this.columnWidth,
+    required this.mainAxisSpacing,
+    required this.crossAxisSpacing,
+    required List<double> aspectRatios,
+  })  : _tops = List<double>.filled(aspectRatios.length, 0.0),
+        _bottoms = List<double>.filled(aspectRatios.length, 0.0),
+        _extents = List<double>.filled(aspectRatios.length, 0.0),
+        _crossOffsets = List<double>.filled(aspectRatios.length, 0.0),
+        _maxExtent = _computePlacement(
+          crossAxisCount: crossAxisCount,
+          columnWidth: columnWidth,
+          mainAxisSpacing: mainAxisSpacing,
+          crossAxisSpacing: crossAxisSpacing,
+          aspectRatios: aspectRatios,
+        ) {
+    final colHeights = List<double>.filled(crossAxisCount, 0.0);
+    for (int i = 0; i < aspectRatios.length; i++) {
+      int bestCol = 0;
+      double minH = colHeights[0];
+      for (int c = 1; c < crossAxisCount; c++) {
+        if (colHeights[c] < minH - 0.5) {
+          minH = colHeights[c];
+          bestCol = c;
+        }
+      }
+      final ratio = aspectRatios[i].clamp(0.22, 3.5);
+      final itemHeight = columnWidth <= 0
+          ? 0.0
+          : (columnWidth / ratio).clamp(42.0, columnWidth * 4.5);
+      final top = colHeights[bestCol];
+      final bottom = top + itemHeight;
+      _tops[i] = top;
+      _bottoms[i] = bottom;
+      _extents[i] = itemHeight;
+      _crossOffsets[i] = bestCol * (columnWidth + crossAxisSpacing);
+      colHeights[bestCol] = bottom + mainAxisSpacing;
+    }
+  }
+
+  static double _computePlacement({
+    required int crossAxisCount,
+    required double columnWidth,
+    required double mainAxisSpacing,
+    required double crossAxisSpacing,
+    required List<double> aspectRatios,
+  }) {
+    if (aspectRatios.isEmpty || columnWidth <= 0) return 0.0;
+    final colHeights = List<double>.filled(crossAxisCount, 0.0);
+    for (int i = 0; i < aspectRatios.length; i++) {
+      int bestCol = 0;
+      double minH = colHeights[0];
+      for (int c = 1; c < crossAxisCount; c++) {
+        if (colHeights[c] < minH - 0.5) {
+          minH = colHeights[c];
+          bestCol = c;
+        }
+      }
+      final ratio = aspectRatios[i].clamp(0.22, 3.5);
+      final itemHeight = (columnWidth / ratio).clamp(42.0, columnWidth * 4.5);
+      colHeights[bestCol] = colHeights[bestCol] + itemHeight + mainAxisSpacing;
+    }
+    double maxH = 0.0;
+    for (final h in colHeights) {
+      final net = h > 0 ? (h - mainAxisSpacing) : 0.0;
+      if (net > maxH) maxH = net;
+    }
+    return maxH;
+  }
+
+  @override
+  int getMinChildIndexForScrollOffset(double scrollOffset) {
+    if (_tops.isEmpty || scrollOffset <= 0) return 0;
+    for (int i = 0; i < _bottoms.length; i++) {
+      if (_bottoms[i] >= scrollOffset) return i;
+    }
+    return _tops.length;
+  }
+
+  @override
+  int getMaxChildIndexForScrollOffset(double scrollOffset) {
+    if (_tops.isEmpty) return 0;
+    int maxIdx = 0;
+    for (int i = 0; i < _tops.length; i++) {
+      if (_tops[i] <= scrollOffset) {
+        maxIdx = i;
+      }
+    }
+    return maxIdx;
+  }
+
+  @override
+  SliverGridGeometry getGeometryForChildIndex(int index) {
+    if (index >= 0 && index < _tops.length) {
+      return SliverGridGeometry(
+        scrollOffset: _tops[index],
+        crossAxisOffset: _crossOffsets[index],
+        mainAxisExtent: _extents[index],
+        crossAxisExtent: columnWidth,
+      );
+    }
+    final col = index % crossAxisCount;
+    final row = index ~/ crossAxisCount;
+    final fallbackExtent = columnWidth > 0 ? columnWidth : 100.0;
+    return SliverGridGeometry(
+      scrollOffset: row * (fallbackExtent + mainAxisSpacing),
+      crossAxisOffset: col * (columnWidth + crossAxisSpacing),
+      mainAxisExtent: fallbackExtent,
+      crossAxisExtent: columnWidth,
+    );
+  }
+
+  @override
+  double computeMaxScrollOffset(int childCount) {
+    if (childCount <= 0 || _tops.isEmpty) return 0.0;
+    if (childCount == _tops.length) return _maxExtent;
+    final limit = math.min(childCount, _bottoms.length);
+    double maxH = 0.0;
+    for (int i = 0; i < limit; i++) {
+      if (_bottoms[i] > maxH) maxH = _bottoms[i];
+    }
+    return maxH;
   }
 }
 

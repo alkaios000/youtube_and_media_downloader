@@ -7,11 +7,26 @@ import 'package:flutter/material.dart';
 
 /// Reads natural image pixel dimensions from file headers only (no full pixel decode)
 /// with a tiny in-memory LRU cache so repeated probes are instant.
-class _ImageDimensionCache {
-  static const int _maxEntries = 400;
+class ImageDimensionCache {
+  static const int _maxEntries = 600;
   static final Map<String, ({int width, int height})> _cache = {};
 
   static ({int width, int height})? peek(String path) => _cache[path];
+
+  static double? peekAspectRatio(String path) {
+    final dims = _cache[path];
+    if (dims == null || dims.width <= 0 || dims.height <= 0) return null;
+    return dims.width / dims.height;
+  }
+
+  @visibleForTesting
+  static void seedForTest(
+    String path, {
+    required int width,
+    required int height,
+  }) {
+    _cache[path] = (width: width, height: height);
+  }
 
   static Future<({int width, int height})?> resolve(String path) async {
     final hit = _cache[path];
@@ -149,7 +164,7 @@ class _SharpOriginalImageState extends State<SharpOriginalImage> {
   void _initForPath() {
     _upgradeTimer?.cancel();
     _upgradeTimer = null;
-    _naturalSize = _ImageDimensionCache.peek(widget.filePath);
+    _naturalSize = ImageDimensionCache.peek(widget.filePath);
 
     if (widget.highZoomActive ||
         widget.originalUpgradeDelay <= Duration.zero) {
@@ -166,7 +181,7 @@ class _SharpOriginalImageState extends State<SharpOriginalImage> {
   void _probeDimensionsIfNeeded() {
     if (_naturalSize != null || widget.filePath.isEmpty) return;
     final targetPath = widget.filePath;
-    _ImageDimensionCache.resolve(targetPath).then((dims) {
+    ImageDimensionCache.resolve(targetPath).then((dims) {
       if (!mounted || widget.filePath != targetPath || dims == null) return;
       _naturalSize = dims;
       if (_useOriginal) {

@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:linkdrop_downloader/models/app_settings.dart';
 import 'package:linkdrop_downloader/models/creator_profile.dart';
@@ -1245,5 +1246,168 @@ void main() {
     img = tester.widget<Image>(find.byType(Image));
     expect(img.filterQuality, FilterQuality.high);
     expect(img.image, isA<FileImage>());
+  });
+
+  testWidgets(
+      'PixivAlbumViewer grid mode uses original-aspect Masonry layout and in select-all mode unchecks only on circle while photo tap opens enlarged preview',
+      (WidgetTester tester) async {
+    // Seed real natural dimensions: tall portrait (1:2), wide landscape (2:1), square (1:1), plus 4th photo
+    ImageDimensionCache.seedForTest(
+      '/nonexistent/m_portrait.jpg',
+      width: 600,
+      height: 1200,
+    );
+    ImageDimensionCache.seedForTest(
+      '/nonexistent/m_landscape.jpg',
+      width: 1600,
+      height: 800,
+    );
+    ImageDimensionCache.seedForTest(
+      '/nonexistent/m_square.jpg',
+      width: 1000,
+      height: 1000,
+    );
+    ImageDimensionCache.seedForTest(
+      '/nonexistent/m_fourth.jpg',
+      width: 1000,
+      height: 1000,
+    );
+
+    final pages = [
+      ManagedFile(
+        fileName: 'p1.jpg',
+        mimeType: 'image/jpeg',
+        mediaKind: MediaKind.image,
+        fileSize: 1024,
+        modifiedAt: DateTime(2026, 11, 26, 10, 0),
+        relativePath: 'Pixiv/ArtistMasonry/AlbumM',
+        savedPath: '/nonexistent/m_portrait.jpg',
+        contentUri: 'content://test/m/1',
+        platformFolder: 'Pixiv',
+        creatorFolder: 'ArtistMasonry',
+        albumFolder: 'AlbumM',
+        isPrivate: true,
+      ),
+      ManagedFile(
+        fileName: 'p2.jpg',
+        mimeType: 'image/jpeg',
+        mediaKind: MediaKind.image,
+        fileSize: 1024,
+        modifiedAt: DateTime(2026, 11, 26, 10, 1),
+        relativePath: 'Pixiv/ArtistMasonry/AlbumM',
+        savedPath: '/nonexistent/m_landscape.jpg',
+        contentUri: 'content://test/m/2',
+        platformFolder: 'Pixiv',
+        creatorFolder: 'ArtistMasonry',
+        albumFolder: 'AlbumM',
+        isPrivate: true,
+      ),
+      ManagedFile(
+        fileName: 'p3.jpg',
+        mimeType: 'image/jpeg',
+        mediaKind: MediaKind.image,
+        fileSize: 1024,
+        modifiedAt: DateTime(2026, 11, 26, 10, 2),
+        relativePath: 'Pixiv/ArtistMasonry/AlbumM',
+        savedPath: '/nonexistent/m_square.jpg',
+        contentUri: 'content://test/m/3',
+        platformFolder: 'Pixiv',
+        creatorFolder: 'ArtistMasonry',
+        albumFolder: 'AlbumM',
+        isPrivate: true,
+      ),
+      ManagedFile(
+        fileName: 'p4.jpg',
+        mimeType: 'image/jpeg',
+        mediaKind: MediaKind.image,
+        fileSize: 1024,
+        modifiedAt: DateTime(2026, 11, 26, 10, 3),
+        relativePath: 'Pixiv/ArtistMasonry/AlbumM',
+        savedPath: '/nonexistent/m_fourth.jpg',
+        contentUri: 'content://test/m/4',
+        platformFolder: 'Pixiv',
+        creatorFolder: 'ArtistMasonry',
+        albumFolder: 'AlbumM',
+        isPrivate: true,
+      ),
+    ];
+
+    final manager = _FakeFilesManager(pages, const {});
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: AppTheme.darkTheme(),
+        home: PixivAlbumViewer(
+          manager: manager,
+          platformFolder: 'Pixiv',
+          creatorFolder: 'ArtistMasonry',
+          albumName: 'AlbumM',
+          albumNames: const ['AlbumM'],
+          initialAlbumIndex: 0,
+        ),
+      ),
+    );
+    await tester.pump();
+
+    // Switch to Grid view
+    await tester.tap(find.byTooltip('Mode Album / Galeri'));
+    await tester.pumpAndSettle();
+
+    // 1) Verify Masonry layout preserves distinct original aspect ratios (NOT uniform squares!)
+    // and packs item #4 into the shortest column (column 1 = directly beneath the wide landscape item #2)!
+    final grid = tester.widget<SliverGrid>(find.byType(SliverGrid));
+    expect(grid.gridDelegate, isA<MasonrySliverGridDelegate>());
+    final layout = (grid.gridDelegate as MasonrySliverGridDelegate).getLayout(
+      const SliverConstraints(
+        axisDirection: AxisDirection.down,
+        growthDirection: GrowthDirection.forward,
+        userScrollDirection: ScrollDirection.idle,
+        scrollOffset: 0,
+        precedingScrollExtent: 0,
+        overlap: 0,
+        remainingPaintExtent: 800,
+        crossAxisExtent: 360,
+        crossAxisDirection: AxisDirection.right,
+        viewportMainAxisExtent: 800,
+        remainingCacheExtent: 800,
+        cacheOrigin: 0,
+      ),
+    );
+    final g0 = layout.getGeometryForChildIndex(0); // Portrait 1:2 (tall)
+    final g1 = layout.getGeometryForChildIndex(1); // Landscape 2:1 (short)
+    final g2 = layout.getGeometryForChildIndex(2); // Square 1:1 (medium)
+    final g3 = layout.getGeometryForChildIndex(3); // Should pack under g1 (shortest column!)
+
+    expect(g0.mainAxisExtent, greaterThan(g2.mainAxisExtent * 1.8));
+    expect(g1.mainAxisExtent, lessThan(g2.mainAxisExtent * 0.6));
+    expect(g3.crossAxisOffset, closeTo(g1.crossAxisOffset, 0.1));
+    expect(g3.scrollOffset, closeTo(g1.mainAxisExtent + 6.0, 0.1));
+
+    // 2) Enter Selection Mode -> tap "Semua" (Pilih Semua)
+    await tester.tap(find.byTooltip('Pilih banyak'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Semua'));
+    await tester.pumpAndSettle();
+    expect(find.text('4 dipilih'), findsOneWidget);
+
+    // 3) Tapping ONLY the checklist circle unchecks that photo (4 -> 3 dipilih) without opening preview!
+    await tester.tap(find.byKey(const ValueKey<String>('grid_select_circle_0')));
+    await tester.pumpAndSettle();
+    expect(find.text('3 dipilih'), findsOneWidget);
+    expect(find.byType(FileGalleryViewer), findsNothing);
+
+    // 4) Tapping the photo area itself (bottom-left of tile #1) opens enlarged FileGalleryViewer preview
+    // and DOES NOT uncheck it!
+    final tile1Rect = tester.getRect(find.text('2'));
+    await tester.tapAt(tile1Rect.center);
+    await tester.pumpAndSettle();
+    expect(find.byType(FileGalleryViewer), findsOneWidget);
+
+    // Return back -> selection count MUST still be 3 dipilih!
+    await tester.tap(find.byIcon(Icons.arrow_back_rounded));
+    await tester.pumpAndSettle();
+    expect(find.byType(FileGalleryViewer), findsNothing);
+    expect(find.text('3 dipilih'), findsOneWidget);
+
+    manager.dispose();
   });
 }
