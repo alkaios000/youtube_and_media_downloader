@@ -192,6 +192,65 @@ class SniffedMediaResult {
   }
 }
 
+class SniffedProfileItem {
+  final String id;
+  final String url;
+  final String title;
+  final String thumbnail;
+  final String badge;
+  final String kind;
+  final String author;
+
+  const SniffedProfileItem({
+    required this.id,
+    required this.url,
+    required this.title,
+    required this.thumbnail,
+    required this.badge,
+    required this.kind,
+    required this.author,
+  });
+
+  factory SniffedProfileItem.fromMap(Map<dynamic, dynamic> map) {
+    return SniffedProfileItem(
+      id: map['id']?.toString() ?? '',
+      url: map['url']?.toString() ?? '',
+      title: map['title']?.toString() ?? '',
+      thumbnail: map['thumbnail']?.toString() ?? '',
+      badge: map['badge']?.toString() ?? '',
+      kind: map['kind']?.toString() ?? 'video',
+      author: map['author']?.toString() ?? '',
+    );
+  }
+}
+
+class SniffedProfileResult {
+  final String finalUrl;
+  final String creator;
+  final List<SniffedProfileItem> items;
+
+  const SniffedProfileResult({
+    required this.finalUrl,
+    required this.creator,
+    required this.items,
+  });
+
+  factory SniffedProfileResult.fromMap(Map<dynamic, dynamic> map) {
+    final rawList = map['items'] as List?;
+    final parsed = rawList
+            ?.whereType<Map>()
+            .map(SniffedProfileItem.fromMap)
+            .where((e) => e.url.startsWith('http'))
+            .toList(growable: false) ??
+        const <SniffedProfileItem>[];
+    return SniffedProfileResult(
+      finalUrl: map['finalUrl']?.toString() ?? '',
+      creator: map['creator']?.toString() ?? '',
+      items: parsed,
+    );
+  }
+}
+
 class NativeBridge {
   static const MethodChannel _channel =
       MethodChannel('com.linkdrop.downloader/engine');
@@ -263,6 +322,25 @@ class NativeBridge {
     return SniffedMediaResult.fromMap(result);
   }
 
+  Future<SniffedProfileResult> sniffProfileItems({
+    required String url,
+    required String platform,
+    int timeoutMs = 28000,
+  }) async {
+    final result = await _channel.invokeMethod<Map<dynamic, dynamic>>(
+      'sniffProfileItems',
+      {
+        'url': url,
+        'platform': platform,
+        'timeoutMs': timeoutMs,
+      },
+    );
+    if (result == null) {
+      throw Exception('Tidak ada item profil yang diterima dari browser.');
+    }
+    return SniffedProfileResult.fromMap(result);
+  }
+
   Future<bool> openBrowserLogin(String platform) async {
     final result = await _channel.invokeMethod<Map<dynamic, dynamic>>(
       'openBrowserLogin',
@@ -279,6 +357,7 @@ class NativeBridge {
       'douyin': result?['douyin'] as bool? ?? false,
       'facebook': result?['facebook'] as bool? ?? false,
       'pixiv': result?['pixiv'] as bool? ?? false,
+      'tiktok': result?['tiktok'] as bool? ?? false,
     };
   }
 
@@ -361,6 +440,13 @@ class NativeBridge {
       throw Exception('Gagal menerima hasil file unduhan.');
     }
     return SavedFileResult.fromMap(result);
+  }
+
+  Future<bool> pauseDownload(String taskId) async {
+    final ok = await _channel.invokeMethod<bool>('pauseDownload', {
+      'taskId': taskId,
+    });
+    return ok ?? false;
   }
 
   Future<bool> cancelDownload(String taskId) async {
@@ -563,5 +649,20 @@ class NativeBridge {
   Future<int> clearCache() async {
     final bytes = await _channel.invokeMethod<int>('clearCache');
     return bytes ?? 0;
+  }
+
+  Future<bool> exportBackupFile({
+    required String jsonContent,
+    required String fileName,
+  }) async {
+    final ok = await _channel.invokeMethod<bool>('exportBackupFile', {
+      'jsonContent': jsonContent,
+      'fileName': fileName,
+    });
+    return ok ?? false;
+  }
+
+  Future<String?> importBackupFile() async {
+    return _channel.invokeMethod<String>('importBackupFile');
   }
 }

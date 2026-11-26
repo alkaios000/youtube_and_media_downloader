@@ -94,16 +94,54 @@ class _DownloadDetailSheet extends StatelessWidget {
                             ),
                           ],
                           const Spacer(),
-                          if (item.isActive)
+                          if (item.isActive) ...[
+                            FilledButton.tonalIcon(
+                              onPressed: () => manager.pauseDownload(item.id),
+                              style: FilledButton.styleFrom(
+                                visualDensity: VisualDensity.compact,
+                                padding:
+                                    const EdgeInsets.symmetric(horizontal: 10),
+                              ),
+                              icon: const Icon(
+                                Icons.pause_circle_outline_rounded,
+                                size: 16,
+                              ),
+                              label: const Text('Jeda'),
+                            ),
+                            const SizedBox(width: 4),
                             TextButton.icon(
                               onPressed: () => manager.cancelDownload(item.id),
                               style: TextButton.styleFrom(
                                 foregroundColor: theme.colorScheme.error,
                                 visualDensity: VisualDensity.compact,
+                                padding:
+                                    const EdgeInsets.symmetric(horizontal: 8),
                               ),
-                              icon: const Icon(Icons.stop_circle_outlined, size: 17),
+                              icon: const Icon(
+                                Icons.stop_circle_outlined,
+                                size: 17,
+                              ),
                               label: const Text('Batal'),
                             ),
+                          ] else if (item.canResume) ...[
+                            FilledButton.icon(
+                              onPressed: () => manager.resumeDownload(item.id),
+                              style: FilledButton.styleFrom(
+                                visualDensity: VisualDensity.compact,
+                                padding:
+                                    const EdgeInsets.symmetric(horizontal: 12),
+                              ),
+                              icon: Icon(
+                                item.isPaused
+                                    ? Icons.play_arrow_rounded
+                                    : Icons.refresh_rounded,
+                                size: 17,
+                              ),
+                              label: Text(
+                                item.isPaused ? 'Lanjut' : 'Coba Lagi',
+                              ),
+                            ),
+                          ],
                         ],
                       ),
                       const SizedBox(height: 8),
@@ -127,22 +165,28 @@ class _DownloadDetailSheet extends StatelessWidget {
                           ),
                         ),
                       ],
-                      if (item.isActive) ...[
+                      if (item.isActive || item.isPaused) ...[
                         const SizedBox(height: 10),
                         ClipRRect(
                           borderRadius: BorderRadius.circular(999),
                           child: LinearProgressIndicator(
                             minHeight: 7,
+                            color: item.isPaused ? const Color(0xFFF59E0B) : null,
+                            backgroundColor: item.isPaused
+                                ? const Color(0xFFF59E0B).withValues(alpha: 0.18)
+                                : null,
                             value: item.progress >= 0
                                 ? (item.progress / 100.0).clamp(0.0, 1.0)
-                                : null,
+                                : (item.isPaused ? 0.0 : null),
                           ),
                         ),
                         const SizedBox(height: 5),
                         Text(
                           item.statusText,
                           style: theme.textTheme.bodySmall?.copyWith(
-                            color: theme.colorScheme.primary,
+                            color: item.isPaused
+                                ? const Color(0xFFF59E0B)
+                                : theme.colorScheme.primary,
                             fontWeight: FontWeight.w600,
                           ),
                         ),
@@ -384,12 +428,16 @@ class _SubFileRow extends StatelessWidget {
             ],
           ),
           if (file.status == DownloadStatus.downloading ||
-              file.status == DownloadStatus.saving) ...[
+              file.status == DownloadStatus.saving ||
+              (file.status == DownloadStatus.paused && file.progress > 0)) ...[
             const SizedBox(height: 8),
             ClipRRect(
               borderRadius: BorderRadius.circular(999),
               child: LinearProgressIndicator(
                 minHeight: 5,
+                color: file.status == DownloadStatus.paused
+                    ? const Color(0xFFF59E0B)
+                    : null,
                 value: file.progress >= 0
                     ? (file.progress / 100.0).clamp(0.0, 1.0)
                     : null,
@@ -423,6 +471,10 @@ class _SubFileRow extends StatelessWidget {
         return parts.isEmpty ? 'Mengunduh...' : parts.join(' • ');
       case DownloadStatus.saving:
         return 'Menyimpan ke galeri...';
+      case DownloadStatus.paused:
+        return file.progress > 0
+            ? 'Dijeda • ${file.progress.toStringAsFixed(0)}%'
+            : 'Dijeda';
       case DownloadStatus.completed:
         if (file.speedText.isNotEmpty) {
           return file.downloadedBytes > 0
@@ -449,6 +501,8 @@ class _SubFileRow extends StatelessWidget {
         return const Color(0xFF38BDF8);
       case DownloadStatus.saving:
         return const Color(0xFF818CF8);
+      case DownloadStatus.paused:
+        return const Color(0xFFF59E0B);
       case DownloadStatus.completed:
         return const Color(0xFF22C55E);
       case DownloadStatus.failed:

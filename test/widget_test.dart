@@ -25,6 +25,7 @@ void main() {
     expect(find.text('Engine Siap'), findsNothing);
     expect(find.text('Unduh Cepat (Kualitas Default)'), findsNothing);
     expect(find.text('Cara Tercepat Mengunduh'), findsNothing);
+    expect(find.text('Paste link'), findsOneWidget);
     expect(find.text('Proses Link'), findsOneWidget);
 
     // 4 NavigationBar destinations: Unduh, File, Riwayat, Pengaturan
@@ -41,6 +42,13 @@ void main() {
     await tester.pump();
     expect(find.text('Terdeteksi: Instagram'), findsOneWidget);
     expect(find.text('Reel (Video)'), findsOneWidget);
+
+    // Tapping outside the input dismisses keyboard / unfocuses TextField
+    final editable = tester.widget<EditableText>(find.byType(EditableText).first);
+    expect(editable.focusNode.hasFocus, isTrue);
+    await tester.tapAt(const Offset(10, 10));
+    await tester.pump();
+    expect(editable.focusNode.hasFocus, isFalse);
 
     // Entering a Pixiv profile switches CTA to bulk mode
     await tester.enterText(
@@ -164,5 +172,63 @@ void main() {
     await tester.tap(find.text('Unduh Massal (3 Media)'));
     await tester.pump();
     expect(downloadedBulk?.length, 3);
+  });
+
+  testWidgets('Universal marker lock also locks TikTok bulk profile items until unmarked',
+      (WidgetTester tester) async {
+    final markers = <String>{'tt:9990001'};
+    final tiktokProfile = MediaInfo(
+      originalUrl: 'https://www.tiktok.com/@creator',
+      platform: MediaPlatform.tiktok,
+      title: 'Profil @creator (2 video)',
+      author: '@creator',
+      extractorLabel: 'TikTok',
+      options: const [],
+      isBulkProfile: true,
+      selectableItems: const [
+        SelectableMediaItem(
+          id: 'v1',
+          title: 'Reel 1',
+          sourcePostUrl: 'https://www.tiktok.com/@creator/video/9990001',
+          extension: 'mp4',
+          kind: MediaKind.video,
+          engine: DownloadEngine.ytDlp,
+          badgeLabel: 'Video',
+        ),
+        SelectableMediaItem(
+          id: 'v2',
+          title: 'Reel 2',
+          sourcePostUrl: 'https://www.tiktok.com/@creator/video/9990002',
+          extension: 'mp4',
+          kind: MediaKind.video,
+          engine: DownloadEngine.ytDlp,
+          badgeLabel: 'Video',
+        ),
+      ],
+    );
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: AppTheme.darkTheme(),
+        home: Scaffold(
+          body: SingleChildScrollView(
+            child: MediaPreviewCard(
+              info: tiktokProfile,
+              initialOption: null,
+              isDownloaded: (key) => markers.contains(key),
+              onDownloadOption: (_) {},
+              onDownloadSelectedPhotos: (_) {},
+              onDownloadBulkProfile: (_, _) {},
+              onDismiss: () {},
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    // Only the 1 unmarked TikTok reel is selectable; marked reel is locked!
+    expect(find.text('1 / 1 dipilih'), findsOneWidget);
+    expect(find.text('Unduh Massal (1 Media)'), findsOneWidget);
   });
 }

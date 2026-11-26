@@ -131,6 +131,9 @@ class DirectExtractors {
               meta['userAccount']?.toString() ??
               'Pixiv')
           .trim();
+      final userId = meta['userId']?.toString().trim() ?? '';
+      final profileUrl =
+          userId.isNotEmpty ? 'https://www.pixiv.net/users/$userId' : null;
 
       final pagesRes = await _dio.get<dynamic>(
         'https://www.pixiv.net/ajax/illust/$illustId/pages',
@@ -213,6 +216,7 @@ class DirectExtractors {
         thumbnailHeaders: headers,
         extractorLabel: 'Pixiv Original Engine',
         selectableItems: items,
+        creatorProfileUrl: profileUrl,
         options: [
           MediaFormatOption(
             id: 'pixiv_all',
@@ -345,6 +349,7 @@ class DirectExtractors {
         options: const [],
         selectableItems: items,
         isBulkProfile: true,
+        creatorProfileUrl: 'https://www.pixiv.net/users/$userId',
       );
     } catch (_) {
       return null;
@@ -789,8 +794,130 @@ class DirectExtractors {
   }
 
   // ===========================================================================
-  // TIKTOK: Fallback single post & profile bulk extractor (TikWM)
+  // TIKTOK: Redirect resolver, single post & profile bulk extractor
   // ===========================================================================
+
+  Future<String> resolveTikTokUrl(String url) async {
+    final lower = url.toLowerCase();
+    if (!lower.contains('vt.tiktok.com') &&
+        !lower.contains('vm.tiktok.com') &&
+        !lower.contains('tiktok.com/t/')) {
+      return url;
+    }
+    try {
+      return await _resolveRedirects(url, userAgent: _desktopChromeUa);
+    } catch (_) {
+      return url;
+    }
+  }
+
+  /// Fast direct HTML attempt parsing TikTok's `__UNIVERSAL_DATA_FOR_REHYDRATION__`
+  /// when TikTok SSR includes initial items without requiring JS execution.
+  Future<MediaInfo?> extractTikTokProfileDirectHtml(
+    String originalUrl,
+    String username, {
+    String cookieHeader = '',
+  }) async {
+    final cleanUser = username.replaceFirst('@', '').trim();
+    if (cleanUser.isEmpty) return null;
+    try {
+      final profileUrl = 'https://www.tiktok.com/@$cleanUser';
+      final res = await _dio.get<String>(
+        profileUrl,
+        options: Options(
+          responseType: ResponseType.plain,
+          headers: {
+            'User-Agent': _desktopChromeUa,
+            'Accept':
+                'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9',
+            if (cookieHeader.isNotEmpty) 'Cookie': cookieHeader,
+          },
+        ),
+      );
+      final html = res.data ?? '';
+      if (html.isEmpty) return null;
+
+      final match = RegExp(
+        r'<script[^>]+id="(?:__UNIVERSAL_DATA_FOR_REHYDRATION__|SIGI_STATE)"[^>]*>([\s\S]*?)</script>',
+        caseSensitive: false,
+      ).firstMatch(html);
+      if (match == null) return null;
+
+      final decoded = jsonDecode(match.group(1)!);
+      final items = <SelectableMediaItem>[];
+      final seenIds = <String>{};
+
+      void walk(dynamic node, int depth) {
+        if (node == null || depth > 10) return;
+        if (node is List) {
+          for (final child in node) {
+            walk(child, depth + 1);
+          }
+          return;
+        }
+        if (node is! Map) return;
+
+        final id = node['id']?.toString() ?? '';
+        final videoMap = node['video'];
+        final imagePost = node['imagePost'];
+        if (id.length >= 10 &&
+            RegExp(r'^\d+$').hasMatch(id) &&
+            (videoMap is Map || imagePost is Map) &&
+            seenIds.add(id)) {
+          final isPhoto = imagePost is Map;
+          final desc = (node['desc']?.toString() ?? '').trim();
+          final thumb = videoMap is Map
+              ? (videoMap['cover']?.toString() ??
+                  videoMap['originCover']?.toString())
+              : null;
+          final dur = videoMap is Map
+              ? ((videoMap['duration'] as num?)?.round() ?? 0)
+              : 0;
+          final postUrl =
+              'https://www.tiktok.com/@$cleanUser/${isPhoto ? 'photo' : 'video'}/$id';
+          items.add(
+            SelectableMediaItem(
+              id: 'tt_ssr_$id',
+              title: desc.isNotEmpty ? desc : 'TikTok_$id',
+              thumbnailUrl:
+                  (thumb != null && thumb.startsWith('http')) ? thumb : null,
+              sourcePostUrl: postUrl,
+              extension: isPhoto ? 'jpg' : 'mp4',
+              kind: isPhoto ? MediaKind.image : MediaKind.video,
+              engine: DownloadEngine.ytDlp,
+              badgeLabel: isPhoto ? 'Foto' : (dur > 0 ? '${dur}s' : 'Video'),
+              author: cleanUser,
+            ),
+          );
+        }
+
+        for (final val in node.values) {
+          if (val is Map || val is List) {
+            walk(val, depth + 1);
+          }
+        }
+      }
+
+      walk(decoded, 0);
+      if (items.isEmpty) return null;
+
+      return MediaInfo(
+        originalUrl: profileUrl,
+        platform: MediaPlatform.tiktok,
+        title: 'Profil TikTok @$cleanUser (${items.length} media)',
+        author: cleanUser,
+        thumbnailUrl: items.first.thumbnailUrl,
+        extractorLabel: 'TikTok Profil Engine',
+        options: const [],
+        selectableItems: items,
+        isBulkProfile: true,
+        creatorProfileUrl: profileUrl,
+      );
+    } catch (_) {
+      return null;
+    }
+  }
 
   Future<MediaInfo?> extractTikTokFallback(String url) async {
     try {
@@ -924,6 +1051,10 @@ class DirectExtractors {
         extractorLabel: 'TikTok Fast Engine',
         options: options,
         selectableItems: selectableItems,
+        creatorProfileUrl:
+            author.isNotEmpty && author != 'TikTok'
+                ? 'https://www.tiktok.com/@$author'
+                : null,
       );
     } catch (_) {
       return null;
@@ -1153,6 +1284,8 @@ class DirectExtractors {
         extractorLabel: 'X Direct Engine',
         options: options,
         selectableItems: selectableItems,
+        creatorProfileUrl:
+            authorName.isNotEmpty ? 'https://x.com/$authorName' : null,
       );
     } catch (_) {
       return null;
@@ -1267,6 +1400,8 @@ class DirectExtractors {
         extractorLabel: 'X Direct Engine',
         options: options,
         selectableItems: selectableItems,
+        creatorProfileUrl:
+            authorName.isNotEmpty ? 'https://x.com/$authorName' : null,
       );
     } catch (_) {
       return null;
@@ -1595,6 +1730,10 @@ class DirectExtractors {
           duration: durSec != null && durSec > 0 ? Duration(seconds: durSec) : null,
           extractorLabel: 'Instagram GraphQL',
           options: options,
+          creatorProfileUrl:
+              author.isNotEmpty && author != 'Instagram'
+                  ? 'https://www.instagram.com/$author/'
+                  : null,
         );
       } else if (!isReelUrl && thumb != null && thumb.startsWith('http')) {
         photoUrls.add(thumb);
@@ -1646,6 +1785,10 @@ class DirectExtractors {
       extractorLabel: 'Instagram GraphQL',
       options: options,
       selectableItems: selectableItems,
+      creatorProfileUrl:
+          author.isNotEmpty && author != 'Instagram'
+              ? 'https://www.instagram.com/$author/'
+              : null,
     );
   }
 

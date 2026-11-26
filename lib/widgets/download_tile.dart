@@ -9,6 +9,8 @@ class DownloadTile extends StatelessWidget {
   final DownloadItem item;
   final bool isMarkedDownloaded;
   final VoidCallback? onTapDetail;
+  final VoidCallback? onPause;
+  final VoidCallback? onResume;
   final VoidCallback? onCancel;
   final VoidCallback? onOpen;
   final VoidCallback? onShare;
@@ -19,6 +21,8 @@ class DownloadTile extends StatelessWidget {
     required this.item,
     this.isMarkedDownloaded = false,
     this.onTapDetail,
+    this.onPause,
+    this.onResume,
     this.onCancel,
     this.onOpen,
     this.onShare,
@@ -148,20 +152,19 @@ class DownloadTile extends StatelessWidget {
                         : null,
                   ),
                 ),
-                const SizedBox(height: 8),
+                const SizedBox(height: 6),
+                Text(
+                  item.statusText,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: theme.colorScheme.primary,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                const SizedBox(height: 4),
                 Row(
                   children: [
-                    Expanded(
-                      child: Text(
-                        item.statusText,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: theme.textTheme.bodySmall?.copyWith(
-                          color: theme.colorScheme.primary,
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                    ),
                     if (onTapDetail != null)
                       TextButton.icon(
                         onPressed: onTapDetail,
@@ -176,6 +179,21 @@ class DownloadTile extends StatelessWidget {
                               : 'Detail',
                         ),
                       ),
+                    const Spacer(),
+                    if (onPause != null)
+                      FilledButton.tonalIcon(
+                        onPressed: onPause,
+                        style: FilledButton.styleFrom(
+                          visualDensity: VisualDensity.compact,
+                          padding: const EdgeInsets.symmetric(horizontal: 10),
+                        ),
+                        icon: const Icon(
+                          Icons.pause_circle_outline_rounded,
+                          size: 17,
+                        ),
+                        label: const Text('Jeda'),
+                      ),
+                    const SizedBox(width: 4),
                     TextButton.icon(
                       onPressed: onCancel,
                       style: TextButton.styleFrom(
@@ -187,6 +205,32 @@ class DownloadTile extends StatelessWidget {
                       label: const Text('Batal'),
                     ),
                   ],
+                ),
+              ],
+
+              if (item.isPaused) ...[
+                const SizedBox(height: 12),
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(999),
+                  child: LinearProgressIndicator(
+                    minHeight: 7,
+                    color: const Color(0xFFF59E0B),
+                    backgroundColor:
+                        const Color(0xFFF59E0B).withValues(alpha: 0.18),
+                    value: item.progress >= 0
+                        ? (item.progress / 100.0).clamp(0.0, 1.0)
+                        : 0.0,
+                  ),
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  item.statusText.isNotEmpty ? item.statusText : 'Dijeda',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: const Color(0xFFF59E0B),
+                    fontWeight: FontWeight.w600,
+                  ),
                 ),
               ],
 
@@ -235,6 +279,38 @@ class DownloadTile extends StatelessWidget {
                         ),
                         icon: const Icon(Icons.share_rounded, size: 15),
                         label: const Text('Bagikan'),
+                      ),
+                    ] else if (item.isPaused && onResume != null) ...[
+                      FilledButton.icon(
+                        onPressed: onResume,
+                        style: FilledButton.styleFrom(
+                          visualDensity: VisualDensity.compact,
+                          padding: const EdgeInsets.symmetric(horizontal: 12),
+                        ),
+                        icon: const Icon(Icons.play_arrow_rounded, size: 18),
+                        label: const Text('Lanjut'),
+                      ),
+                      if (onCancel != null) ...[
+                        const SizedBox(width: 6),
+                        TextButton(
+                          onPressed: onCancel,
+                          style: TextButton.styleFrom(
+                            foregroundColor: theme.colorScheme.error,
+                            visualDensity: VisualDensity.compact,
+                            padding: const EdgeInsets.symmetric(horizontal: 8),
+                          ),
+                          child: const Text('Batal'),
+                        ),
+                      ],
+                    ] else if (item.canResume && onResume != null) ...[
+                      FilledButton.tonalIcon(
+                        onPressed: onResume,
+                        style: FilledButton.styleFrom(
+                          visualDensity: VisualDensity.compact,
+                          padding: const EdgeInsets.symmetric(horizontal: 11),
+                        ),
+                        icon: const Icon(Icons.refresh_rounded, size: 17),
+                        label: const Text('Coba Lagi'),
                       ),
                     ],
                     const Spacer(),
@@ -367,6 +443,10 @@ class _StatusChip extends StatelessWidget {
       case DownloadStatus.saving:
         color = const Color(0xFF818CF8);
         text = 'Menyimpan';
+        break;
+      case DownloadStatus.paused:
+        color = const Color(0xFFF59E0B);
+        text = 'Dijeda';
         break;
       case DownloadStatus.completed:
         color = const Color(0xFF22C55E);

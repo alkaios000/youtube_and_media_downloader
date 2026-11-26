@@ -20,6 +20,8 @@ class MainActivity : FlutterActivity() {
         private const val PROGRESS_CHANNEL = "com.linkdrop.downloader/progress"
         private const val SHARE_CHANNEL = "com.linkdrop.downloader/share"
         private const val PERMISSION_REQUEST_CODE = 4201
+        private const val EXPORT_BACKUP_REQUEST_CODE = 4202
+        private const val IMPORT_BACKUP_REQUEST_CODE = 4203
     }
 
     private lateinit var bridge: MediaEngineBridge
@@ -27,6 +29,9 @@ class MainActivity : FlutterActivity() {
     private var initialSharedText: String? = null
     private var shareEventSink: EventChannel.EventSink? = null
     private var pendingPermissionResult: MethodChannel.Result? = null
+    private var pendingExportResult: MethodChannel.Result? = null
+    private var pendingExportJson: String? = null
+    private var pendingImportResult: MethodChannel.Result? = null
     private var hasRequestedPermissionsBefore = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -107,6 +112,48 @@ class MainActivity : FlutterActivity() {
             val result = pendingPermissionResult
             pendingPermissionResult = null
             result?.success(buildPermissionStatus())
+        }
+    }
+
+    @Deprecated("Deprecated in Java")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == EXPORT_BACKUP_REQUEST_CODE) {
+            val res = pendingExportResult
+            val json = pendingExportJson
+            pendingExportResult = null
+            pendingExportJson = null
+            if (resultCode != RESULT_OK || data?.data == null || json == null) {
+                res?.success(false)
+                return
+            }
+            val uri = data.data!!
+            Thread {
+                val ok = runCatching {
+                    contentResolver.openOutputStream(uri)?.use { out ->
+                        out.write(json.toByteArray(Charsets.UTF_8))
+                        out.flush()
+                    } ?: return@runCatching false
+                    true
+                }.getOrDefault(false)
+                runOnUiThread { res?.success(ok) }
+            }.start()
+        } else if (requestCode == IMPORT_BACKUP_REQUEST_CODE) {
+            val res = pendingImportResult
+            pendingImportResult = null
+            if (resultCode != RESULT_OK || data?.data == null) {
+                res?.success(null)
+                return
+            }
+            val uri = data.data!!
+            Thread {
+                val text = runCatching {
+                    contentResolver.openInputStream(uri)?.bufferedReader(Charsets.UTF_8)?.use {
+                        it.readText()
+                    }
+                }.getOrNull()
+                runOnUiThread { res?.success(text) }
+            }.start()
         }
     }
 
@@ -205,6 +252,24 @@ class MainActivity : FlutterActivity() {
                         )
                     }
 
+                    "sniffProfileItems" -> {
+                        val url = call.argument<String>("url")
+                        val platform = call.argument<String>("platform") ?: "tiktok"
+                        val timeoutMs = (call.argument<Int>("timeoutMs") ?: 28000).toLong()
+                        if (url.isNullOrBlank()) {
+                            result.error("INVALID_ARGS", "URL profil kosong", null)
+                            return@setMethodCallHandler
+                        }
+                        sniffer.sniffProfileItems(
+                            activity = this,
+                            url = url,
+                            platform = platform,
+                            timeoutMs = timeoutMs,
+                            onResult = { payload -> result.success(payload) },
+                            onError = { code, message -> result.error(code, message, null) },
+                        )
+                    }
+
                     "openBrowserLogin" -> {
                         val platform = call.argument<String>("platform") ?: "instagram"
                         sniffer.openLoginDialog(
@@ -221,6 +286,7 @@ class MainActivity : FlutterActivity() {
                                 "douyin" to sniffer.hasPlatformCookies("douyin"),
                                 "facebook" to sniffer.hasPlatformCookies("facebook"),
                                 "pixiv" to sniffer.hasPlatformCookies("pixiv"),
+                                "tiktok" to sniffer.hasPlatformCookies("tiktok"),
                             ),
                         )
                     }
@@ -310,6 +376,11 @@ class MainActivity : FlutterActivity() {
                             onSuccess = { saved -> result.success(saved) },
                             onError = { code, message -> result.error(code, message, null) },
                         )
+                    }
+
+                    "pauseDownload" -> {
+                        val taskId = call.argument<String>("taskId") ?: ""
+                        result.success(bridge.pauseDownload(taskId))
                     }
 
                     "cancelDownload" -> {
@@ -440,11 +511,53 @@ class MainActivity : FlutterActivity() {
                     }
 
                     "getStorageInfo" -> {
-                        result.success(bridge.getStorageInfo())
+                        bridge.getStorageInfoAsync { info -> result.success(info) }
                     }
 
                     "clearCache" -> {
-                        result.success(bridge.clearCache())
+                        bridge.clearCacheAsync { freed -> result.success(freed) }
+                    }
+
+                    "exportBackupFile" -> {
+                        val jsonContent = call.argument<String>("jsonContent") ?: ""
+                        val fileName = call.argument<String>("fileName") ?: "all_download_backup.json"
+                        if (jsonContent.isBlank()) {
+                            result.success(false)
+                            return@setMethodCallHandler
+                        }
+                        pendingExportResult?.success(false)
+                        pendingExportResult = result
+                        pendingExportJson = jsonContent
+                        val intent = Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
+                            addCategory(Intent.CATEGORY_OPENABLE)
+                            type = "application/json"
+                            putExtra(Intent.EXTRA_TITLE, fileName)
+                        }
+                        runCatching {
+                            @Suppress("DEPRECATION")
+                            startActivityForResult(intent, EXPORT_BACKUP_REQUEST_CODE)
+                        }.onFailure {
+                            pendingExportResult = null
+                            pendingExportJson = null
+                            result.success(false)
+                        }
+                    }
+
+                    "importBackupFile" -> {
+                        pendingImportResult?.success(null)
+                        pendingImportResult = result
+                        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                            addCategory(Intent.CATEGORY_OPENABLE)
+                            type = "*/*"
+                            putExtra(Intent.EXTRA_MIME_TYPES, arrayOf("application/json", "text/plain", "*/*"))
+                        }
+                        runCatching {
+                            @Suppress("DEPRECATION")
+                            startActivityForResult(intent, IMPORT_BACKUP_REQUEST_CODE)
+                        }.onFailure {
+                            pendingImportResult = null
+                            result.success(null)
+                        }
                     }
 
                     else -> result.notImplemented()

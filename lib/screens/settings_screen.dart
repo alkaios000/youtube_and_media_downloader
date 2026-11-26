@@ -1,8 +1,10 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../models/app_settings.dart';
 import '../models/media_info.dart';
 import '../services/download_manager.dart';
+import '../services/storage_service.dart';
 
 class SettingsScreen extends StatelessWidget {
   final DownloadManager manager;
@@ -203,15 +205,15 @@ class SettingsScreen extends StatelessWidget {
 
               const SizedBox(height: 16),
 
-              // Browser Session Login Card (1-Tap for Instagram, Douyin, Facebook & Pixiv)
+              // Browser Session Login Card (1-Tap for Instagram, TikTok, Douyin, Facebook & Pixiv)
               Card(
                 child: Column(
                   children: [
                     const ListTile(
                       leading: Icon(Icons.public_rounded),
-                      title: Text('Login Browser (IG, Douyin, FB, Pixiv)'),
+                      title: Text('Login Browser (IG, TikTok, Douyin, FB, Pixiv)'),
                       subtitle: Text(
-                        'Opsional: login sekali di aplikasi agar konten terbatas/profil/Reel terbuka penuh',
+                        'Opsional: login sekali di aplikasi agar profil, Reel & karya terbatas terbuka penuh',
                       ),
                     ),
                     Padding(
@@ -236,6 +238,24 @@ class SettingsScreen extends StatelessWidget {
                               const SizedBox(width: 10),
                               Expanded(
                                 child: _LoginChipBtn(
+                                  label: manager.tiktokLoggedIn
+                                      ? 'TikTok Aktif'
+                                      : 'Login TikTok',
+                                  active: manager.tiktokLoggedIn,
+                                  onTap: () => _doBrowserLogin(
+                                    context,
+                                    'tiktok',
+                                    'TikTok',
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 8),
+                          Row(
+                            children: [
+                              Expanded(
+                                child: _LoginChipBtn(
                                   label: manager.douyinLoggedIn
                                       ? 'Douyin Aktif'
                                       : 'Login Douyin',
@@ -247,11 +267,7 @@ class SettingsScreen extends StatelessWidget {
                                   ),
                                 ),
                               ),
-                            ],
-                          ),
-                          const SizedBox(height: 8),
-                          Row(
-                            children: [
+                              const SizedBox(width: 10),
                               Expanded(
                                 child: _LoginChipBtn(
                                   label: manager.facebookLoggedIn
@@ -265,26 +281,28 @@ class SettingsScreen extends StatelessWidget {
                                   ),
                                 ),
                               ),
-                              const SizedBox(width: 10),
-                              Expanded(
-                                child: _LoginChipBtn(
-                                  label: manager.pixivLoggedIn
-                                      ? 'Pixiv Aktif'
-                                      : 'Login Pixiv',
-                                  active: manager.pixivLoggedIn,
-                                  onTap: () => _doBrowserLogin(
-                                    context,
-                                    'pixiv',
-                                    'Pixiv',
-                                  ),
-                                ),
-                              ),
                             ],
+                          ),
+                          const SizedBox(height: 8),
+                          SizedBox(
+                            width: double.infinity,
+                            child: _LoginChipBtn(
+                              label: manager.pixivLoggedIn
+                                  ? 'Pixiv Aktif'
+                                  : 'Login Pixiv',
+                              active: manager.pixivLoggedIn,
+                              onTap: () => _doBrowserLogin(
+                                context,
+                                'pixiv',
+                                'Pixiv',
+                              ),
+                            ),
                           ),
                         ],
                       ),
                     ),
                     if (manager.instagramLoggedIn ||
+                        manager.tiktokLoggedIn ||
                         manager.douyinLoggedIn ||
                         manager.facebookLoggedIn ||
                         manager.pixivLoggedIn) ...[
@@ -304,6 +322,94 @@ class SettingsScreen extends StatelessWidget {
                         },
                       ),
                     ],
+                  ],
+                ),
+              ),
+
+              const SizedBox(height: 16),
+
+              // Export / Import Backup & Data Migration Guide Card
+              Card(
+                child: Column(
+                  children: [
+                    ListTile(
+                      leading: Icon(
+                        Icons.import_export_rounded,
+                        color: theme.colorScheme.primary,
+                      ),
+                      title: const Text('Backup, Impor & Migrasi Data'),
+                      subtitle: Text(
+                        '${manager.downloadedMarkers.length} penanda • ${manager.creatorProfiles.length} link artis • ${manager.items.length} riwayat',
+                      ),
+                    ),
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+                      child: Column(
+                        children: [
+                          Row(
+                            children: [
+                              Expanded(
+                                child: FilledButton.tonalIcon(
+                                  onPressed: () => _exportBackupFile(context),
+                                  icon: const Icon(
+                                    Icons.file_upload_outlined,
+                                    size: 18,
+                                  ),
+                                  label: const Text('Ekspor (.json)'),
+                                ),
+                              ),
+                              const SizedBox(width: 10),
+                              Expanded(
+                                child: FilledButton.tonalIcon(
+                                  onPressed: () => _importBackupFile(context),
+                                  icon: const Icon(
+                                    Icons.file_download_outlined,
+                                    size: 18,
+                                  ),
+                                  label: const Text('Impor (.json)'),
+                                ),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 8),
+                          Row(
+                            children: [
+                              Expanded(
+                                child: OutlinedButton.icon(
+                                  onPressed: () => _copyBackupJson(context),
+                                  icon: const Icon(
+                                    Icons.content_copy_rounded,
+                                    size: 16,
+                                  ),
+                                  label: const Text('Salin JSON'),
+                                ),
+                              ),
+                              const SizedBox(width: 10),
+                              Expanded(
+                                child: OutlinedButton.icon(
+                                  onPressed: () => _openPasteBackupDialog(context),
+                                  icon: const Icon(
+                                    Icons.content_paste_go_rounded,
+                                    size: 16,
+                                  ),
+                                  label: const Text('Tempel JSON'),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ],
+                      ),
+                    ),
+                    const Divider(height: 1),
+                    ListTile(
+                      leading: const Icon(Icons.menu_book_outlined),
+                      title: const Text('Panduan Migrasi Data ke HP Baru'),
+                      subtitle: const Text(
+                        'Langkah lengkap pindah pengaturan, file publik & Brankas Privat Pixiv',
+                      ),
+                      trailing: const Icon(Icons.chevron_right_rounded),
+                      onTap: () => _showMigrationGuideSheet(context),
+                    ),
                   ],
                 ),
               ),
@@ -375,6 +481,246 @@ class SettingsScreen extends StatelessWidget {
           ),
         ),
       ],
+    );
+  }
+
+  Future<void> _exportBackupFile(BuildContext context) async {
+    try {
+      final saved = await manager.exportBackupToFile();
+      if (!context.mounted) return;
+      if (saved) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Backup pengaturan & data berhasil diekspor (.json).'),
+          ),
+        );
+      }
+    } catch (e) {
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Gagal mengekspor backup: $e')),
+      );
+    }
+  }
+
+  Future<void> _copyBackupJson(BuildContext context) async {
+    final json = manager.buildBackupJson();
+    await Clipboard.setData(ClipboardData(text: json));
+    if (!context.mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('Data backup JSON disalin ke clipboard.'),
+      ),
+    );
+  }
+
+  Future<void> _importBackupFile(BuildContext context) async {
+    try {
+      final bundle = await manager.pickAndParseBackupFile();
+      if (bundle == null || !context.mounted) return;
+      await _confirmAndApplyBackup(context, bundle);
+    } catch (e) {
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            'Gagal membaca file backup: ${e.toString().replaceFirst('FormatException: ', '')}',
+          ),
+        ),
+      );
+    }
+  }
+
+  Future<void> _openPasteBackupDialog(BuildContext context) async {
+    final controller = TextEditingController();
+    final raw = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Tempel Backup JSON'),
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                'Tempel isi teks JSON dari hasil "Salin JSON" atau file backup all_download.',
+                style: TextStyle(fontSize: 12.5),
+              ),
+              const SizedBox(height: 10),
+              TextField(
+                controller: controller,
+                maxLines: 6,
+                style: const TextStyle(fontSize: 11.5, fontFamily: 'monospace'),
+                decoration: InputDecoration(
+                  hintText: '{"app": "all_download", ...}',
+                  suffixIcon: IconButton(
+                    onPressed: () async {
+                      final data =
+                          await Clipboard.getData(Clipboard.kTextPlain);
+                      if (data?.text != null) {
+                        controller.text = data!.text!;
+                      }
+                    },
+                    icon: const Icon(Icons.content_paste_rounded, size: 19),
+                    tooltip: 'Tempel',
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Batal'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, controller.text),
+            child: const Text('Lanjut'),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+    if (raw == null || raw.trim().isEmpty || !context.mounted) return;
+
+    try {
+      final bundle = manager.parseBackupText(raw);
+      await _confirmAndApplyBackup(context, bundle);
+    } catch (e) {
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            'Format JSON tidak valid: ${e.toString().replaceFirst('FormatException: ', '')}',
+          ),
+        ),
+      );
+    }
+  }
+
+  Future<void> _confirmAndApplyBackup(
+    BuildContext context,
+    BackupDataBundle bundle,
+  ) async {
+    final dateText = bundle.exportedAt != null
+        ? '${bundle.exportedAt!.day.toString().padLeft(2, '0')}/${bundle.exportedAt!.month.toString().padLeft(2, '0')}/${bundle.exportedAt!.year}'
+        : '-';
+    final mode = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Konfirmasi Impor Backup'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('Tanggal backup: $dateText'),
+            const SizedBox(height: 8),
+            Text('• Penanda sudah diunduh: ${bundle.downloadedMarkers.length}'),
+            Text('• Link profil artis: ${bundle.creatorProfiles.length}'),
+            Text('• Riwayat & antrean terjeda: ${bundle.history.length}'),
+            const SizedBox(height: 12),
+            Text(
+              'Pilih "Gabung" untuk menambah data baru tanpa menghapus data saat ini, atau "Timpa Semua" untuk mengganti seluruh data.',
+              style: Theme.of(ctx).textTheme.bodySmall,
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Batal'),
+          ),
+          FilledButton.tonal(
+            onPressed: () => Navigator.pop(ctx, 'merge'),
+            child: const Text('Gabung (Merge)'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, 'replace'),
+            style: FilledButton.styleFrom(
+              backgroundColor: Theme.of(ctx).colorScheme.error,
+            ),
+            child: const Text('Timpa Semua'),
+          ),
+        ],
+      ),
+    );
+    if (mode == null || !context.mounted) return;
+
+    await manager.applyBackup(bundle, merge: mode == 'merge');
+    if (!context.mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          mode == 'merge'
+              ? 'Backup berhasil digabungkan!'
+              : 'Backup berhasil diterapkan!',
+        ),
+      ),
+    );
+  }
+
+  Future<void> _showMigrationGuideSheet(BuildContext context) {
+    final theme = Theme.of(context);
+    return showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
+      showDragHandle: true,
+      builder: (ctx) => DraggableScrollableSheet(
+        expand: false,
+        initialChildSize: 0.78,
+        minChildSize: 0.45,
+        maxChildSize: 0.94,
+        builder: (context, scrollController) => ListView(
+          controller: scrollController,
+          padding: const EdgeInsets.fromLTRB(20, 4, 20, 28),
+          children: [
+            Text(
+              'Panduan Migrasi Data ke HP Baru',
+              style: theme.textTheme.titleLarge?.copyWith(
+                fontWeight: FontWeight.w800,
+              ),
+            ),
+            const SizedBox(height: 6),
+            Text(
+              'Ikuti 4 langkah singkat berikut agar seluruh pengaturan, penanda "Sudah Diunduh", link profil artis, dan koleksi media Anda berpindah utuh tanpa duplikat.',
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: theme.colorScheme.onSurfaceVariant,
+                height: 1.4,
+              ),
+            ),
+            const SizedBox(height: 16),
+            const _MigrationStepCard(
+              step: '1',
+              title: 'Ekspor Pengaturan & Penanda (.json)',
+              body:
+                  'Di HP lama, buka Pengaturan → ketuk "Ekspor (.json)" (atau "Salin JSON"). File backup ini menyimpan: pengaturan kualitas/tema, seluruh penanda "Sudah Diunduh" dari semua medsos, daftar link profil per artis ("Lanjut Unduh"), serta riwayat & antrean terjeda.',
+            ),
+            const SizedBox(height: 10),
+            const _MigrationStepCard(
+              step: '2',
+              title: 'Salin Folder Media Publik',
+              body:
+                  'Sambungkan HP lama ke PC/laptop atau gunakan Quick Share / File Manager, lalu salin dua folder ini ke lokasi yang sama persis di HP baru:\n• Pictures/all_download/ (semua foto & video per platform/artis)\n• Music/all_download/ (semua audio MP3)',
+            ),
+            const SizedBox(height: 10),
+            const _MigrationStepCard(
+              step: '3',
+              title: 'Pindahkan Brankas Privat Pixiv',
+              body:
+                  'Foto Pixiv yang berstatus Privat tersembunyi dari Galeri & WA. Ada 2 cara memindahkannya:\n• Cara Mudah (Tanpa PC): Buka tab File → Pixiv → tahan & pilih semua album → ketuk Unlock (foto pindah ke Pictures/all_download/Pixiv). Setelah disalin ke HP baru, pilih lalu Kunci lagi.\n• Cara Langsung (PC/USB): Salin folder Android/data/com.linkdrop.linkdrop_downloader/files/private_vault/ ke folder yang sama di HP baru.',
+            ),
+            const SizedBox(height: 10),
+            const _MigrationStepCard(
+              step: '4',
+              title: 'Impor Backup di HP Baru',
+              body:
+                  'Pasang aplikasi all_download di HP baru → izinkan akses penyimpanan → buka Pengaturan → ketuk "Impor (.json)" lalu pilih file backup tadi (pilih Gabung atau Timpa Semua).\n\nCatatan keamanan: Sesi login browser (IG/TikTok/Pixiv) sengaja tidak ikut diekspor demi keamanan akun — cukup login ulang 1 kali di Pengaturan HP baru.',
+            ),
+          ],
+        ),
+      ),
     );
   }
 
@@ -619,6 +965,77 @@ class _LoginChipBtn extends StatelessWidget {
         size: 18,
       ),
       label: Text(label),
+    );
+  }
+}
+
+class _MigrationStepCard extends StatelessWidget {
+  final String step;
+  final String title;
+  final String body;
+
+  const _MigrationStepCard({
+    required this.step,
+    required this.title,
+    required this.body,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: theme.colorScheme.surfaceContainerHighest.withValues(alpha: 0.4),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(
+          color: theme.colorScheme.outlineVariant.withValues(alpha: 0.6),
+        ),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Container(
+            width: 28,
+            height: 28,
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              color: theme.colorScheme.primary,
+              borderRadius: BorderRadius.circular(9),
+            ),
+            child: Text(
+              step,
+              style: const TextStyle(
+                color: Colors.white,
+                fontWeight: FontWeight.w800,
+                fontSize: 13,
+              ),
+            ),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  title,
+                  style: theme.textTheme.titleSmall?.copyWith(
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  body,
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    height: 1.4,
+                    color: theme.colorScheme.onSurfaceVariant,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
     );
   }
 }

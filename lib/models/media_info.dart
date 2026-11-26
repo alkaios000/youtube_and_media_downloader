@@ -162,6 +162,9 @@ class MediaInfo {
   final List<SelectableMediaItem> selectableItems;
   final bool isBulkProfile;
 
+  /// Canonical profile URL of the creator/artist when derivable (for 1-tap "Lanjut Unduh").
+  final String? creatorProfileUrl;
+
   const MediaInfo({
     required this.originalUrl,
     required this.platform,
@@ -174,6 +177,7 @@ class MediaInfo {
     this.thumbnailHeaders = const {},
     this.selectableItems = const [],
     this.isBulkProfile = false,
+    this.creatorProfileUrl,
   });
 
   bool get hasSelectableGallery => selectableItems.length > 1 || isBulkProfile;

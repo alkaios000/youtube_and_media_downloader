@@ -9,6 +9,7 @@ import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
 import '../models/app_settings.dart';
+import '../models/creator_profile.dart';
 import '../models/download_item.dart';
 import '../models/managed_file.dart';
 import '../models/media_info.dart';
@@ -17,7 +18,7 @@ import 'media_extractor_service.dart';
 import 'native_bridge.dart';
 import 'storage_service.dart';
 
-/// Lightweight async semaphore to load-balance network & CPU-heavy downloads.
+/// Lightweight async semaphore to load-balance concurrent network & CPU-heavy downloads.
 class _AsyncSemaphore {
   final int maxConcurrent;
   int _current = 0;
@@ -57,27 +58,31 @@ class _AsyncSemaphore {
 }
 
 class DownloadManager extends ChangeNotifier {
-  static const int _directFileMaxConcurrency = 4;
+  static const int _directFileMaxConcurrency = 5;
   static const int _ytDlpMaxConcurrency = 1;
-  static const int _bulkDirectTaskConcurrency = 3;
+  static const int _bulkDirectTaskConcurrency = 4;
 
   final NativeBridge _bridge;
   final StorageService _storage;
   final MediaExtractorService _extractor;
   final Dio _dio;
 
-  /// Separate notifier for theme so MaterialApp never rebuilds during downloads.
-  final ValueNotifier<ThemeMode> themeNotifier = ValueNotifier<ThemeMode>(ThemeMode.dark);
+  /// Separate notifier for theme so MaterialApp NEVER rebuilds during downloads.
+  final ValueNotifier<ThemeMode> themeNotifier =
+      ValueNotifier<ThemeMode>(ThemeMode.dark);
 
-  final _AsyncSemaphore _directFilePool = _AsyncSemaphore(_directFileMaxConcurrency);
+  final _AsyncSemaphore _directFilePool =
+      _AsyncSemaphore(_directFileMaxConcurrency);
   final _AsyncSemaphore _ytDlpPool = _AsyncSemaphore(_ytDlpMaxConcurrency);
 
   EngineStatus _engineStatus = EngineStatus.initial();
   PermissionStatusInfo _permissionStatus = PermissionStatusInfo.unknown();
   AppSettings _settings = const AppSettings();
   List<DownloadItem> _items = [];
-  List<ManagedFile> _managedFiles = [];
+  List<ManagedFile> _managedFiles = const [];
   Set<String> _downloadedMarkers = <String>{};
+  final Map<String, CreatorProfileRecord> _creatorProfiles = {};
+  final Map<String, List<String>> _pixivPagesCache = {};
 
   bool _isInitializing = true;
   bool _isAnalyzing = false;
@@ -88,6 +93,7 @@ class DownloadManager extends ChangeNotifier {
   bool _douyinLoggedIn = false;
   bool _facebookLoggedIn = false;
   bool _pixivLoggedIn = false;
+  bool _tiktokLoggedIn = false;
   bool _isDisposed = false;
   String? _engineError;
   String? _analyzeError;
@@ -96,6 +102,7 @@ class DownloadManager extends ChangeNotifier {
 
   final Map<String, CancelToken> _directCancelTokens = {};
   final Set<String> _cancelledTaskIds = {};
+  final Set<String> _pausedTaskIds = {};
   StreamSubscription<NativeProgressEvent>? _progressSub;
   StreamSubscription<String>? _shareSub;
   Timer? _throttleNotifyTimer;
@@ -107,7 +114,8 @@ class DownloadManager extends ChangeNotifier {
   void Function(String sharedText)? _onIncomingSharedLink;
   String? _pendingSharedText;
 
-  void Function(String sharedText)? get onIncomingSharedLink => _onIncomingSharedLink;
+  void Function(String sharedText)? get onIncomingSharedLink =>
+      _onIncomingSharedLink;
   set onIncomingSharedLink(void Function(String sharedText)? handler) {
     _onIncomingSharedLink = handler;
     if (handler != null && _pendingSharedText != null) {
@@ -155,10 +163,9 @@ class DownloadManager extends ChangeNotifier {
     if (adapter is IOHttpClientAdapter) {
       adapter.createHttpClient = () {
         final client = HttpClient();
-        client.maxConnectionsPerHost = 6;
-        client.idleTimeout = const Duration(seconds: 25);
-        // Binary media streams (JPEG/PNG/MP4/MP3) are already compressed;
-        // skipping gzip inspection reduces CPU overhead on mobile.
+        client.maxConnectionsPerHost = 8;
+        client.idleTimeout = const Duration(seconds: 30);
+        // Binary media streams (JPEG/PNG/MP4/MP3) are already compressed.
         client.autoUncompress = false;
         return client;
       };
@@ -171,10 +178,14 @@ class DownloadManager extends ChangeNotifier {
   bool get permissionChecked => _permissionChecked;
   AppSettings get settings => _settings;
   List<DownloadItem> get items => List.unmodifiable(_items);
-  List<ManagedFile> get managedFiles => List.unmodifiable(_managedFiles);
+  List<ManagedFile> get managedFiles => _managedFiles;
   Set<String> get downloadedMarkers => Set.unmodifiable(_downloadedMarkers);
+  List<CreatorProfileRecord> get creatorProfiles =>
+      List.unmodifiable(_creatorProfiles.values);
   List<DownloadItem> get activeDownloads =>
       _items.where((i) => i.isActive).toList(growable: false);
+  List<DownloadItem> get pausedDownloads =>
+      _items.where((i) => i.isPaused).toList(growable: false);
   List<DownloadItem> get historyItems =>
       _items.where((i) => !i.isActive).toList(growable: false);
   bool get isInitializing => _isInitializing;
@@ -185,6 +196,7 @@ class DownloadManager extends ChangeNotifier {
   bool get douyinLoggedIn => _douyinLoggedIn;
   bool get facebookLoggedIn => _facebookLoggedIn;
   bool get pixivLoggedIn => _pixivLoggedIn;
+  bool get tiktokLoggedIn => _tiktokLoggedIn;
   String? get engineError => _engineError;
   String? get analyzeError => _analyzeError;
   MediaInfo? get currentPreview => _currentPreview;
@@ -197,6 +209,77 @@ class DownloadManager extends ChangeNotifier {
     return null;
   }
 
+  // ===========================================================================
+  // PER-ARTIST SAVED PROFILE LINKS ("Lanjut Unduh")
+  // ===========================================================================
+  CreatorProfileRecord? getCreatorProfile(
+    String platformFolder,
+    String creatorFolder,
+  ) {
+    final key = CreatorProfileRecord.buildLookupKey(platformFolder, creatorFolder);
+    return _creatorProfiles[key];
+  }
+
+  Future<void> saveCreatorProfile({
+    required MediaPlatform platform,
+    required String creatorFolder,
+    required String profileUrl,
+    String? displayName,
+  }) async {
+    final cleanUrl = UrlParser.extractUrl(profileUrl) ?? profileUrl.trim();
+    if (cleanUrl.isEmpty || creatorFolder.trim().isEmpty) return;
+    final record = CreatorProfileRecord(
+      platform: platform,
+      creatorFolder: creatorFolder.trim(),
+      displayName: (displayName?.trim().isNotEmpty ?? false)
+          ? displayName!.trim()
+          : creatorFolder.trim(),
+      profileUrl: cleanUrl,
+      lastSyncedAt: DateTime.now(),
+    );
+    _creatorProfiles[record.lookupKey] = record;
+    _notifyImmediate();
+    try {
+      await _storage.saveCreatorProfiles(_creatorProfiles.values.toList());
+    } catch (_) {}
+  }
+
+  Future<void> removeCreatorProfile(
+    String platformFolder,
+    String creatorFolder,
+  ) async {
+    final key = CreatorProfileRecord.buildLookupKey(platformFolder, creatorFolder);
+    if (_creatorProfiles.remove(key) == null) return;
+    _notifyImmediate();
+    try {
+      await _storage.saveCreatorProfiles(_creatorProfiles.values.toList());
+    } catch (_) {}
+  }
+
+  void _autoRememberCreatorProfile(MediaInfo info) {
+    final candidateUrl = info.creatorProfileUrl?.trim().isNotEmpty == true
+        ? info.creatorProfileUrl!.trim()
+        : (info.isBulkProfile ? info.originalUrl.trim() : '');
+    if (candidateUrl.isEmpty || !candidateUrl.startsWith('http')) return;
+    final author = info.author.trim();
+    if (author.isEmpty ||
+        author.toLowerCase() == info.platform.label.toLowerCase() ||
+        author.toLowerCase() == 'umum') {
+      return;
+    }
+    unawaited(
+      saveCreatorProfile(
+        platform: info.platform,
+        creatorFolder: author,
+        profileUrl: candidateUrl,
+        displayName: author,
+      ),
+    );
+  }
+
+  // ===========================================================================
+  // DOWNLOADED MARKERS (ALL PLATFORMS)
+  // ===========================================================================
   bool isMarkedDownloaded(String markerKey) {
     return markerKey.isNotEmpty && _downloadedMarkers.contains(markerKey);
   }
@@ -234,7 +317,8 @@ class DownloadManager extends ChangeNotifier {
   }
 
   Future<void> unmarkMany(Iterable<String> keys) async {
-    final toRemove = keys.map((k) => k.trim()).where((k) => k.isNotEmpty).toSet();
+    final toRemove =
+        keys.map((k) => k.trim()).where((k) => k.isNotEmpty).toSet();
     if (toRemove.isEmpty) return;
     final next = Set<String>.from(_downloadedMarkers)..removeAll(toRemove);
     if (next.length == _downloadedMarkers.length) return;
@@ -254,9 +338,81 @@ class DownloadManager extends ChangeNotifier {
     } catch (_) {}
   }
 
+  // ===========================================================================
+  // EXPORT / IMPORT BACKUP (SETTINGS + MARKERS + ARTIST PROFILES + HISTORY)
+  // ===========================================================================
+  String buildBackupJson() {
+    return _storage.buildBackupJson(
+      settings: _settings,
+      downloadedMarkers: _downloadedMarkers,
+      creatorProfiles: _creatorProfiles.values.toList(growable: false),
+      history: _items,
+    );
+  }
+
+  Future<bool> exportBackupToFile() async {
+    final now = DateTime.now();
+    final stamp =
+        '${now.year}${now.month.toString().padLeft(2, '0')}${now.day.toString().padLeft(2, '0')}_${now.hour.toString().padLeft(2, '0')}${now.minute.toString().padLeft(2, '0')}';
+    final json = buildBackupJson();
+    return _bridge.exportBackupFile(
+      jsonContent: json,
+      fileName: 'all_download_backup_$stamp.json',
+    );
+  }
+
+  Future<BackupDataBundle?> pickAndParseBackupFile() async {
+    final raw = await _bridge.importBackupFile();
+    if (raw == null || raw.trim().isEmpty) return null;
+    return _storage.parseBackupJson(raw);
+  }
+
+  BackupDataBundle parseBackupText(String rawJson) {
+    return _storage.parseBackupJson(rawJson);
+  }
+
+  Future<void> applyBackup(
+    BackupDataBundle bundle, {
+    required bool merge,
+  }) async {
+    _settings = bundle.settings;
+    themeNotifier.value = _settings.themeMode;
+
+    if (merge) {
+      _downloadedMarkers = {..._downloadedMarkers, ...bundle.downloadedMarkers};
+      for (final rec in bundle.creatorProfiles) {
+        _creatorProfiles.putIfAbsent(rec.lookupKey, () => rec);
+      }
+      final existingIds = _items.map((e) => e.id).toSet();
+      final incoming = bundle.history
+          .where((e) => !existingIds.contains(e.id))
+          .toList(growable: false);
+      _items = [..._items, ...incoming];
+    } else {
+      _downloadedMarkers = Set<String>.from(bundle.downloadedMarkers);
+      _creatorProfiles
+        ..clear()
+        ..addEntries(
+          bundle.creatorProfiles.map((r) => MapEntry(r.lookupKey, r)),
+        );
+      final activeNow = _items.where((i) => i.isActive).toList(growable: false);
+      _items = [...activeNow, ...bundle.history];
+    }
+
+    _notifyImmediate();
+
+    await Future.wait([
+      _storage.saveSettings(_settings),
+      _storage.saveDownloadedMarkers(_downloadedMarkers),
+      _storage.saveCreatorProfiles(_creatorProfiles.values.toList()),
+      _storage.saveHistory(_items),
+    ]);
+  }
+
+  // ===========================================================================
+  // BOOTSTRAP (NON-BLOCKING INSTANT SHARE & STARTUP)
+  // ===========================================================================
   Future<void> bootstrap() async {
-    // 1. PRIORITY 0: Attach share stream & fetch any initial shared intent IMMEDIATELY
-    // BEFORE waiting on preferences, permissions, WebView cookies, or yt-dlp/Python init!
     try {
       _progressSub = _bridge.progressStream.listen(
         _handleNativeProgress,
@@ -270,11 +426,13 @@ class DownloadManager extends ChangeNotifier {
 
     unawaited(_checkInitialSharedLink());
 
-    // 2. Load lightweight local SharedPreferences in parallel
     final localData = await Future.wait<dynamic>([
       _storage.loadSettings().catchError((_) => const AppSettings()),
       _storage.loadHistory().catchError((_) => <DownloadItem>[]),
       _storage.loadDownloadedMarkers().catchError((_) => null),
+      _storage
+          .loadCreatorProfiles()
+          .catchError((_) => <CreatorProfileRecord>[]),
     ]);
 
     _settings = localData[0] as AppSettings;
@@ -298,15 +456,18 @@ class DownloadManager extends ChangeNotifier {
       unawaited(_storage.saveDownloadedMarkers(_downloadedMarkers));
     }
 
+    final loadedProfiles = localData[3] as List<CreatorProfileRecord>;
+    _creatorProfiles
+      ..clear()
+      ..addEntries(loadedProfiles.map((r) => MapEntry(r.lookupKey, r)));
+
     _notifyImmediate();
 
-    // 3. Fast permission check (< 2ms)
     await refreshPermissions();
 
-    // 4. Warm up heavy native components strictly in the background so UI & Share stay instant!
     unawaited(_initEngineInBackground());
     unawaited(
-      Future<void>.delayed(const Duration(milliseconds: 900), () {
+      Future<void>.delayed(const Duration(milliseconds: 800), () {
         if (_isDisposed) return;
         unawaited(refreshManagedFiles());
         unawaited(refreshBrowserSessions());
@@ -370,6 +531,7 @@ class DownloadManager extends ChangeNotifier {
       _douyinLoggedIn = status['douyin'] ?? false;
       _facebookLoggedIn = status['facebook'] ?? false;
       _pixivLoggedIn = status['pixiv'] ?? false;
+      _tiktokLoggedIn = status['tiktok'] ?? false;
       _notifyImmediate();
     } catch (_) {}
   }
@@ -391,6 +553,7 @@ class DownloadManager extends ChangeNotifier {
       _douyinLoggedIn = false;
       _facebookLoggedIn = false;
       _pixivLoggedIn = false;
+      _tiktokLoggedIn = false;
       _notifyImmediate();
     } catch (_) {}
   }
@@ -400,7 +563,9 @@ class DownloadManager extends ChangeNotifier {
     _isLoadingFiles = true;
     _notifyImmediate();
     try {
-      _managedFiles = await _bridge.listManagedFiles();
+      _managedFiles = List<ManagedFile>.unmodifiable(
+        await _bridge.listManagedFiles(),
+      );
     } catch (_) {
       // Keep previous list if plugin unavailable (e.g. unit tests)
     } finally {
@@ -431,13 +596,15 @@ class DownloadManager extends ChangeNotifier {
     _notifyImmediate();
 
     try {
-      final cookiesPath = await _storage.getCookiesFilePath(_settings.customCookies);
+      final cookiesPath =
+          await _storage.getCookiesFilePath(_settings.customCookies);
       final info = await _extractor.analyzeLink(
         rawInput: cleanUrl,
         cookiesPath: cookiesPath,
       );
       _currentPreview = info;
       _analyzeError = null;
+      _autoRememberCreatorProfile(info);
       return info;
     } catch (e) {
       _analyzeError = e.toString().replaceFirst('Exception: ', '');
@@ -475,7 +642,10 @@ class DownloadManager extends ChangeNotifier {
     }
   }
 
-  MediaFormatOption _closestVideoOption(List<MediaFormatOption> options, int targetHeight) {
+  MediaFormatOption _closestVideoOption(
+    List<MediaFormatOption> options,
+    int targetHeight,
+  ) {
     final videos = options.where((o) => o.kind == MediaKind.video).toList();
     if (videos.isEmpty) return options.first;
     final exact = videos.where((o) => o.height == targetHeight).toList();
@@ -493,18 +663,49 @@ class DownloadManager extends ChangeNotifier {
     return '${DateTime.now().millisecondsSinceEpoch}_${prefix}_$_taskSeq';
   }
 
+  Map<String, dynamic> _encodeResumePayload({
+    required MediaFormatOption option,
+    String? pixivIllustId,
+    List<String> extraMarkerKeys = const [],
+    bool markAlbumKey = true,
+  }) {
+    return {
+      'engine': option.engine.name,
+      'directUrl': option.directUrl,
+      'galleryUrls': option.galleryUrls,
+      'headers': option.headers,
+      'ytDlpFormatSelector': option.ytDlpFormatSelector,
+      'audioOnly': option.isAudio,
+      'extension': option.extension,
+      'mediaKind': option.kind.name,
+      if (pixivIllustId != null && pixivIllustId.isNotEmpty)
+        'pixivIllustId': pixivIllustId,
+      if (extraMarkerKeys.isNotEmpty) 'extraMarkerKeys': extraMarkerKeys,
+      'markAlbumKey': markAlbumKey,
+    };
+  }
+
   Future<DownloadItem> startDownload(
     MediaInfo info,
     MediaFormatOption option, {
     List<String> extraMarkerKeys = const [],
     bool markAlbumKey = true,
   }) async {
-    if (_permissionChecked && !_permissionStatus.granted && _permissionStatus.sdkInt <= 28) {
+    if (_permissionChecked &&
+        !_permissionStatus.granted &&
+        _permissionStatus.sdkInt <= 28) {
       await requestStoragePermissions();
     }
+    _autoRememberCreatorProfile(info);
+
     final taskId = _nextTaskId('dl');
     final markerKey = info.markerKey;
     final initialSubFiles = _buildInitialSubFiles(taskId, info, option);
+    final resumePayload = _encodeResumePayload(
+      option: option,
+      extraMarkerKeys: extraMarkerKeys,
+      markAlbumKey: markAlbumKey,
+    );
 
     final initialItem = DownloadItem(
       id: taskId,
@@ -524,6 +725,7 @@ class DownloadManager extends ChangeNotifier {
           : 'Menyiapkan unduhan...',
       createdAt: DateTime.now(),
       subFiles: initialSubFiles,
+      resumePayload: resumePayload,
     );
 
     _items = [initialItem, ..._items];
@@ -585,25 +787,25 @@ class DownloadManager extends ChangeNotifier {
     ];
   }
 
-  /// Downloads ONLY the user-selected photos from a multi-photo post (Pixiv, X, IG, TikTok, Douyin).
-  /// For Pixiv, any photo/album already marked downloaded is strictly skipped unless unmarked first.
+  /// Downloads ONLY the user-selected photos from a multi-photo post (ALL platforms).
+  /// Any photo/album already marked downloaded is strictly skipped unless unmarked first!
   Future<int> downloadSelectedPhotos(
     MediaInfo info,
     List<SelectableMediaItem> selected,
   ) async {
     if (selected.isEmpty) return 0;
-    if (_permissionChecked && !_permissionStatus.granted && _permissionStatus.sdkInt <= 28) {
+    if (_permissionChecked &&
+        !_permissionStatus.granted &&
+        _permissionStatus.sdkInt <= 28) {
       await requestStoragePermissions();
     }
 
-    final isPixiv = info.platform == MediaPlatform.pixiv;
-    if (isPixiv && isMarkedDownloaded(info.markerKey)) {
+    if (isMarkedDownloaded(info.markerKey)) {
       return 0;
     }
 
-    final eligible = isPixiv
-        ? selected.where((item) => !isMarkedDownloaded(item.markerKey)).toList()
-        : selected;
+    final eligible =
+        selected.where((item) => !isMarkedDownloaded(item.markerKey)).toList();
     if (eligible.isEmpty) return 0;
 
     final urls = <String>[];
@@ -617,10 +819,11 @@ class DownloadManager extends ChangeNotifier {
     }
     if (urls.isEmpty) return 0;
 
-    // Mark parent album key only if ALL pages of this post will be downloaded
     final allPagesCovered = info.selectableItems.isEmpty ||
         info.selectableItems.every(
-          (p) => extraKeys.contains(p.markerKey) || isMarkedDownloaded(p.markerKey),
+          (p) =>
+              extraKeys.contains(p.markerKey) ||
+              isMarkedDownloaded(p.markerKey),
         );
 
     final first = eligible.first;
@@ -647,22 +850,24 @@ class DownloadManager extends ChangeNotifier {
     return urls.length;
   }
 
-  /// Bulk downloads selected items from a Profile or Playlist URL (Pixiv, YouTube, TikTok, IG, X, FB, Douyin).
-  /// For Pixiv, any artwork already marked downloaded is strictly excluded unless its marker was removed first.
+  /// Bulk downloads selected items from ANY Profile or Playlist URL
+  /// (Pixiv, YouTube, TikTok, IG, X, FB, Douyin).
+  /// Any item already marked downloaded is strictly skipped unless unmarked first!
   Future<int> startBulkDownloads(
     MediaInfo collectionInfo,
     List<SelectableMediaItem> selected, {
     bool audioOnly = false,
   }) async {
     if (selected.isEmpty) return 0;
-    if (_permissionChecked && !_permissionStatus.granted && _permissionStatus.sdkInt <= 28) {
+    if (_permissionChecked &&
+        !_permissionStatus.granted &&
+        _permissionStatus.sdkInt <= 28) {
       await requestStoragePermissions();
     }
+    _autoRememberCreatorProfile(collectionInfo);
 
-    final isPixiv = collectionInfo.platform == MediaPlatform.pixiv;
-    final eligible = isPixiv
-        ? selected.where((sel) => !isMarkedDownloaded(sel.markerKey)).toList()
-        : selected;
+    final eligible =
+        selected.where((sel) => !isMarkedDownloaded(sel.markerKey)).toList();
     if (eligible.isEmpty) return 0;
 
     final directQueue = <(String, SelectableMediaItem)>[];
@@ -675,21 +880,43 @@ class DownloadManager extends ChangeNotifier {
       final isAudio = audioOnly && sel.kind == MediaKind.video;
       final ext = isAudio ? 'mp3' : sel.extension;
       final kind = isAudio ? MediaKind.audio : sel.kind;
-      final isDirect = (sel.pixivIllustId != null && sel.pixivIllustId!.isNotEmpty) ||
-          (sel.engine == DownloadEngine.directHttp &&
-              sel.directUrl != null &&
-              sel.directUrl!.startsWith('http'));
+      final isDirect =
+          (sel.pixivIllustId != null && sel.pixivIllustId!.isNotEmpty) ||
+              (sel.engine == DownloadEngine.directHttp &&
+                  sel.directUrl != null &&
+                  sel.directUrl!.startsWith('http'));
+
+      final resumePayload = <String, dynamic>{
+        'engine': isDirect ? DownloadEngine.directHttp.name : DownloadEngine.ytDlp.name,
+        if (sel.pixivIllustId != null && sel.pixivIllustId!.isNotEmpty)
+          'pixivIllustId': sel.pixivIllustId,
+        if (sel.directUrl != null) 'directUrl': sel.directUrl,
+        'galleryUrls': sel.kind == MediaKind.image && sel.directUrl != null
+            ? [sel.directUrl!]
+            : const <String>[],
+        'headers': sel.headers,
+        'ytDlpFormatSelector': isAudio
+            ? null
+            : 'bestvideo[vcodec^=avc1][ext=mp4]+bestaudio[ext=m4a]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+        'audioOnly': isAudio,
+        'extension': ext,
+        'mediaKind': kind.name,
+        'extraMarkerKeys': [sel.markerKey],
+        'markAlbumKey': true,
+      };
 
       newItems.add(
         DownloadItem(
           id: taskId,
-          sourceUrl: sel.sourcePostUrl ?? sel.directUrl ?? collectionInfo.originalUrl,
+          sourceUrl:
+              sel.sourcePostUrl ?? sel.directUrl ?? collectionInfo.originalUrl,
           markerKey: sel.markerKey,
           platform: collectionInfo.platform,
           title: sel.title,
           author: sel.author ?? collectionInfo.author,
           thumbnailUrl: sel.thumbnailUrl,
-          formatLabel: isAudio ? 'Audio MP3 (Massal)' : 'Massal (${ext.toUpperCase()})',
+          formatLabel:
+              isAudio ? 'Audio MP3 (Massal)' : 'Massal (${ext.toUpperCase()})',
           extension: ext,
           mediaKind: kind,
           status: DownloadStatus.queued,
@@ -703,6 +930,7 @@ class DownloadManager extends ChangeNotifier {
               status: DownloadStatus.queued,
             ),
           ],
+          resumePayload: resumePayload,
         ),
       );
 
@@ -720,12 +948,18 @@ class DownloadManager extends ChangeNotifier {
       unawaited(_processDirectBulkPool(collectionInfo, directQueue));
     }
     if (ytDlpQueue.isNotEmpty) {
-      unawaited(_processYtDlpBulkQueue(collectionInfo, ytDlpQueue, audioOnly: audioOnly));
+      unawaited(
+        _processYtDlpBulkQueue(
+          collectionInfo,
+          ytDlpQueue,
+          audioOnly: audioOnly,
+        ),
+      );
     }
     return eligible.length;
   }
 
-  /// Concurrent worker pool (3 workers) for fast Pixiv & Direct HTTP bulk tasks.
+  /// High-throughput load-balanced worker pool (4 tasks sharing 5 HTTP streams).
   Future<void> _processDirectBulkPool(
     MediaInfo collectionInfo,
     List<(String, SelectableMediaItem)> queue,
@@ -744,11 +978,12 @@ class DownloadManager extends ChangeNotifier {
         if (_isDisposed || cursor >= queue.length) return;
         final (taskId, sel) = queue[cursor++];
 
-        if (_isTaskCancelled(taskId)) continue;
+        if (_isTaskStopped(taskId)) continue;
 
         final itemAuthor = sel.author ?? collectionInfo.author;
         final singleInfo = MediaInfo(
-          originalUrl: sel.sourcePostUrl ?? sel.directUrl ?? collectionInfo.originalUrl,
+          originalUrl:
+              sel.sourcePostUrl ?? sel.directUrl ?? collectionInfo.originalUrl,
           platform: collectionInfo.platform,
           title: sel.title,
           author: itemAuthor,
@@ -757,58 +992,13 @@ class DownloadManager extends ChangeNotifier {
           options: const [],
         );
 
-        // Pixiv artwork inside a profile: expand ALL original full-resolution pages!
         if (sel.pixivIllustId != null && sel.pixivIllustId!.isNotEmpty) {
-          _updateItem(
-            taskId,
-            (item) => item.copyWith(
-              status: DownloadStatus.downloading,
-              statusText: 'Memuat daftar halaman Pixiv...',
-            ),
-          );
-
-          final origUrls = await _extractor.directExtractors.fetchPixivIllustOriginalUrls(
-            sel.pixivIllustId!,
-            cookieHeader: pixivCookie,
-          );
-          if (_isTaskCancelled(taskId)) continue;
-
-          if (origUrls.isEmpty) {
-            _updateItem(
-              taskId,
-              (item) => item.copyWith(
-                status: DownloadStatus.failed,
-                statusText: 'Gagal mengambil halaman Pixiv',
-                errorMessage:
-                    'Karya mungkin khusus member/R-18 (login Pixiv di Pengaturan).',
-                subFiles: item.subFiles
-                    .map((s) => s.copyWith(
-                          status: DownloadStatus.failed,
-                          errorMessage: 'Halaman Pixiv tidak dapat diakses',
-                        ))
-                    .toList(growable: false),
-              ),
-            );
-            _schedulePostDownloadSync(includeMediaRefresh: false);
-            continue;
-          }
-
-          final ext = _detectExtFromUrlOrDefault(origUrls.first, 'jpg');
-          final opt = MediaFormatOption(
-            id: 'px_bulk_${sel.pixivIllustId}',
-            label: origUrls.length > 1 ? '${origUrls.length} Halaman' : 'Original HD',
-            subtitle: 'Pixiv',
-            extension: ext,
-            kind: MediaKind.image,
-            engine: DownloadEngine.directHttp,
-            directUrl: origUrls.first,
-            galleryUrls: origUrls,
+          await _executePixivArtworkTask(
+            taskId: taskId,
+            illustId: sel.pixivIllustId!,
+            info: singleInfo,
             headers: sel.headers,
-          );
-          await _runDirectHttpDownload(
-            taskId,
-            singleInfo,
-            opt,
+            pixivCookie: pixivCookie,
             extraMarkerKeys: [sel.markerKey],
           );
           continue;
@@ -823,7 +1013,8 @@ class DownloadManager extends ChangeNotifier {
             kind: sel.kind,
             engine: DownloadEngine.directHttp,
             directUrl: sel.directUrl,
-            galleryUrls: sel.kind == MediaKind.image ? [sel.directUrl!] : const [],
+            galleryUrls:
+                sel.kind == MediaKind.image ? [sel.directUrl!] : const [],
             headers: sel.headers,
           );
           await _runDirectHttpDownload(
@@ -839,7 +1030,91 @@ class DownloadManager extends ChangeNotifier {
     await Future.wait(List.generate(workerCount, (_) => worker()));
   }
 
-  /// Controlled sequential queue for heavy native yt-dlp/FFmpeg bulk items.
+  Future<void> _executePixivArtworkTask({
+    required String taskId,
+    required String illustId,
+    required MediaInfo info,
+    required Map<String, String> headers,
+    required String pixivCookie,
+    required List<String> extraMarkerKeys,
+  }) async {
+    if (_isTaskStopped(taskId)) return;
+
+    _updateItem(
+      taskId,
+      (item) => item.copyWith(
+        status: DownloadStatus.downloading,
+        statusText: 'Memuat daftar halaman Pixiv...',
+      ),
+    );
+
+    final cached = _pixivPagesCache[illustId];
+    final origUrls = (cached != null && cached.isNotEmpty)
+        ? cached
+        : await _extractor.directExtractors.fetchPixivIllustOriginalUrls(
+            illustId,
+            cookieHeader: pixivCookie,
+          );
+    if (origUrls.isNotEmpty) {
+      _pixivPagesCache[illustId] = origUrls;
+    }
+
+    if (_isTaskStopped(taskId)) return;
+
+    if (origUrls.isEmpty) {
+      _updateItem(
+        taskId,
+        (item) => item.copyWith(
+          status: DownloadStatus.failed,
+          statusText: 'Gagal mengambil halaman Pixiv',
+          errorMessage:
+              'Karya mungkin khusus member/R-18 (login Pixiv di Pengaturan).',
+          subFiles: item.subFiles
+              .map((s) => s.copyWith(
+                    status: DownloadStatus.failed,
+                    errorMessage: 'Halaman Pixiv tidak dapat diakses',
+                  ))
+              .toList(growable: false),
+        ),
+      );
+      _schedulePostDownloadSync(includeMediaRefresh: false);
+      return;
+    }
+
+    final ext = _detectExtFromUrlOrDefault(origUrls.first, 'jpg');
+    final opt = MediaFormatOption(
+      id: 'px_bulk_$illustId',
+      label: origUrls.length > 1 ? '${origUrls.length} Halaman' : 'Original HD',
+      subtitle: 'Pixiv',
+      extension: ext,
+      kind: MediaKind.image,
+      engine: DownloadEngine.directHttp,
+      directUrl: origUrls.first,
+      galleryUrls: origUrls,
+      headers: headers,
+    );
+
+    // Save resolved galleryUrls into resumePayload so Pause/Resume skips /pages API!
+    _updateItem(
+      taskId,
+      (item) => item.copyWith(
+        resumePayload: _encodeResumePayload(
+          option: opt,
+          pixivIllustId: illustId,
+          extraMarkerKeys: extraMarkerKeys,
+        ),
+      ),
+    );
+
+    await _runDirectHttpDownload(
+      taskId,
+      info,
+      opt,
+      extraMarkerKeys: extraMarkerKeys,
+    );
+  }
+
+  /// Controlled sequential queue for CPU-heavy native yt-dlp/FFmpeg bulk items.
   Future<void> _processYtDlpBulkQueue(
     MediaInfo collectionInfo,
     List<(String, SelectableMediaItem)> queue, {
@@ -847,11 +1122,12 @@ class DownloadManager extends ChangeNotifier {
   }) async {
     for (final (taskId, sel) in queue) {
       if (_isDisposed) return;
-      if (_isTaskCancelled(taskId)) continue;
+      if (_isTaskStopped(taskId)) continue;
 
       final itemAuthor = sel.author ?? collectionInfo.author;
       final singleInfo = MediaInfo(
-        originalUrl: sel.sourcePostUrl ?? sel.directUrl ?? collectionInfo.originalUrl,
+        originalUrl:
+            sel.sourcePostUrl ?? sel.directUrl ?? collectionInfo.originalUrl,
         platform: collectionInfo.platform,
         title: sel.title,
         author: itemAuthor,
@@ -881,10 +1157,229 @@ class DownloadManager extends ChangeNotifier {
     }
   }
 
+  // ===========================================================================
+  // PAUSE / RESUME / RETRY / CANCEL CONTROLS
+  // ===========================================================================
   bool _isTaskCancelled(String taskId) {
     if (_cancelledTaskIds.contains(taskId)) return true;
     final item = findItemById(taskId);
     return item == null || item.status == DownloadStatus.cancelled;
+  }
+
+  bool _isTaskPaused(String taskId) {
+    if (_pausedTaskIds.contains(taskId)) return true;
+    final item = findItemById(taskId);
+    return item != null && item.status == DownloadStatus.paused;
+  }
+
+  bool _isTaskStopped(String taskId) =>
+      _isTaskCancelled(taskId) || _isTaskPaused(taskId);
+
+  Future<void> pauseDownload(String taskId) async {
+    final item = findItemById(taskId);
+    if (item == null || !item.isActive) return;
+
+    _pausedTaskIds.add(taskId);
+    final directToken = _directCancelTokens[taskId];
+    if (directToken != null && !directToken.isCancelled) {
+      directToken.cancel('PAUSED_BY_USER');
+    } else {
+      try {
+        await _bridge.pauseDownload(taskId);
+      } catch (_) {}
+    }
+
+    _updateItem(
+      taskId,
+      (it) => it.copyWith(
+        status: DownloadStatus.paused,
+        statusText: it.subFiles.length > 1
+            ? 'Dijeda (${it.completedSubFilesCount}/${it.subFiles.length} selesai)'
+            : 'Dijeda (${it.progress.clamp(0, 100).toStringAsFixed(0)}%)',
+        subFiles: it.subFiles
+            .map((s) => s.isActive
+                ? s.copyWith(status: DownloadStatus.paused, speedText: '')
+                : s)
+            .toList(growable: false),
+      ),
+    );
+    await _storage.saveHistory(_items);
+  }
+
+  Future<void> pauseAllDownloads() async {
+    final actives = activeDownloads;
+    for (final item in actives) {
+      await pauseDownload(item.id);
+    }
+  }
+
+  Future<void> resumeDownload(String taskId) async {
+    final item = findItemById(taskId);
+    if (item == null || item.isActive || item.status == DownloadStatus.completed) {
+      return;
+    }
+
+    _pausedTaskIds.remove(taskId);
+    _cancelledTaskIds.remove(taskId);
+
+    _updateItem(
+      taskId,
+      (it) => it.copyWith(
+        status: DownloadStatus.queued,
+        clearError: true,
+        statusText: 'Melanjutkan unduhan...',
+        subFiles: it.subFiles
+            .map((s) => s.status == DownloadStatus.completed
+                ? s
+                : s.copyWith(
+                    status: DownloadStatus.queued,
+                    speedText: '',
+                  ))
+            .toList(growable: false),
+      ),
+    );
+
+    final payload = item.resumePayload ?? const <String, dynamic>{};
+    final info = MediaInfo(
+      originalUrl: item.sourceUrl,
+      platform: item.platform,
+      title: item.title,
+      author: item.author,
+      thumbnailUrl: item.thumbnailUrl,
+      extractorLabel: 'Resume',
+      options: const [],
+    );
+
+    final extraKeys = (payload['extraMarkerKeys'] as List?)
+            ?.map((e) => e.toString())
+            .where((e) => e.isNotEmpty)
+            .toList() ??
+        <String>[if (item.markerKey.isNotEmpty) item.markerKey];
+    final markAlbumKey = payload['markAlbumKey'] as bool? ?? true;
+
+    final rawHeaders = payload['headers'];
+    final headers = <String, String>{};
+    if (rawHeaders is Map) {
+      rawHeaders.forEach((k, v) {
+        if (k != null && v != null) headers[k.toString()] = v.toString();
+      });
+    }
+    if (item.platform == MediaPlatform.pixiv && !headers.containsKey('Referer')) {
+      headers['Referer'] = 'https://www.pixiv.net/';
+    }
+
+    final pixivIllustId = payload['pixivIllustId']?.toString();
+    final galleryUrls = (payload['galleryUrls'] as List?)
+            ?.map((e) => e.toString())
+            .where((u) => u.startsWith('http'))
+            .toList() ??
+        const <String>[];
+    final directUrl = payload['directUrl']?.toString();
+    final engineStr = payload['engine']?.toString() ?? '';
+
+    if (pixivIllustId != null &&
+        pixivIllustId.isNotEmpty &&
+        galleryUrls.isEmpty) {
+      final pixivCookie = await _safeCookieHeader('https://www.pixiv.net/');
+      unawaited(
+        _executePixivArtworkTask(
+          taskId: taskId,
+          illustId: pixivIllustId,
+          info: info,
+          headers: headers,
+          pixivCookie: pixivCookie,
+          extraMarkerKeys: extraKeys,
+        ),
+      );
+      return;
+    }
+
+    if (engineStr == DownloadEngine.directHttp.name &&
+        ((directUrl != null && directUrl.startsWith('http')) ||
+            galleryUrls.isNotEmpty)) {
+      final opt = MediaFormatOption(
+        id: 'resume_$taskId',
+        label: item.formatLabel,
+        subtitle: 'Resume',
+        extension: item.extension,
+        kind: item.mediaKind,
+        engine: DownloadEngine.directHttp,
+        directUrl:
+            (directUrl != null && directUrl.startsWith('http'))
+                ? directUrl
+                : galleryUrls.first,
+        galleryUrls: galleryUrls,
+        headers: headers,
+      );
+      unawaited(
+        _runDirectHttpDownload(
+          taskId,
+          info,
+          opt,
+          extraMarkerKeys: extraKeys,
+          markAlbumKey: markAlbumKey,
+        ),
+      );
+      return;
+    }
+
+    // Resume via yt-dlp (--continue automatically picks up .part file!)
+    final isAudio = payload['audioOnly'] as bool? ??
+        item.mediaKind == MediaKind.audio;
+    final opt = MediaFormatOption(
+      id: 'resume_ytdlp_$taskId',
+      label: item.formatLabel,
+      subtitle: 'yt-dlp',
+      extension: item.extension,
+      kind: isAudio ? MediaKind.audio : item.mediaKind,
+      engine: DownloadEngine.ytDlp,
+      ytDlpFormatSelector: payload['ytDlpFormatSelector']?.toString() ??
+          (isAudio
+              ? null
+              : 'bestvideo[vcodec^=avc1][ext=mp4]+bestaudio[ext=m4a]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best'),
+    );
+    unawaited(
+      _runYtDlpDownload(
+        taskId,
+        info,
+        opt,
+        extraMarkerKeys: extraKeys,
+        markAlbumKey: markAlbumKey,
+      ),
+    );
+  }
+
+  Future<void> resumeAllPaused() async {
+    final toResume = pausedDownloads;
+    for (final item in toResume) {
+      await resumeDownload(item.id);
+    }
+  }
+
+  Future<void> cancelDownload(String taskId) async {
+    _pausedTaskIds.remove(taskId);
+    _cancelledTaskIds.add(taskId);
+    final directToken = _directCancelTokens[taskId];
+    if (directToken != null && !directToken.isCancelled) {
+      directToken.cancel('Dibatalkan oleh pengguna');
+    } else {
+      try {
+        await _bridge.cancelDownload(taskId);
+      } catch (_) {}
+    }
+    _updateItem(
+      taskId,
+      (item) => item.copyWith(
+        status: DownloadStatus.cancelled,
+        statusText: 'Dibatalkan',
+        subFiles: item.subFiles
+            .map((s) => s.isActive || s.status == DownloadStatus.paused
+                ? s.copyWith(status: DownloadStatus.cancelled, speedText: '')
+                : s)
+            .toList(growable: false),
+      ),
+    );
+    _schedulePostDownloadSync(includeMediaRefresh: false);
   }
 
   Future<String> _safeCookieHeader(String url) async {
@@ -903,7 +1398,7 @@ class DownloadManager extends ChangeNotifier {
     bool markAlbumKey = true,
   }) async {
     await _ytDlpPool.run(() async {
-      if (_isDisposed || _isTaskCancelled(taskId)) return;
+      if (_isDisposed || _isTaskStopped(taskId)) return;
 
       _updateItem(
         taskId,
@@ -914,19 +1409,22 @@ class DownloadManager extends ChangeNotifier {
               ? [
                   SubFileTask(
                     id: '${taskId}_0',
-                    fileName: '${_sanitizeBaseName(info.title)}.${option.extension}',
+                    fileName:
+                        '${_sanitizeBaseName(info.title)}.${option.extension}',
                     status: DownloadStatus.downloading,
                   ),
                 ]
               : [
-                  item.subFiles.first.copyWith(status: DownloadStatus.downloading),
+                  item.subFiles.first
+                      .copyWith(status: DownloadStatus.downloading),
                   ...item.subFiles.skip(1),
                 ],
         ),
       );
 
       try {
-        final cookiesPath = await _storage.getCookiesFilePath(_settings.customCookies);
+        final cookiesPath =
+            await _storage.getCookiesFilePath(_settings.customCookies);
         final saved = await _bridge.downloadWithYtDlp(
           taskId: taskId,
           url: info.originalUrl,
@@ -976,12 +1474,33 @@ class DownloadManager extends ChangeNotifier {
         _schedulePostDownloadSync();
       } catch (e) {
         final rawMsg = e.toString();
-        final isCancelled = rawMsg.contains('CANCELLED') || _isTaskCancelled(taskId);
+        final isPaused = rawMsg.contains('PAUSED') || _isTaskPaused(taskId);
+        if (isPaused) {
+          _updateItem(
+            taskId,
+            (item) => item.copyWith(
+              status: DownloadStatus.paused,
+              statusText:
+                  'Dijeda (${item.progress.clamp(0, 100).toStringAsFixed(0)}%)',
+              subFiles: item.subFiles
+                  .map((s) => s.isActive
+                      ? s.copyWith(status: DownloadStatus.paused, speedText: '')
+                      : s)
+                  .toList(growable: false),
+            ),
+          );
+          _schedulePostDownloadSync(includeMediaRefresh: false);
+          return;
+        }
+
+        final isCancelled =
+            rawMsg.contains('CANCELLED') || _isTaskCancelled(taskId);
         final cleanErr = rawMsg.replaceFirst('Exception: ', '').trim();
         _updateItem(
           taskId,
           (item) => item.copyWith(
-            status: isCancelled ? DownloadStatus.cancelled : DownloadStatus.failed,
+            status:
+                isCancelled ? DownloadStatus.cancelled : DownloadStatus.failed,
             statusText: isCancelled ? 'Dibatalkan' : 'Unduhan gagal',
             errorMessage: isCancelled ? null : cleanErr,
             subFiles: item.subFiles
@@ -1000,8 +1519,10 @@ class DownloadManager extends ChangeNotifier {
     });
   }
 
-  /// High-speed concurrent Direct HTTP downloader with per-file live progress,
-  /// rolling speed calculation, lightweight throttling, and automatic retry.
+  /// High-speed load-balanced Direct HTTP downloader with:
+  /// - 5 concurrent HTTP streams
+  /// - Pre-download duplicate check (zero `(1)` files!)
+  /// - Full Pause / Resume preserving completed pages & HTTP Range `.part` resume!
   Future<void> _runDirectHttpDownload(
     String taskId,
     MediaInfo info,
@@ -1009,7 +1530,7 @@ class DownloadManager extends ChangeNotifier {
     List<String> extraMarkerKeys = const [],
     bool markAlbumKey = true,
   }) async {
-    if (_isDisposed || _isTaskCancelled(taskId)) return;
+    if (_isDisposed || _isTaskStopped(taskId)) return;
 
     final cancelToken = CancelToken();
     _directCancelTokens[taskId] = cancelToken;
@@ -1026,9 +1547,14 @@ class DownloadManager extends ChangeNotifier {
 
       final safeBase = _sanitizeBaseName(info.title);
       final totalFiles = urlsToDownload.length;
+      final existingItem = findItemById(taskId);
+      final prevSubs = existingItem?.subFiles ?? const <SubFileTask>[];
 
-      // Initialize every individual SubFileTask upfront so Riwayat detail shows all files immediately!
+      // Preserve already-completed sub-files when resuming a paused/failed album!
       final subTasks = List<SubFileTask>.generate(totalFiles, (i) {
+        if (i < prevSubs.length && prevSubs[i].status == DownloadStatus.completed) {
+          return prevSubs[i];
+        }
         final suffix = totalFiles > 1 ? '_${i + 1}' : '';
         final fileExt = _detectExtFromUrlOrDefault(urlsToDownload[i], option.extension);
         return SubFileTask(
@@ -1043,13 +1569,31 @@ class DownloadManager extends ChangeNotifier {
       SavedFileResult? lastSaved;
       int skippedCount = 0;
 
+      // Seed representative from previously completed sub-files if resuming
+      for (final s in subTasks) {
+        if (s.status == DownloadStatus.completed &&
+            (s.savedPath != null && s.savedPath!.isNotEmpty)) {
+          firstSaved ??= SavedFileResult(
+            savedPath: s.savedPath!,
+            contentUri: s.contentUri ?? '',
+            fileName: s.fileName,
+            fileSize: s.downloadedBytes,
+            mimeType: s.mimeType ?? option.mimeType,
+            folderLabel: info.platform == MediaPlatform.pixiv
+                ? 'Privat/Pixiv/${info.author}'
+                : 'Pictures/all_download/${info.platform.folderName}/${info.author}',
+            platformFolder: info.platform.folderName,
+            creatorFolder: info.author,
+          );
+        }
+      }
+
       _updateItem(
         taskId,
         (item) => item.copyWith(
           status: DownloadStatus.downloading,
-          progress: 0,
           statusText: totalFiles > 1
-              ? 'Mengunduh 0/$totalFiles file...'
+              ? 'Mengunduh ${subTasks.where((s) => s.status == DownloadStatus.completed).length}/$totalFiles file...'
               : 'Menghubungkan...',
           subFiles: List<SubFileTask>.unmodifiable(subTasks),
         ),
@@ -1111,7 +1655,8 @@ class DownloadManager extends ChangeNotifier {
                   : DownloadStatus.downloading,
               progress: overallPct.clamp(0.0, 99.5),
               statusText: statusLabel,
-              fileSize: totalDownloadedBytes > 0 ? totalDownloadedBytes : item.fileSize,
+              fileSize:
+                  totalDownloadedBytes > 0 ? totalDownloadedBytes : item.fileSize,
               subFiles: List<SubFileTask>.unmodifiable(subTasks),
             );
           },
@@ -1119,18 +1664,23 @@ class DownloadManager extends ChangeNotifier {
         );
       }
 
-      // Download files concurrently through the shared global HTTP worker pool (max 4 streams)
       await Future.wait(
         List<Future<void>>.generate(totalFiles, (i) async {
+          if (subTasks[i].status == DownloadStatus.completed) {
+            return;
+          }
+
           final targetUrl = urlsToDownload[i];
           final fileExt = _detectExtFromUrlOrDefault(targetUrl, option.extension);
           final fileName = subTasks[i].fileName;
-          final tempPath = p.join(cacheDir.path, 'direct_${taskId}_$i.$fileExt');
+          final partPath = p.join(cacheDir.path, 'direct_${taskId}_$i.$fileExt.part');
 
           await _directFilePool.run(() async {
-            if (cancelToken.isCancelled || _isTaskCancelled(taskId)) {
+            if (cancelToken.isCancelled || _isTaskStopped(taskId)) {
               subTasks[i] = subTasks[i].copyWith(
-                status: DownloadStatus.cancelled,
+                status: _isTaskPaused(taskId)
+                    ? DownloadStatus.paused
+                    : DownloadStatus.cancelled,
                 speedText: '',
               );
               return;
@@ -1139,8 +1689,7 @@ class DownloadManager extends ChangeNotifier {
             final isPixivPrivate = info.platform == MediaPlatform.pixiv;
             final mime = _mimeForExtension(fileExt, option.kind);
 
-            // Fast pre-download check: if exact file already exists on device
-            // (Private Vault OR Public Gallery), SKIP immediately without downloading or creating "(1)"!
+            // Fast pre-download check: if exact file already exists, SKIP immediately!
             try {
               final existing = await _bridge.findExistingFile(
                 fileName: fileName,
@@ -1172,30 +1721,71 @@ class DownloadManager extends ChangeNotifier {
 
             subTasks[i] = subTasks[i].copyWith(
               status: DownloadStatus.downloading,
-              progress: 0,
             );
             syncParent();
 
             int lastTickMs = DateTime.now().millisecondsSinceEpoch;
             int lastTickBytes = 0;
 
-            Future<void> performDownload() async {
-              await _dio.download(
+            Future<void> performResumableDownload() async {
+              final partFile = File(partPath);
+              int existingBytes = 0;
+              if (await partFile.exists()) {
+                existingBytes = await partFile.length();
+              }
+              lastTickBytes = existingBytes;
+
+              final reqHeaders = <String, dynamic>{
+                ...option.headers,
+                if (existingBytes > 0) 'Range': 'bytes=$existingBytes-',
+              };
+
+              final response = await _dio.get<ResponseBody>(
                 targetUrl,
-                tempPath,
                 cancelToken: cancelToken,
                 options: Options(
-                  headers: option.headers,
+                  responseType: ResponseType.stream,
+                  headers: reqHeaders,
                   followRedirects: true,
                   maxRedirects: 8,
+                  validateStatus: (s) => s != null && s < 400,
                 ),
-                onReceiveProgress: (received, total) {
+              );
+
+              final statusCode = response.statusCode ?? 200;
+              final isPartialResume = statusCode == 206 && existingBytes > 0;
+              int received = isPartialResume ? existingBytes : 0;
+
+              final contentLength =
+                  int.tryParse(response.headers.value('content-length') ?? '') ?? -1;
+              final total = contentLength > 0
+                  ? (isPartialResume ? existingBytes + contentLength : contentLength)
+                  : -1;
+
+              final sink = partFile.openWrite(
+                mode: isPartialResume ? FileMode.append : FileMode.write,
+              );
+              try {
+                final stream = response.data?.stream;
+                if (stream == null) {
+                  throw Exception('Stream kosong dari server.');
+                }
+                await for (final chunk in stream) {
+                  if (cancelToken.isCancelled || _isTaskStopped(taskId)) {
+                    throw DioException.requestCancelled(
+                      requestOptions: response.requestOptions,
+                      reason: _isTaskPaused(taskId)
+                          ? 'PAUSED_BY_USER'
+                          : 'Dibatalkan',
+                    );
+                  }
+                  sink.add(chunk);
+                  received += chunk.length;
+
                   final nowMs = DateTime.now().millisecondsSinceEpoch;
                   final elapsedMs = nowMs - lastTickMs;
                   final isDone = total > 0 && received >= total;
-
-                  // Only recompute & propagate at most every 220ms per file (huge CPU win!)
-                  if (!isDone && elapsedMs < 220) return;
+                  if (!isDone && elapsedMs < 220) continue;
 
                   if (elapsedMs > 0) {
                     final deltaBytes = received - lastTickBytes;
@@ -1206,42 +1796,53 @@ class DownloadManager extends ChangeNotifier {
                     lastTickBytes = received;
                   }
 
-                  final pct = total > 0 ? ((received / total) * 100.0).clamp(0.0, 100.0) : -1.0;
+                  final pct = total > 0
+                      ? ((received / total) * 100.0).clamp(0.0, 100.0)
+                      : -1.0;
                   subTasks[i] = subTasks[i].copyWith(
                     status: DownloadStatus.downloading,
                     progress: pct,
                     downloadedBytes: received,
                     totalBytes: total > 0 ? total : subTasks[i].totalBytes,
-                    speedText: fileSpeedBps[i] > 512 ? _formatSpeed(fileSpeedBps[i]) : '',
+                    speedText: fileSpeedBps[i] > 512
+                        ? _formatSpeed(fileSpeedBps[i])
+                        : '',
                   );
                   syncParent();
-                },
-              );
+                }
+                await sink.flush();
+              } finally {
+                await sink.close();
+              }
             }
 
+            bool keepPartOnExit = false;
             try {
               try {
-                await performDownload();
+                await performResumableDownload();
               } on DioException catch (firstErr) {
-                if (CancelToken.isCancel(firstErr) || cancelToken.isCancelled) {
+                if (CancelToken.isCancel(firstErr) ||
+                    cancelToken.isCancelled ||
+                    _isTaskStopped(taskId)) {
                   rethrow;
                 }
-                // Automatic 1-time retry on transient network/429 glitches
-                await Future<void>.delayed(const Duration(milliseconds: 700));
-                if (cancelToken.isCancelled || _isTaskCancelled(taskId)) {
+                await Future<void>.delayed(const Duration(milliseconds: 650));
+                if (cancelToken.isCancelled || _isTaskStopped(taskId)) {
                   throw DioException.requestCancelled(
                     requestOptions: firstErr.requestOptions,
-                    reason: 'Dibatalkan',
+                    reason: _isTaskPaused(taskId) ? 'PAUSED_BY_USER' : 'Dibatalkan',
                   );
                 }
                 lastTickMs = DateTime.now().millisecondsSinceEpoch;
-                lastTickBytes = 0;
-                await performDownload();
+                await performResumableDownload();
               }
 
-              if (cancelToken.isCancelled || _isTaskCancelled(taskId)) {
+              if (cancelToken.isCancelled || _isTaskStopped(taskId)) {
+                keepPartOnExit = _isTaskPaused(taskId);
                 subTasks[i] = subTasks[i].copyWith(
-                  status: DownloadStatus.cancelled,
+                  status: keepPartOnExit
+                      ? DownloadStatus.paused
+                      : DownloadStatus.cancelled,
                   speedText: '',
                 );
                 return;
@@ -1256,7 +1857,7 @@ class DownloadManager extends ChangeNotifier {
               syncParent();
 
               final saved = await _bridge.saveFileToDownloads(
-                sourcePath: tempPath,
+                sourcePath: partPath,
                 fileName: fileName,
                 mimeType: mime,
                 platformFolder: info.platform.folderName,
@@ -1283,12 +1884,26 @@ class DownloadManager extends ChangeNotifier {
               syncParent(immediate: true);
             } on DioException catch (e) {
               fileSpeedBps[i] = 0;
-              final cancelled = CancelToken.isCancel(e) || cancelToken.isCancelled;
-              subTasks[i] = subTasks[i].copyWith(
-                status: cancelled ? DownloadStatus.cancelled : DownloadStatus.failed,
-                speedText: '',
-                errorMessage: cancelled ? null : (e.message ?? 'Koneksi terputus'),
-              );
+              final paused = _isTaskPaused(taskId) ||
+                  (e.error?.toString().contains('PAUSED_BY_USER') ?? false);
+              if (paused) {
+                keepPartOnExit = true;
+                subTasks[i] = subTasks[i].copyWith(
+                  status: DownloadStatus.paused,
+                  speedText: '',
+                );
+              } else {
+                final cancelled =
+                    CancelToken.isCancel(e) || cancelToken.isCancelled;
+                subTasks[i] = subTasks[i].copyWith(
+                  status: cancelled
+                      ? DownloadStatus.cancelled
+                      : DownloadStatus.failed,
+                  speedText: '',
+                  errorMessage:
+                      cancelled ? null : (e.message ?? 'Koneksi terputus'),
+                );
+              }
               syncParent(immediate: true);
             } catch (e) {
               fileSpeedBps[i] = 0;
@@ -1299,9 +1914,11 @@ class DownloadManager extends ChangeNotifier {
               );
               syncParent(immediate: true);
             } finally {
-              final tempFile = File(tempPath);
-              if (await tempFile.exists()) {
-                await tempFile.delete().catchError((_) => tempFile);
+              if (!keepPartOnExit) {
+                final tempFile = File(partPath);
+                if (await tempFile.exists()) {
+                  await tempFile.delete().catchError((_) => tempFile);
+                }
               }
             }
           });
@@ -1309,6 +1926,28 @@ class DownloadManager extends ChangeNotifier {
       );
 
       // Finalize overall DownloadItem state
+      if (_isTaskPaused(taskId)) {
+        final pausedSubs = subTasks
+            .map((s) => s.isActive
+                ? s.copyWith(status: DownloadStatus.paused, speedText: '')
+                : s)
+            .toList(growable: false);
+        final doneNow =
+            pausedSubs.where((s) => s.status == DownloadStatus.completed).length;
+        _updateItem(
+          taskId,
+          (item) => item.copyWith(
+            status: DownloadStatus.paused,
+            statusText: totalFiles > 1
+                ? 'Dijeda ($doneNow/$totalFiles selesai)'
+                : 'Dijeda (${item.progress.clamp(0, 100).toStringAsFixed(0)}%)',
+            subFiles: pausedSubs,
+          ),
+        );
+        _schedulePostDownloadSync(includeMediaRefresh: false);
+        return;
+      }
+
       if (cancelToken.isCancelled || _isTaskCancelled(taskId)) {
         final cancelledSubs = subTasks
             .map((s) => s.isActive
@@ -1327,9 +1966,12 @@ class DownloadManager extends ChangeNotifier {
         return;
       }
 
-      final completedSubs = subTasks.where((s) => s.status == DownloadStatus.completed).toList();
-      final failedSubs = subTasks.where((s) => s.status == DownloadStatus.failed).toList();
-      final totalSavedBytes = completedSubs.fold<int>(0, (acc, s) => acc + s.downloadedBytes);
+      final completedSubs =
+          subTasks.where((s) => s.status == DownloadStatus.completed).toList();
+      final failedSubs =
+          subTasks.where((s) => s.status == DownloadStatus.failed).toList();
+      final totalSavedBytes =
+          completedSubs.fold<int>(0, (acc, s) => acc + s.downloadedBytes);
       final representative = firstSaved ?? lastSaved;
 
       if (completedSubs.isNotEmpty && representative != null) {
@@ -1391,6 +2033,7 @@ class DownloadManager extends ChangeNotifier {
         _schedulePostDownloadSync(includeMediaRefresh: false);
       }
     } catch (e) {
+      if (_isTaskPaused(taskId)) return;
       _updateItem(
         taskId,
         (item) => item.copyWith(
@@ -1462,13 +2105,16 @@ class DownloadManager extends ChangeNotifier {
     final current = _items[idx];
     if (!current.isActive) return;
 
-    final statusLine = _prettifyYtDlpLine(event.line, event.progress, event.etaSeconds);
-    final speedMatch = RegExp(r'at\s+([0-9.]+[KMG]i?B/s)', caseSensitive: false)
-        .firstMatch(event.line);
+    final statusLine =
+        _prettifyYtDlpLine(event.line, event.progress, event.etaSeconds);
+    final speedMatch =
+        RegExp(r'at\s+([0-9.]+[KMG]i?B/s)', caseSensitive: false)
+            .firstMatch(event.line);
     final speedText = speedMatch?.group(1) ?? '';
 
-    final nextProgress =
-        event.progress >= 0 ? event.progress.clamp(0.0, 100.0) : current.progress;
+    final nextProgress = event.progress >= 0
+        ? event.progress.clamp(0.0, 100.0)
+        : current.progress;
     final isMerging = event.line.toLowerCase().contains('[merger]') ||
         event.line.toLowerCase().contains('[extractaudio]');
 
@@ -1479,7 +2125,9 @@ class DownloadManager extends ChangeNotifier {
             ? item.subFiles
             : [
                 item.subFiles.first.copyWith(
-                  status: isMerging ? DownloadStatus.saving : DownloadStatus.downloading,
+                  status: isMerging
+                      ? DownloadStatus.saving
+                      : DownloadStatus.downloading,
                   progress: nextProgress,
                   speedText: speedText.isNotEmpty
                       ? speedText
@@ -1488,7 +2136,8 @@ class DownloadManager extends ChangeNotifier {
                 ...item.subFiles.skip(1),
               ];
         return item.copyWith(
-          status: isMerging ? DownloadStatus.saving : DownloadStatus.downloading,
+          status:
+              isMerging ? DownloadStatus.saving : DownloadStatus.downloading,
           progress: nextProgress,
           etaSeconds: event.etaSeconds >= 0 ? event.etaSeconds : item.etaSeconds,
           statusText: statusLine,
@@ -1526,31 +2175,6 @@ class DownloadManager extends ChangeNotifier {
     final m = seconds ~/ 60;
     final s = seconds % 60;
     return '${m}m ${s}d';
-  }
-
-  Future<void> cancelDownload(String taskId) async {
-    _cancelledTaskIds.add(taskId);
-    final directToken = _directCancelTokens[taskId];
-    if (directToken != null && !directToken.isCancelled) {
-      directToken.cancel('Dibatalkan oleh pengguna');
-    } else {
-      try {
-        await _bridge.cancelDownload(taskId);
-      } catch (_) {}
-    }
-    _updateItem(
-      taskId,
-      (item) => item.copyWith(
-        status: DownloadStatus.cancelled,
-        statusText: 'Dibatalkan',
-        subFiles: item.subFiles
-            .map((s) => s.isActive
-                ? s.copyWith(status: DownloadStatus.cancelled, speedText: '')
-                : s)
-            .toList(growable: false),
-      ),
-    );
-    _schedulePostDownloadSync(includeMediaRefresh: false);
   }
 
   Future<bool> openDownloadedItem(DownloadItem item) async {
@@ -1628,7 +2252,6 @@ class DownloadManager extends ChangeNotifier {
     return deletedCount;
   }
 
-  /// Unlocks private Pixiv files into public Android Gallery & WhatsApp (`Pictures/all_download/...`).
   Future<int> unlockManagedFiles(List<ManagedFile> files) async {
     final targets = files.where((f) => f.isPrivate).toList(growable: false);
     if (targets.isEmpty) return 0;
@@ -1637,7 +2260,6 @@ class DownloadManager extends ChangeNotifier {
     return count;
   }
 
-  /// Locks public files back into the app-private vault (hidden from Gallery & WhatsApp).
   Future<int> lockManagedFiles(List<ManagedFile> files) async {
     final targets = files.where((f) => !f.isPrivate).toList(growable: false);
     if (targets.isEmpty) return 0;
@@ -1646,7 +2268,10 @@ class DownloadManager extends ChangeNotifier {
     return count;
   }
 
-  Future<void> removeHistoryItem(DownloadItem item, {bool deleteFromDevice = false}) async {
+  Future<void> removeHistoryItem(
+    DownloadItem item, {
+    bool deleteFromDevice = false,
+  }) async {
     if (deleteFromDevice) {
       if (item.subFiles.isNotEmpty) {
         for (final sub in item.subFiles) {
@@ -1672,7 +2297,7 @@ class DownloadManager extends ChangeNotifier {
   }
 
   Future<void> clearAllHistory() async {
-    _items = _items.where((i) => i.isActive).toList();
+    _items = _items.where((i) => i.isActive || i.isPaused).toList();
     _notifyImmediate();
     await _storage.saveHistory(_items);
   }
@@ -1767,7 +2392,8 @@ class DownloadManager extends ChangeNotifier {
       return;
     }
 
-    if (DateTime.now().difference(_lastHistoryFlush) > const Duration(seconds: 8)) {
+    if (DateTime.now().difference(_lastHistoryFlush) >
+        const Duration(seconds: 8)) {
       _lastHistoryFlush = DateTime.now();
       unawaited(_storage.saveHistory(_items));
     }

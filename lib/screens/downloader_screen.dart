@@ -98,6 +98,7 @@ class _DownloaderScreenState extends State<DownloaderScreen> {
     final busy = manager.isAnalyzing;
     final hasText = widget.urlController.text.trim().isNotEmpty;
     final activeCount = manager.activeDownloads.length;
+    final pausedCount = manager.pausedDownloads.length;
 
     return LayoutBuilder(
       builder: (context, constraints) {
@@ -106,6 +107,7 @@ class _DownloaderScreenState extends State<DownloaderScreen> {
             isCenteredIdle ? 0.0 : MediaQuery.viewInsetsOf(context).bottom;
 
         return SingleChildScrollView(
+          keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
           padding: EdgeInsets.fromLTRB(18, 12, 18, 24 + bottomInset),
           child: ConstrainedBox(
             constraints: BoxConstraints(
@@ -180,7 +182,7 @@ class _DownloaderScreenState extends State<DownloaderScreen> {
                           textInputAction: TextInputAction.go,
                           onSubmitted: (_) => _analyze(),
                           decoration: InputDecoration(
-                            hintText: 'Tempel link media / profil / pixiv:user...',
+                            hintText: 'Paste link',
                             prefixIcon: Icon(
                               _detection?.platform.icon ?? Icons.link_rounded,
                               color: _detection?.platform.brandColor,
@@ -311,6 +313,55 @@ class _DownloaderScreenState extends State<DownloaderScreen> {
                   ),
                 ],
 
+                if (activeCount == 0 && pausedCount > 0 && preview == null) ...[
+                  const SizedBox(height: 12),
+                  InkWell(
+                    onTap: widget.onOpenHistoryTab,
+                    borderRadius: BorderRadius.circular(14),
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 14,
+                        vertical: 10,
+                      ),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFF59E0B).withValues(alpha: 0.12),
+                        borderRadius: BorderRadius.circular(14),
+                        border: Border.all(
+                          color: const Color(0xFFF59E0B).withValues(alpha: 0.4),
+                        ),
+                      ),
+                      child: Row(
+                        children: [
+                          const Icon(
+                            Icons.pause_circle_filled_rounded,
+                            size: 18,
+                            color: Color(0xFFF59E0B),
+                          ),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: Text(
+                              '$pausedCount unduhan terjeda',
+                              style: theme.textTheme.bodySmall?.copyWith(
+                                color: const Color(0xFFF59E0B),
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                          ),
+                          FilledButton.tonalIcon(
+                            onPressed: manager.resumeAllPaused,
+                            style: FilledButton.styleFrom(
+                              visualDensity: VisualDensity.compact,
+                              padding: const EdgeInsets.symmetric(horizontal: 10),
+                            ),
+                            icon: const Icon(Icons.play_arrow_rounded, size: 16),
+                            label: const Text('Lanjut'),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
+
                 if (manager.engineError != null) ...[
                   const SizedBox(height: 12),
                   _ErrorBanner(
@@ -360,10 +411,9 @@ class _DownloaderScreenState extends State<DownloaderScreen> {
                     },
                     onDismiss: manager.clearPreview,
                     onDownloadOption: (selected) async {
-                      if (preview.platform == MediaPlatform.pixiv &&
-                          manager.isMarkedDownloaded(preview.markerKey)) {
+                      if (manager.isMarkedDownloaded(preview.markerKey)) {
                         _showSnack(
-                          'Karya Pixiv ini sudah ditandai terunduh. Hapus tanda dulu untuk mengunduh ulang.',
+                          'Media ini sudah ditandai terunduh. Hapus tanda dulu untuk mengunduh ulang.',
                         );
                         return;
                       }
@@ -420,6 +470,7 @@ class _DownloaderScreenState extends State<DownloaderScreen> {
 
   bool _canBrowserLogin(MediaPlatform? platform) {
     return platform == MediaPlatform.instagram ||
+        platform == MediaPlatform.tiktok ||
         platform == MediaPlatform.douyin ||
         platform == MediaPlatform.facebook ||
         platform == MediaPlatform.pixiv;
@@ -429,6 +480,8 @@ class _DownloaderScreenState extends State<DownloaderScreen> {
     switch (platform) {
       case MediaPlatform.instagram:
         return 'Login Browser Instagram';
+      case MediaPlatform.tiktok:
+        return 'Login Browser TikTok';
       case MediaPlatform.douyin:
         return 'Login Browser Douyin';
       case MediaPlatform.facebook:

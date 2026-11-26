@@ -5,6 +5,7 @@ enum DownloadStatus {
   queued,
   downloading,
   saving,
+  paused,
   completed,
   failed,
   cancelled,
@@ -132,6 +133,9 @@ class DownloadItem {
   final DateTime createdAt;
   final List<SubFileTask> subFiles;
 
+  /// Persisted parameters enabling full Pause/Resume & Retry even after app restarts.
+  final Map<String, dynamic>? resumePayload;
+
   const DownloadItem({
     required this.id,
     required this.sourceUrl,
@@ -155,12 +159,21 @@ class DownloadItem {
     this.mimeType,
     this.errorMessage,
     this.subFiles = const [],
+    this.resumePayload,
   });
 
   bool get isActive =>
       status == DownloadStatus.queued ||
       status == DownloadStatus.downloading ||
       status == DownloadStatus.saving;
+
+  bool get isPaused => status == DownloadStatus.paused;
+
+  bool get canResume =>
+      (status == DownloadStatus.paused ||
+          status == DownloadStatus.failed ||
+          status == DownloadStatus.cancelled) &&
+      (resumePayload != null || sourceUrl.startsWith('http'));
 
   int get completedSubFilesCount =>
       subFiles.where((f) => f.status == DownloadStatus.completed).length;
@@ -176,7 +189,9 @@ class DownloadItem {
     int? fileSize,
     String? mimeType,
     String? errorMessage,
+    bool clearError = false,
     List<SubFileTask>? subFiles,
+    Map<String, dynamic>? resumePayload,
   }) {
     return DownloadItem(
       id: id,
@@ -198,9 +213,10 @@ class DownloadItem {
       fileName: fileName ?? this.fileName,
       fileSize: fileSize ?? this.fileSize,
       mimeType: mimeType ?? this.mimeType,
-      errorMessage: errorMessage ?? this.errorMessage,
+      errorMessage: clearError ? null : (errorMessage ?? this.errorMessage),
       createdAt: createdAt,
       subFiles: subFiles ?? this.subFiles,
+      resumePayload: resumePayload ?? this.resumePayload,
     );
   }
 
@@ -227,6 +243,7 @@ class DownloadItem {
       'errorMessage': errorMessage,
       'createdAt': createdAt.toIso8601String(),
       'subFiles': subFiles.map((e) => e.toJson()).toList(),
+      if (resumePayload != null) 'resumePayload': resumePayload,
     };
   }
 
@@ -245,6 +262,7 @@ class DownloadItem {
             .map((e) => SubFileTask.fromJson(Map<String, dynamic>.from(e)))
             .toList(growable: false) ??
         const <SubFileTask>[];
+    final rawResume = json['resumePayload'];
 
     return DownloadItem(
       id: json['id']?.toString() ?? '',
@@ -269,6 +287,9 @@ class DownloadItem {
       createdAt: DateTime.tryParse(json['createdAt']?.toString() ?? '') ??
           DateTime.now(),
       subFiles: parsedSubs,
+      resumePayload: rawResume is Map
+          ? Map<String, dynamic>.from(rawResume)
+          : null,
     );
   }
 }

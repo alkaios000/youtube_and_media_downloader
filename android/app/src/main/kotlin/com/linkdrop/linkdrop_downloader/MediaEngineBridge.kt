@@ -56,6 +56,8 @@ class MediaEngineBridge(private val context: Context) {
     @Volatile
     private var progressEmitter: ((Map<String, Any?>) -> Unit)? = null
 
+    private val pausedTasks = java.util.Collections.synchronizedSet(HashSet<String>())
+
     fun setProgressEmitter(emitter: ((Map<String, Any?>) -> Unit)?) {
         progressEmitter = emitter
     }
@@ -302,9 +304,12 @@ class MediaEngineBridge(private val context: Context) {
 
                 var lastError: Throwable? = null
                 var producedPrimary: File? = null
+                pausedTasks.remove(taskId)
 
-                for (attempt in attempts) {
-                    if (workDir.exists()) workDir.deleteRecursively()
+                for ((attemptIdx, attempt) in attempts.withIndex()) {
+                    if (attemptIdx > 0 && workDir.exists()) {
+                        workDir.deleteRecursively()
+                    }
                     workDir.mkdirs()
 
                     if (attempt.label != null) {
@@ -315,6 +320,7 @@ class MediaEngineBridge(private val context: Context) {
                     request.addOption("-o", "${workDir.absolutePath}/%(title).80s [%(id)s].%(ext)s")
                     request.addOption("--no-playlist")
                     request.addOption("--no-mtime")
+                    request.addOption("--continue")
                     request.addOption("--windows-filenames")
                     request.addOption("--socket-timeout", "30")
                     request.addOption("--retries", "3")
@@ -411,15 +417,24 @@ class MediaEngineBridge(private val context: Context) {
 
                 postToMain { onSuccess(exported) }
             } catch (t: Throwable) {
-                Log.e(TAG, "downloadWithYtDlp failed", t)
+                val wasPaused = pausedTasks.remove(taskId)
                 val msg = t.message.orEmpty()
-                if (msg.contains("destroyed", ignoreCase = true) || msg.contains("interrupt", ignoreCase = true)) {
+                if (wasPaused) {
+                    postToMain { onError("PAUSED", "Unduhan dijeda.") }
+                } else if (msg.contains("destroyed", ignoreCase = true) || msg.contains("interrupt", ignoreCase = true)) {
                     postToMain { onError("CANCELLED", "Unduhan dibatalkan.") }
                 } else {
+                    Log.e(TAG, "downloadWithYtDlp failed", t)
                     postToMain { onError("DOWNLOAD_ERROR", sanitizeError(msg)) }
                 }
             } finally {
-                runCatching { workDir.deleteRecursively() }
+                // Keep partial .part files on disk when paused so yt-dlp --continue resumes cleanly!
+                if (!pausedTasks.contains(taskId)) {
+                    val hasPartial = workDir.listFiles()?.any { it.name.endsWith(".part", ignoreCase = true) } == true
+                    if (!hasPartial) {
+                        runCatching { workDir.deleteRecursively() }
+                    }
+                }
             }
         }
     }
@@ -441,12 +456,26 @@ class MediaEngineBridge(private val context: Context) {
         val forceMerge: Boolean,
     )
 
-    fun cancelDownload(taskId: String): Boolean {
+    fun pauseDownload(taskId: String): Boolean {
+        pausedTasks.add(taskId)
         return try {
             YoutubeDL.getInstance().destroyProcessById(taskId)
         } catch (_: Throwable) {
             false
         }
+    }
+
+    fun cancelDownload(taskId: String): Boolean {
+        pausedTasks.remove(taskId)
+        val ok = try {
+            YoutubeDL.getInstance().destroyProcessById(taskId)
+        } catch (_: Throwable) {
+            false
+        }
+        scope.launch {
+            runCatching { File(context.cacheDir, "ytdl_task_$taskId").deleteRecursively() }
+        }
+        return ok
     }
 
     fun saveFileToDownloads(
@@ -1678,31 +1707,38 @@ class MediaEngineBridge(private val context: Context) {
         return false
     }
 
-    fun getStorageInfo(): Map<String, Any?> {
-        val cacheBytes = calculateDirSize(context.cacheDir)
-        val version = try {
-            if (isInitialized) YoutubeDL.getInstance().version(context) ?: "bundled" else "memuat..."
-        } catch (_: Throwable) {
-            "bundled"
+    fun getStorageInfoAsync(onDone: (Map<String, Any?>) -> Unit) {
+        scope.launch {
+            val cacheBytes = runCatching { calculateDirSize(context.cacheDir) }.getOrDefault(0L)
+            val version = try {
+                if (isInitialized) YoutubeDL.getInstance().version(context) ?: "bundled" else "memuat..."
+            } catch (_: Throwable) {
+                "bundled"
+            }
+            val info = mapOf(
+                "downloadFolder" to getPublicFolderLabel(),
+                "cacheBytes" to cacheBytes,
+                "version" to version,
+                "ffmpegReady" to ffmpegReady,
+                "aria2cReady" to aria2cReady,
+            )
+            postToMain { onDone(info) }
         }
-        return mapOf(
-            "downloadFolder" to getPublicFolderLabel(),
-            "cacheBytes" to cacheBytes,
-            "version" to version,
-            "ffmpegReady" to ffmpegReady,
-            "aria2cReady" to aria2cReady,
-        )
     }
 
-    fun clearCache(): Long {
-        var freed = 0L
-        context.cacheDir.listFiles()?.forEach { child ->
-            if (child.name.startsWith("ytdl_") || child.name.startsWith("direct_")) {
-                freed += calculateDirSize(child)
-                runCatching { child.deleteRecursively() }
+    fun clearCacheAsync(onDone: (Long) -> Unit) {
+        scope.launch {
+            var freed = 0L
+            runCatching {
+                context.cacheDir.listFiles()?.forEach { child ->
+                    if (child.name.startsWith("ytdl_") || child.name.startsWith("direct_")) {
+                        freed += calculateDirSize(child)
+                        runCatching { child.deleteRecursively() }
+                    }
+                }
             }
+            postToMain { onDone(freed) }
         }
-        return freed
     }
 
     private fun resolveReadableUri(filePath: String?, contentUri: String?): Uri? {

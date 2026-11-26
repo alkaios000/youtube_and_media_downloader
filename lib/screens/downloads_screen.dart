@@ -42,12 +42,31 @@ class _DownloadsScreenState extends State<DownloadsScreen> {
           item.platform.label.toLowerCase().contains(q);
     }).toList();
 
+    final activeCount = widget.manager.activeDownloads.length;
+    final pausedCount = widget.manager.pausedDownloads.length;
+
     return CustomScrollView(
+      keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
       slivers: [
         SliverAppBar(
           floating: true,
           title: const Text('Riwayat Unduhan'),
           actions: [
+            if (activeCount > 0)
+              IconButton(
+                onPressed: widget.manager.pauseAllDownloads,
+                icon: const Icon(Icons.pause_circle_outline_rounded),
+                tooltip: 'Jeda Semua ($activeCount)',
+              ),
+            if (pausedCount > 0)
+              IconButton(
+                onPressed: widget.manager.resumeAllPaused,
+                icon: const Icon(
+                  Icons.play_circle_outline_rounded,
+                  color: Color(0xFFF59E0B),
+                ),
+                tooltip: 'Lanjut Semua ($pausedCount)',
+              ),
             if (widget.manager.historyItems.isNotEmpty)
               IconButton(
                 onPressed: _confirmClearHistory,
@@ -100,6 +119,50 @@ class _DownloadsScreenState extends State<DownloadsScreen> {
                     ],
                   ),
                 ),
+                if (pausedCount > 0) ...[
+                  const SizedBox(height: 10),
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 12,
+                      vertical: 8,
+                    ),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFF59E0B).withValues(alpha: 0.12),
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(
+                        color: const Color(0xFFF59E0B).withValues(alpha: 0.4),
+                      ),
+                    ),
+                    child: Row(
+                      children: [
+                        const Icon(
+                          Icons.pause_circle_filled_rounded,
+                          size: 18,
+                          color: Color(0xFFF59E0B),
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            '$pausedCount unduhan terjeda siap dilanjutkan',
+                            style: theme.textTheme.bodySmall?.copyWith(
+                              color: const Color(0xFFF59E0B),
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                        ),
+                        FilledButton.tonalIcon(
+                          onPressed: widget.manager.resumeAllPaused,
+                          style: FilledButton.styleFrom(
+                            visualDensity: VisualDensity.compact,
+                            padding: const EdgeInsets.symmetric(horizontal: 10),
+                          ),
+                          icon: const Icon(Icons.play_arrow_rounded, size: 17),
+                          label: const Text('Lanjut Semua'),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
               ],
             ),
           ),
@@ -161,7 +224,13 @@ class _DownloadsScreenState extends State<DownloadsScreen> {
                     manager: widget.manager,
                     itemId: item.id,
                   ),
-                  onCancel: item.isActive
+                  onPause: item.isActive
+                      ? () => widget.manager.pauseDownload(item.id)
+                      : null,
+                  onResume: item.canResume
+                      ? () => widget.manager.resumeDownload(item.id)
+                      : null,
+                  onCancel: (item.isActive || item.isPaused)
                       ? () => widget.manager.cancelDownload(item.id)
                       : null,
                   onOpen: () => _openFile(item),

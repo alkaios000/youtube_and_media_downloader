@@ -21,7 +21,8 @@ class _PageHitMeta {
 }
 
 /// Dedicated Pixiv Album Reader opened when clicking a Pixiv artwork/album in File tab.
-/// Supports 3 viewing modes:
+/// Supports horizontal sliding between adjacent albums of the same artist (Pixiv-like UX)
+/// plus 3 vertical viewing modes inside each album:
 /// 1) Pixiv Vertical Scroll (default — seamless full-width reading like Pixiv app)
 /// 2) Album Grid (3-column gallery)
 /// 3) Row List (detailed list)
@@ -32,6 +33,8 @@ class PixivAlbumViewer extends StatefulWidget {
   final String platformFolder;
   final String creatorFolder;
   final String albumName;
+  final List<String> albumNames;
+  final int initialAlbumIndex;
 
   const PixivAlbumViewer({
     super.key,
@@ -39,6 +42,8 @@ class PixivAlbumViewer extends StatefulWidget {
     required this.platformFolder,
     required this.creatorFolder,
     required this.albumName,
+    this.albumNames = const [],
+    this.initialAlbumIndex = 0,
   });
 
   @override
@@ -46,8 +51,12 @@ class PixivAlbumViewer extends StatefulWidget {
 }
 
 class _PixivAlbumViewerState extends State<PixivAlbumViewer> {
-  final ScrollController _scrollController = ScrollController();
-  final GlobalKey _viewportKey = GlobalKey();
+  late final List<String> _albumOrder;
+  late final PageController _pageController;
+  late int _currentAlbumIndex;
+
+  final Map<int, ScrollController> _scrollControllers = {};
+  final Map<int, GlobalKey> _viewportKeys = {};
 
   _AlbumReaderMode _mode = _AlbumReaderMode.pixivScroll;
   bool _isSelectionMode = false;
@@ -64,21 +73,49 @@ class _PixivAlbumViewerState extends State<PixivAlbumViewer> {
   List<ManagedFile> _currentPages = const [];
 
   @override
+  void initState() {
+    super.initState();
+    _albumOrder = widget.albumNames.isNotEmpty
+        ? List<String>.from(widget.albumNames)
+        : <String>[widget.albumName];
+    var idx = widget.initialAlbumIndex;
+    if (idx < 0 || idx >= _albumOrder.length) {
+      idx = _albumOrder.indexOf(widget.albumName);
+      if (idx < 0) idx = 0;
+    }
+    _currentAlbumIndex = idx;
+    _pageController = PageController(initialPage: _currentAlbumIndex);
+  }
+
+  @override
   void dispose() {
     _stopAutoScroll();
-    _scrollController.dispose();
+    _pageController.dispose();
+    for (final c in _scrollControllers.values) {
+      c.dispose();
+    }
+    _scrollControllers.clear();
     super.dispose();
   }
 
-  List<ManagedFile> _resolvePages() {
-    final pages = widget.manager.managedFiles
-        .where((f) =>
-            f.platformFolder == widget.platformFolder &&
-            f.creatorFolder == widget.creatorFolder &&
-            f.effectiveAlbumName == widget.albumName)
-        .toList();
-    pages.sort((a, b) => naturalCompareFileNames(a.fileName, b.fileName));
-    return pages;
+  ScrollController _controllerFor(int albumIdx) =>
+      _scrollControllers.putIfAbsent(albumIdx, ScrollController.new);
+
+  GlobalKey _viewportKeyFor(int albumIdx) =>
+      _viewportKeys.putIfAbsent(albumIdx, GlobalKey.new);
+
+  Map<String, List<ManagedFile>> _resolveAllAlbumsMap() {
+    final grouped = <String, List<ManagedFile>>{};
+    for (final f in widget.manager.managedFiles) {
+      if (f.platformFolder == widget.platformFolder &&
+          f.creatorFolder == widget.creatorFolder) {
+        grouped.putIfAbsent(f.effectiveAlbumName, () => []).add(f);
+      }
+    }
+    for (final pages in grouped.values) {
+      pages.sort((a, b) => naturalCompareFileNames(a.fileName, b.fileName));
+    }
+    return grouped;
   }
 
   void _exitSelection() {
@@ -105,7 +142,8 @@ class _PixivAlbumViewerState extends State<PixivAlbumViewer> {
   }
 
   int? _hitTestIndex(Offset globalPos) {
-    final obj = _viewportKey.currentContext?.findRenderObject();
+    final key = _viewportKeys[_currentAlbumIndex];
+    final obj = key?.currentContext?.findRenderObject();
     if (obj is! RenderBox) return null;
     final local = obj.globalToLocal(globalPos);
     final result = BoxHitTestResult();
@@ -187,8 +225,10 @@ class _PixivAlbumViewerState extends State<PixivAlbumViewer> {
   }
 
   void _updateAutoScroll(Offset globalPos) {
-    final obj = _viewportKey.currentContext?.findRenderObject();
-    if (obj is! RenderBox || !_scrollController.hasClients) {
+    final key = _viewportKeys[_currentAlbumIndex];
+    final controller = _scrollControllers[_currentAlbumIndex];
+    final obj = key?.currentContext?.findRenderObject();
+    if (obj is! RenderBox || controller == null || !controller.hasClients) {
       _stopAutoScroll();
       return;
     }
@@ -207,14 +247,15 @@ class _PixivAlbumViewerState extends State<PixivAlbumViewer> {
     }
     _autoScrollTimer?.cancel();
     _autoScrollTimer = Timer.periodic(const Duration(milliseconds: 16), (_) {
-      if (!_scrollController.hasClients || _dragStartIndex == null) {
+      final activeCtrl = _scrollControllers[_currentAlbumIndex];
+      if (activeCtrl == null || !activeCtrl.hasClients || _dragStartIndex == null) {
         _stopAutoScroll();
         return;
       }
-      final pos = _scrollController.position;
+      final pos = activeCtrl.position;
       final next = (pos.pixels + vel).clamp(pos.minScrollExtent, pos.maxScrollExtent);
       if (next != pos.pixels) {
-        _scrollController.jumpTo(next);
+        activeCtrl.jumpTo(next);
         if (_lastDragGlobalPos != null) _applyDrag(_lastDragGlobalPos!);
       }
     });
@@ -232,7 +273,27 @@ class _PixivAlbumViewerState extends State<PixivAlbumViewer> {
     return ListenableBuilder(
       listenable: widget.manager,
       builder: (context, _) {
-        final pages = _resolvePages();
+        final albumsMap = _resolveAllAlbumsMap();
+        final activeAlbums = _albumOrder
+            .where((name) => (albumsMap[name]?.isNotEmpty ?? false))
+            .toList(growable: false);
+
+        if (activeAlbums.isNotEmpty &&
+            _currentAlbumIndex >= activeAlbums.length) {
+          _currentAlbumIndex = activeAlbums.length - 1;
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (mounted && _pageController.hasClients) {
+              _pageController.jumpToPage(_currentAlbumIndex);
+            }
+          });
+        }
+
+        final currentAlbumName = activeAlbums.isNotEmpty
+            ? activeAlbums[_currentAlbumIndex]
+            : widget.albumName;
+        final pages = activeAlbums.isNotEmpty
+            ? (albumsMap[currentAlbumName] ?? const <ManagedFile>[])
+            : const <ManagedFile>[];
         _currentPages = pages;
 
         if (_selectedKeys.isNotEmpty) {
@@ -243,13 +304,16 @@ class _PixivAlbumViewerState extends State<PixivAlbumViewer> {
           }
         }
 
-        final privateCount = pages.where((p) => p.isPrivate).length;
-        final publicCount = pages.length - privateCount;
         final selectedPages = _isSelectionMode
             ? pages.where((p) => _selectedKeys.contains(p.uniqueKey)).toList()
             : const <ManagedFile>[];
         final allSelected =
             pages.isNotEmpty && selectedPages.length == pages.length;
+
+        final hasMultipleAlbums = activeAlbums.length > 1;
+        final subtitleText = hasMultipleAlbums
+            ? '${widget.creatorFolder} • ${_currentAlbumIndex + 1}/${activeAlbums.length} • ${pages.length} hal'
+            : '${widget.creatorFolder} • ${pages.length} halaman';
 
         return PopScope(
           canPop: !_isSelectionMode,
@@ -299,7 +363,7 @@ class _PixivAlbumViewerState extends State<PixivAlbumViewer> {
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Text(
-                          widget.albumName,
+                          currentAlbumName,
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                           style: const TextStyle(
@@ -308,7 +372,9 @@ class _PixivAlbumViewerState extends State<PixivAlbumViewer> {
                           ),
                         ),
                         Text(
-                          '${widget.creatorFolder} • ${pages.length} halaman',
+                          subtitleText,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
                           style: theme.textTheme.labelSmall?.copyWith(
                             color: theme.colorScheme.onSurfaceVariant,
                           ),
@@ -327,79 +393,118 @@ class _PixivAlbumViewerState extends State<PixivAlbumViewer> {
                         ),
                     ],
                   ),
-            body: pages.isEmpty
+            body: activeAlbums.isEmpty
                 ? const Center(child: Text('Album kosong atau sudah dihapus.'))
                 : Stack(
                     children: [
-                      GestureDetector(
-                        key: _viewportKey,
-                        behavior: HitTestBehavior.translucent,
-                        onLongPressStart: _onDragStart,
-                        onLongPressMoveUpdate: _onDragMove,
-                        onLongPressEnd: _onDragEnd,
-                        child: CustomScrollView(
-                          controller: _scrollController,
-                          slivers: [
-                            // Privacy Status + 3-Mode Reader Switcher Banner
-                            if (!_isSelectionMode)
-                              SliverToBoxAdapter(
-                                child: Padding(
-                                  padding: const EdgeInsets.fromLTRB(14, 8, 14, 10),
-                                  child: Column(
-                                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                                    children: [
-                                      _AlbumPrivacyBanner(
-                                        privateCount: privateCount,
-                                        publicCount: publicCount,
-                                        busy: _isBusy,
-                                        onUnlockAll: privateCount > 0
-                                            ? () => _unlockPages(
-                                                  pages
-                                                      .where((p) => p.isPrivate)
-                                                      .toList(),
-                                                )
-                                            : null,
-                                        onLockAll: publicCount > 0
-                                            ? () => _lockPages(
-                                                  pages
-                                                      .where((p) => !p.isPrivate)
-                                                      .toList(),
-                                                )
-                                            : null,
+                      PageView.builder(
+                        controller: _pageController,
+                        itemCount: activeAlbums.length,
+                        physics: _isSelectionMode
+                            ? const NeverScrollableScrollPhysics()
+                            : const PageScrollPhysics(),
+                        onPageChanged: (newIndex) {
+                          _stopAutoScroll();
+                          setState(() {
+                            _currentAlbumIndex = newIndex;
+                            _dragStartIndex = null;
+                            _dragLastIndex = null;
+                          });
+                        },
+                        itemBuilder: (context, albumIdx) {
+                          final albumTitle = activeAlbums[albumIdx];
+                          final albumPages =
+                              albumsMap[albumTitle] ?? const <ManagedFile>[];
+                          final privateCount =
+                              albumPages.where((p) => p.isPrivate).length;
+                          final publicCount = albumPages.length - privateCount;
+
+                          return GestureDetector(
+                            key: _viewportKeyFor(albumIdx),
+                            behavior: HitTestBehavior.translucent,
+                            onLongPressStart: _onDragStart,
+                            onLongPressMoveUpdate: _onDragMove,
+                            onLongPressEnd: _onDragEnd,
+                            child: CustomScrollView(
+                              controller: _controllerFor(albumIdx),
+                              slivers: [
+                                // Privacy Status + 3-Mode Reader Switcher Banner
+                                if (!_isSelectionMode)
+                                  SliverToBoxAdapter(
+                                    child: Padding(
+                                      padding: const EdgeInsets.fromLTRB(
+                                        14,
+                                        8,
+                                        14,
+                                        10,
                                       ),
-                                      const SizedBox(height: 10),
-                                      Row(
+                                      child: Column(
+                                        crossAxisAlignment:
+                                            CrossAxisAlignment.stretch,
                                         children: [
-                                          Expanded(
-                                            child: Text(
-                                              'Tahan & geser untuk pilih banyak',
-                                              style: theme.textTheme.labelSmall
-                                                  ?.copyWith(
-                                                color: theme.colorScheme
-                                                    .onSurfaceVariant,
-                                              ),
-                                            ),
+                                          _AlbumPrivacyBanner(
+                                            privateCount: privateCount,
+                                            publicCount: publicCount,
+                                            busy: _isBusy,
+                                            onUnlockAll: privateCount > 0
+                                                ? () => _unlockPages(
+                                                      albumPages
+                                                          .where((p) =>
+                                                              p.isPrivate)
+                                                          .toList(),
+                                                    )
+                                                : null,
+                                            onLockAll: publicCount > 0
+                                                ? () => _lockPages(
+                                                      albumPages
+                                                          .where((p) =>
+                                                              !p.isPrivate)
+                                                          .toList(),
+                                                    )
+                                                : null,
                                           ),
-                                          _ReaderModeToggle(
-                                            mode: _mode,
-                                            onChanged: (m) =>
-                                                setState(() => _mode = m),
+                                          const SizedBox(height: 10),
+                                          Row(
+                                            children: [
+                                              Expanded(
+                                                child: Text(
+                                                  hasMultipleAlbums
+                                                      ? 'Geser kiri/kanan pindah album • Tahan pilih banyak'
+                                                      : 'Tahan & geser untuk pilih banyak',
+                                                  maxLines: 1,
+                                                  overflow:
+                                                      TextOverflow.ellipsis,
+                                                  style: theme
+                                                      .textTheme.labelSmall
+                                                      ?.copyWith(
+                                                    color: theme.colorScheme
+                                                        .onSurfaceVariant,
+                                                  ),
+                                                ),
+                                              ),
+                                              const SizedBox(width: 8),
+                                              _ReaderModeToggle(
+                                                mode: _mode,
+                                                onChanged: (m) =>
+                                                    setState(() => _mode = m),
+                                              ),
+                                            ],
                                           ),
                                         ],
                                       ),
-                                    ],
+                                    ),
                                   ),
-                                ),
-                              ),
 
-                            if (_mode == _AlbumReaderMode.pixivScroll)
-                              _buildPixivVerticalScrollSliver(pages)
-                            else if (_mode == _AlbumReaderMode.galleryGrid)
-                              _buildGalleryGridSliver(pages)
-                            else
-                              _buildRowListSliver(pages),
-                          ],
-                        ),
+                                if (_mode == _AlbumReaderMode.pixivScroll)
+                                  _buildPixivVerticalScrollSliver(albumPages)
+                                else if (_mode == _AlbumReaderMode.galleryGrid)
+                                  _buildGalleryGridSliver(albumPages)
+                                else
+                                  _buildRowListSliver(albumPages),
+                              ],
+                            ),
+                          );
+                        },
                       ),
 
                       // Floating Multi-Select Batch Bar (Unlock, Lock, Share, Delete)

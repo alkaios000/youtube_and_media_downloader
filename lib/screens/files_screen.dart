@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 
+import '../models/creator_profile.dart';
 import '../models/managed_file.dart';
 import '../models/media_info.dart';
 import '../models/media_platform.dart';
@@ -64,8 +65,13 @@ class _PixivAlbumGroup {
 ///     Drag-to-Select, per-file 3-dot menu, Multi-Share, Unlock/Lock, and Photo Viewer.
 class FilesScreen extends StatefulWidget {
   final DownloadManager manager;
+  final ValueChanged<String>? onOpenProfileUrl;
 
-  const FilesScreen({super.key, required this.manager});
+  const FilesScreen({
+    super.key,
+    required this.manager,
+    this.onOpenProfileUrl,
+  });
 
   @override
   State<FilesScreen> createState() => _FilesScreenState();
@@ -80,6 +86,9 @@ class _FilesScreenState extends State<FilesScreen> {
   String? _selectedCreatorFolder;
   String _searchQuery = '';
   _FileViewMode _viewMode = _FileViewMode.gallery;
+  bool _pixivShowAllPhotos = false;
+  bool _shuffleEnabled = false;
+  int _shuffleSeed = 0;
 
   // Multi-select & Drag-select state (works for both Pixiv albums & loose files!)
   bool _isSelectionMode = false;
@@ -143,12 +152,15 @@ class _FilesScreenState extends State<FilesScreen> {
   }
 
   void _goBackOneLevel() {
+    FocusManager.instance.primaryFocus?.unfocus();
     if (_isSelectionMode) {
       _exitSelectionMode();
       return;
     }
     setState(() {
       _clearSearch();
+      _pixivShowAllPhotos = false;
+      _shuffleEnabled = false;
       if (_selectedCreatorFolder != null) {
         _selectedCreatorFolder = null;
       } else if (_selectedPlatformFolder != null) {
@@ -298,7 +310,33 @@ class _FilesScreenState extends State<FilesScreen> {
     _autoScrollTimer = null;
   }
 
+  // Memoized grouping caches so search/selection/scroll do zero redundant O(N log N) work
+  List<ManagedFile>? _cachedFilesRef;
+  Map<String, Map<String, List<ManagedFile>>> _cachedByPlatform = const {};
+  List<ManagedFile>? _cachedAlbumsSourceRef;
+  List<_PixivAlbumGroup> _cachedPixivAlbums = const [];
+
+  Map<String, Map<String, List<ManagedFile>>> _getByPlatform(
+    List<ManagedFile> allFiles,
+  ) {
+    if (identical(_cachedFilesRef, allFiles)) {
+      return _cachedByPlatform;
+    }
+    final byPlatform = <String, Map<String, List<ManagedFile>>>{};
+    for (final file in allFiles) {
+      final platMap = byPlatform.putIfAbsent(file.platformFolder, () => {});
+      platMap.putIfAbsent(file.creatorFolder, () => []).add(file);
+    }
+    _cachedFilesRef = allFiles;
+    _cachedByPlatform = byPlatform;
+    _cachedAlbumsSourceRef = null;
+    return byPlatform;
+  }
+
   List<_PixivAlbumGroup> _groupIntoPixivAlbums(List<ManagedFile> files) {
+    if (identical(_cachedAlbumsSourceRef, files)) {
+      return _cachedPixivAlbums;
+    }
     final byAlbum = <String, List<ManagedFile>>{};
     for (final f in files) {
       byAlbum.putIfAbsent(f.effectiveAlbumName, () => []).add(f);
@@ -309,7 +347,36 @@ class _FilesScreenState extends State<FilesScreen> {
       groups.add(_PixivAlbumGroup(albumName: albumName, pages: pages));
     });
     groups.sort((a, b) => b.latestModified.compareTo(a.latestModified));
+    _cachedAlbumsSourceRef = files;
+    _cachedPixivAlbums = groups;
     return groups;
+  }
+
+  List<T> _applyShuffle<T>(List<T> input) {
+    if (!_shuffleEnabled || input.length <= 1) return input;
+    final copy = List<T>.from(input);
+    copy.shuffle(math.Random(_shuffleSeed));
+    return copy;
+  }
+
+  void _toggleShuffle() {
+    HapticFeedback.selectionClick();
+    setState(() {
+      if (_shuffleEnabled) {
+        _shuffleEnabled = false;
+      } else {
+        _shuffleEnabled = true;
+        _shuffleSeed = DateTime.now().microsecondsSinceEpoch;
+      }
+    });
+  }
+
+  void _reshuffle() {
+    HapticFeedback.selectionClick();
+    setState(() {
+      _shuffleEnabled = true;
+      _shuffleSeed = DateTime.now().microsecondsSinceEpoch;
+    });
   }
 
   @override
@@ -317,18 +384,16 @@ class _FilesScreenState extends State<FilesScreen> {
     final theme = Theme.of(context);
     final allFiles = widget.manager.managedFiles;
 
-    // Group: platform -> creator -> files
-    final byPlatform = <String, Map<String, List<ManagedFile>>>{};
-    for (final file in allFiles) {
-      final platMap = byPlatform.putIfAbsent(file.platformFolder, () => {});
-      platMap.putIfAbsent(file.creatorFolder, () => []).add(file);
-    }
+    // Group: platform -> creator -> files (memoized by reference!)
+    final byPlatform = _getByPlatform(allFiles);
 
     // Reset stale navigation if folder became empty/deleted
     if (_selectedPlatformFolder != null &&
         !byPlatform.containsKey(_selectedPlatformFolder)) {
       _selectedPlatformFolder = null;
       _selectedCreatorFolder = null;
+      _pixivShowAllPhotos = false;
+      _shuffleEnabled = false;
       _isSelectionMode = false;
       _selectedKeys.clear();
     } else if (_selectedPlatformFolder != null &&
@@ -337,6 +402,8 @@ class _FilesScreenState extends State<FilesScreen> {
                 ?.containsKey(_selectedCreatorFolder) ??
             false)) {
       _selectedCreatorFolder = null;
+      _pixivShowAllPhotos = false;
+      _shuffleEnabled = false;
       _isSelectionMode = false;
       _selectedKeys.clear();
     }
@@ -348,22 +415,31 @@ class _FilesScreenState extends State<FilesScreen> {
             const <ManagedFile>[])
         : const <ManagedFile>[];
 
-    final isPixivAlbumView = inCreatorFolder && _isPixivPlatform;
+    final isPixivArtist = inCreatorFolder && _isPixivPlatform;
+    final isPixivAlbumView = isPixivArtist && !_pixivShowAllPhotos;
     final trimmedQuery = _searchQuery.trim().toLowerCase();
 
-    final allPixivAlbums = isPixivAlbumView
+    final allPixivAlbums = isPixivArtist
         ? _groupIntoPixivAlbums(folderFiles)
         : const <_PixivAlbumGroup>[];
-    final pixivAlbums = (isPixivAlbumView && trimmedQuery.isNotEmpty)
+    final filteredPixivAlbums = (isPixivAlbumView && trimmedQuery.isNotEmpty)
         ? allPixivAlbums
             .where((a) => a.albumName.toLowerCase().contains(trimmedQuery))
             .toList(growable: false)
         : allPixivAlbums;
+    final pixivAlbums = isPixivAlbumView
+        ? _applyShuffle(filteredPixivAlbums)
+        : const <_PixivAlbumGroup>[];
 
-    final visibleFolderFiles = (!isPixivAlbumView && trimmedQuery.isNotEmpty)
+    final filteredFolderFiles = (!isPixivAlbumView && trimmedQuery.isNotEmpty)
         ? folderFiles
-            .where((f) => f.fileName.toLowerCase().contains(trimmedQuery))
+            .where((f) =>
+                f.fileName.toLowerCase().contains(trimmedQuery) ||
+                f.effectiveAlbumName.toLowerCase().contains(trimmedQuery))
             .toList(growable: false)
+        : folderFiles;
+    final visibleFolderFiles = !isPixivAlbumView
+        ? _applyShuffle(filteredFolderFiles)
         : folderFiles;
 
     _activeSelectableKeys = isPixivAlbumView
@@ -425,6 +501,8 @@ class _FilesScreenState extends State<FilesScreen> {
               onRefresh: widget.manager.refreshManagedFiles,
               child: CustomScrollView(
                 controller: _scrollController,
+                keyboardDismissBehavior:
+                    ScrollViewKeyboardDismissBehavior.onDrag,
                 physics: const AlwaysScrollableScrollPhysics(),
                 slivers: [
                   _buildAppBar(
@@ -455,13 +533,19 @@ class _FilesScreenState extends State<FilesScreen> {
                                         _BreadcrumbChip(
                                           label: 'File',
                                           active: _selectedPlatformFolder == null,
-                                          onTap: () => setState(() {
-                                            _selectedPlatformFolder = null;
-                                            _selectedCreatorFolder = null;
-                                            _clearSearch();
-                                            _isSelectionMode = false;
-                                            _selectedKeys.clear();
-                                          }),
+                                          onTap: () {
+                                            FocusManager.instance.primaryFocus
+                                                ?.unfocus();
+                                            setState(() {
+                                              _selectedPlatformFolder = null;
+                                              _selectedCreatorFolder = null;
+                                              _pixivShowAllPhotos = false;
+                                              _shuffleEnabled = false;
+                                              _clearSearch();
+                                              _isSelectionMode = false;
+                                              _selectedKeys.clear();
+                                            });
+                                          },
                                         ),
                                         if (_selectedPlatformFolder != null) ...[
                                           const Icon(Icons.chevron_right_rounded,
@@ -470,12 +554,18 @@ class _FilesScreenState extends State<FilesScreen> {
                                             label: _selectedPlatformFolder!,
                                             active:
                                                 _selectedCreatorFolder == null,
-                                            onTap: () => setState(() {
-                                              _selectedCreatorFolder = null;
-                                              _clearSearch();
-                                              _isSelectionMode = false;
-                                              _selectedKeys.clear();
-                                            }),
+                                            onTap: () {
+                                              FocusManager.instance.primaryFocus
+                                                  ?.unfocus();
+                                              setState(() {
+                                                _selectedCreatorFolder = null;
+                                                _pixivShowAllPhotos = false;
+                                                _shuffleEnabled = false;
+                                                _clearSearch();
+                                                _isSelectionMode = false;
+                                                _selectedKeys.clear();
+                                              });
+                                            },
                                           ),
                                         ],
                                         if (_selectedCreatorFolder != null) ...[
@@ -516,7 +606,9 @@ class _FilesScreenState extends State<FilesScreen> {
                                           : 'Cari kreator $_selectedPlatformFolder...')
                                       : (isPixivAlbumView
                                           ? 'Cari album / karya $_selectedCreatorFolder...'
-                                          : 'Cari file $_selectedCreatorFolder...'),
+                                          : (isPixivArtist
+                                              ? 'Cari semua foto $_selectedCreatorFolder...'
+                                              : 'Cari file $_selectedCreatorFolder...')),
                                   prefixIcon: const Icon(Icons.search_rounded, size: 20),
                                   suffixIcon: _searchQuery.isNotEmpty
                                       ? IconButton(
@@ -530,13 +622,122 @@ class _FilesScreenState extends State<FilesScreen> {
                                 ),
                               ),
                             ],
+                            if (inCreatorFolder) ...[
+                              const SizedBox(height: 10),
+                              _CreatorSyncBar(
+                                platform: MediaPlatformMeta.fromKey(
+                                  _selectedPlatformFolder,
+                                ),
+                                creatorName: _selectedCreatorFolder!,
+                                savedProfile: widget.manager.getCreatorProfile(
+                                  _selectedPlatformFolder!,
+                                  _selectedCreatorFolder!,
+                                ),
+                                onContinueDownload: (url) =>
+                                    widget.onOpenProfileUrl?.call(url),
+                                onEditLink: () => _openEditCreatorLinkDialog(
+                                  MediaPlatformMeta.fromKey(
+                                    _selectedPlatformFolder,
+                                  ),
+                                  _selectedCreatorFolder!,
+                                  widget.manager.getCreatorProfile(
+                                    _selectedPlatformFolder!,
+                                    _selectedCreatorFolder!,
+                                  ),
+                                ),
+                              ),
+                              if (folderFiles.isNotEmpty) ...[
+                                const SizedBox(height: 8),
+                                SingleChildScrollView(
+                                  scrollDirection: Axis.horizontal,
+                                  child: Row(
+                                    children: [
+                                      if (isPixivArtist) ...[
+                                        ChoiceChip(
+                                          avatar: const Icon(
+                                            Icons.collections_bookmark_outlined,
+                                            size: 16,
+                                          ),
+                                          label: Text(
+                                            'Album (${allPixivAlbums.length})',
+                                          ),
+                                          selected: !_pixivShowAllPhotos,
+                                          showCheckmark: false,
+                                          visualDensity: VisualDensity.compact,
+                                          onSelected: (_) {
+                                            if (!_pixivShowAllPhotos) return;
+                                            setState(() {
+                                              _pixivShowAllPhotos = false;
+                                              _isSelectionMode = false;
+                                              _selectedKeys.clear();
+                                            });
+                                          },
+                                        ),
+                                        const SizedBox(width: 8),
+                                        ChoiceChip(
+                                          avatar: const Icon(
+                                            Icons.photo_library_outlined,
+                                            size: 16,
+                                          ),
+                                          label: Text(
+                                            'Semua Foto (${folderFiles.length})',
+                                          ),
+                                          selected: _pixivShowAllPhotos,
+                                          showCheckmark: false,
+                                          visualDensity: VisualDensity.compact,
+                                          onSelected: (_) {
+                                            if (_pixivShowAllPhotos) return;
+                                            setState(() {
+                                              _pixivShowAllPhotos = true;
+                                              _isSelectionMode = false;
+                                              _selectedKeys.clear();
+                                            });
+                                          },
+                                        ),
+                                        const SizedBox(width: 8),
+                                      ],
+                                      FilterChip(
+                                        avatar: Icon(
+                                          Icons.shuffle_rounded,
+                                          size: 16,
+                                          color: _shuffleEnabled
+                                              ? theme.colorScheme.primary
+                                              : null,
+                                        ),
+                                        label: Text(
+                                          _shuffleEnabled ? 'Acak Aktif' : 'Acak',
+                                        ),
+                                        selected: _shuffleEnabled,
+                                        showCheckmark: false,
+                                        visualDensity: VisualDensity.compact,
+                                        onSelected: (_) => _toggleShuffle(),
+                                      ),
+                                      if (_shuffleEnabled) ...[
+                                        const SizedBox(width: 6),
+                                        ActionChip(
+                                          avatar: const Icon(
+                                            Icons.refresh_rounded,
+                                            size: 16,
+                                          ),
+                                          label: const Text('Acak Lagi'),
+                                          visualDensity: VisualDensity.compact,
+                                          onPressed: _reshuffle,
+                                        ),
+                                      ],
+                                    ],
+                                  ),
+                                ),
+                              ],
+                            ],
                             if (inCreatorFolder &&
                                 _activeSelectableKeys.isNotEmpty) ...[
                               const SizedBox(height: 6),
                               Text(
                                 isPixivAlbumView
-                                    ? '${pixivAlbums.length} album (${folderFiles.length} foto) • Ketuk album untuk baca • Privat tersembunyi dari Galeri & WA'
-                                    : '${visibleFolderFiles.length} item • Tahan & geser jari untuk pilih banyak',
+                                    ? '${pixivAlbums.length} album (${folderFiles.length} foto) • Ketuk album lalu geser kiri/kanan antar album'
+                                    : (isPixivArtist
+                                        ? '${visibleFolderFiles.length} foto (${allPixivAlbums.length} album) • Tahan & geser untuk pilih banyak'
+                                        : '${visibleFolderFiles.length} item • Tahan & geser jari untuk pilih banyak'),
                                 style: theme.textTheme.labelSmall?.copyWith(
                                   color: theme.colorScheme.onSurfaceVariant,
                                 ),
@@ -892,14 +1093,13 @@ class _FilesScreenState extends State<FilesScreen> {
           final subLine = isPixiv
               ? '$albumCount album • ${files.length} foto • ${formatBytes(totalSize)}'
               : '${files.length} file • ${formatBytes(totalSize)}';
+          final savedProfile =
+              widget.manager.getCreatorProfile(platformFolder, creator);
 
           return Card(
             clipBehavior: Clip.antiAlias,
             child: ListTile(
-              contentPadding: const EdgeInsets.symmetric(
-                horizontal: 14,
-                vertical: 6,
-              ),
+              contentPadding: const EdgeInsets.fromLTRB(14, 6, 8, 6),
               leading: ClipRRect(
                 borderRadius: BorderRadius.circular(12),
                 child: SizedBox(
@@ -936,17 +1136,165 @@ class _FilesScreenState extends State<FilesScreen> {
                   ],
                 ],
               ),
-              subtitle: Text(subLine),
-              trailing: const Icon(Icons.chevron_right_rounded),
-              onTap: () => setState(() {
-                _clearSearch();
-                _selectedCreatorFolder = creator;
-              }),
+              subtitle: Text(
+                savedProfile != null ? '$subLine • Link tersimpan' : subLine,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+              trailing: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (savedProfile != null)
+                    IconButton(
+                      onPressed: () => widget.onOpenProfileUrl
+                          ?.call(savedProfile.profileUrl),
+                      visualDensity: VisualDensity.compact,
+                      constraints: const BoxConstraints(
+                        minWidth: 34,
+                        minHeight: 34,
+                      ),
+                      padding: EdgeInsets.zero,
+                      icon: Icon(
+                        Icons.cloud_download_outlined,
+                        size: 20,
+                        color: platform.brandColor,
+                      ),
+                      tooltip: 'Lanjut Unduh karya baru',
+                    ),
+                  IconButton(
+                    onPressed: () => _openEditCreatorLinkDialog(
+                      platform,
+                      creator,
+                      savedProfile,
+                    ),
+                    visualDensity: VisualDensity.compact,
+                    constraints: const BoxConstraints(
+                      minWidth: 34,
+                      minHeight: 34,
+                    ),
+                    padding: EdgeInsets.zero,
+                    icon: Icon(
+                      savedProfile != null
+                          ? Icons.link_rounded
+                          : Icons.add_link_rounded,
+                      size: 19,
+                      color: savedProfile != null
+                          ? Theme.of(context).colorScheme.primary
+                          : Theme.of(context).colorScheme.onSurfaceVariant,
+                    ),
+                    tooltip: savedProfile != null
+                        ? 'Edit link profil'
+                        : 'Simpan link profil',
+                  ),
+                  const Icon(Icons.chevron_right_rounded, size: 20),
+                ],
+              ),
+              onTap: () {
+                FocusManager.instance.primaryFocus?.unfocus();
+                setState(() {
+                  _clearSearch();
+                  _pixivShowAllPhotos = false;
+                  _shuffleEnabled = false;
+                  _selectedCreatorFolder = creator;
+                });
+              },
             ),
           );
         },
       ),
     );
+  }
+
+  Future<void> _openEditCreatorLinkDialog(
+    MediaPlatform platform,
+    String creatorFolder,
+    CreatorProfileRecord? existing,
+  ) async {
+    final controller = TextEditingController(text: existing?.profileUrl ?? '');
+    final action = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('Link Profil $creatorFolder'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'Simpan tautan profil ${platform.label} agar Anda bisa 1-klik "Lanjut Unduh" untuk mengecek karya terbaru kapan saja.',
+              style: Theme.of(ctx).textTheme.bodySmall,
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: controller,
+              keyboardType: TextInputType.url,
+              decoration: InputDecoration(
+                hintText: platform == MediaPlatform.pixiv
+                    ? 'https://www.pixiv.net/users/... atau pixiv:nama'
+                    : 'https://...',
+                suffixIcon: IconButton(
+                  onPressed: () async {
+                    final data = await Clipboard.getData(Clipboard.kTextPlain);
+                    final raw = data?.text?.trim() ?? '';
+                    if (raw.isNotEmpty) {
+                      controller.text = UrlParser.extractUrl(raw) ?? raw;
+                    }
+                  },
+                  icon: const Icon(Icons.content_paste_rounded, size: 19),
+                  tooltip: 'Tempel',
+                ),
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          if (existing != null)
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, 'delete'),
+              style: TextButton.styleFrom(
+                foregroundColor: Theme.of(ctx).colorScheme.error,
+              ),
+              child: const Text('Hapus'),
+            ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Batal'),
+          ),
+          FilledButton.tonal(
+            onPressed: () => Navigator.pop(ctx, 'save'),
+            child: const Text('Simpan'),
+          ),
+          if (widget.onOpenProfileUrl != null)
+            FilledButton(
+              onPressed: () => Navigator.pop(ctx, 'save_and_open'),
+              child: const Text('Lanjut Unduh'),
+            ),
+        ],
+      ),
+    );
+
+    final rawText = controller.text.trim();
+    controller.dispose();
+
+    if (action == 'delete') {
+      await widget.manager.removeCreatorProfile(
+        platform.folderName,
+        creatorFolder,
+      );
+      return;
+    }
+
+    if ((action == 'save' || action == 'save_and_open') && rawText.isNotEmpty) {
+      final cleanUrl = UrlParser.extractUrl(rawText) ?? rawText;
+      await widget.manager.saveCreatorProfile(
+        platform: platform,
+        creatorFolder: creatorFolder,
+        profileUrl: cleanUrl,
+        displayName: creatorFolder,
+      );
+      if (action == 'save_and_open') {
+        widget.onOpenProfileUrl?.call(cleanUrl);
+      }
+    }
   }
 
   Widget _buildEmptySearchSliver(BuildContext context, String message) {
@@ -1027,7 +1375,7 @@ class _FilesScreenState extends State<FilesScreen> {
                   if (_isSelectionMode) {
                     _toggleSelectionKey(album.albumName);
                   } else {
-                    _openPixivAlbum(album);
+                    _openPixivAlbum(albums, index);
                   }
                 },
                 child: AnimatedContainer(
@@ -1123,7 +1471,7 @@ class _FilesScreenState extends State<FilesScreen> {
                                   album: album,
                                   overlay: true,
                                   onSelected: (act) =>
-                                      _handleAlbumAction(act, album),
+                                      _handleAlbumAction(act, albums, index),
                                 ),
                               ),
                           ],
@@ -1205,7 +1553,7 @@ class _FilesScreenState extends State<FilesScreen> {
                   if (_isSelectionMode) {
                     _toggleSelectionKey(album.albumName);
                   } else {
-                    _openPixivAlbum(album);
+                    _openPixivAlbum(albums, index);
                   }
                 },
                 child: Padding(
@@ -1276,7 +1624,8 @@ class _FilesScreenState extends State<FilesScreen> {
                       if (!_isSelectionMode)
                         _AlbumPopupMenu(
                           album: album,
-                          onSelected: (act) => _handleAlbumAction(act, album),
+                          onSelected: (act) =>
+                              _handleAlbumAction(act, albums, index),
                         ),
                     ],
                   ),
@@ -1429,14 +1778,22 @@ class _FilesScreenState extends State<FilesScreen> {
   // ===========================================================================
   // ACTIONS
   // ===========================================================================
-  Future<void> _openPixivAlbum(_PixivAlbumGroup album) async {
+  Future<void> _openPixivAlbum(
+    List<_PixivAlbumGroup> albums,
+    int index,
+  ) async {
+    FocusManager.instance.primaryFocus?.unfocus();
+    if (index < 0 || index >= albums.length) return;
+    final albumNames = albums.map((a) => a.albumName).toList(growable: false);
     await Navigator.of(context).push(
       MaterialPageRoute<void>(
         builder: (_) => PixivAlbumViewer(
           manager: widget.manager,
           platformFolder: _selectedPlatformFolder!,
           creatorFolder: _selectedCreatorFolder!,
-          albumName: album.albumName,
+          albumName: albumNames[index],
+          albumNames: albumNames,
+          initialAlbumIndex: index,
         ),
       ),
     );
@@ -1444,11 +1801,13 @@ class _FilesScreenState extends State<FilesScreen> {
 
   Future<void> _handleAlbumAction(
     _AlbumMenuAction action,
-    _PixivAlbumGroup album,
+    List<_PixivAlbumGroup> albums,
+    int index,
   ) async {
+    final album = albums[index];
     switch (action) {
       case _AlbumMenuAction.open:
-        await _openPixivAlbum(album);
+        await _openPixivAlbum(albums, index);
         break;
       case _AlbumMenuAction.unlock:
         await _unlockFiles(album.pages.where((p) => p.isPrivate).toList());
@@ -1475,6 +1834,7 @@ class _FilesScreenState extends State<FilesScreen> {
     ManagedFile file,
     List<ManagedFile> folderFiles,
   ) async {
+    FocusManager.instance.primaryFocus?.unfocus();
     if (file.mediaKind == MediaKind.image && file.savedPath.isNotEmpty) {
       final folderImages = folderFiles
           .where((f) => f.mediaKind == MediaKind.image && f.savedPath.isNotEmpty)
@@ -2435,6 +2795,137 @@ class _BreadcrumbChip extends StatelessWidget {
                 : theme.colorScheme.onSurfaceVariant,
           ),
         ),
+      ),
+    );
+  }
+}
+
+class _CreatorSyncBar extends StatelessWidget {
+  final MediaPlatform platform;
+  final String creatorName;
+  final CreatorProfileRecord? savedProfile;
+  final ValueChanged<String> onContinueDownload;
+  final VoidCallback onEditLink;
+
+  const _CreatorSyncBar({
+    required this.platform,
+    required this.creatorName,
+    required this.savedProfile,
+    required this.onContinueDownload,
+    required this.onEditLink,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final profile = savedProfile;
+
+    if (profile == null) {
+      return InkWell(
+        onTap: onEditLink,
+        borderRadius: BorderRadius.circular(12),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+          decoration: BoxDecoration(
+            color: theme.colorScheme.surfaceContainerHighest
+                .withValues(alpha: 0.45),
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(
+              color: theme.colorScheme.outlineVariant.withValues(alpha: 0.7),
+            ),
+          ),
+          child: Row(
+            children: [
+              Icon(
+                Icons.add_link_rounded,
+                size: 18,
+                color: theme.colorScheme.primary,
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  'Simpan link profil $creatorName untuk fitur Lanjut Unduh',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    fontWeight: FontWeight.w600,
+                    color: theme.colorScheme.onSurfaceVariant,
+                  ),
+                ),
+              ),
+              Icon(
+                Icons.chevron_right_rounded,
+                size: 18,
+                color: theme.colorScheme.onSurfaceVariant,
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
+    return Container(
+      padding: const EdgeInsets.fromLTRB(12, 8, 8, 8),
+      decoration: BoxDecoration(
+        color: platform.brandColor.withValues(alpha: 0.10),
+        borderRadius: BorderRadius.circular(13),
+        border: Border.all(
+          color: platform.brandColor.withValues(alpha: 0.35),
+        ),
+      ),
+      child: Row(
+        children: [
+          Icon(
+            Icons.link_rounded,
+            size: 18,
+            color: platform.brandColor,
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Profil Tersimpan',
+                  style: theme.textTheme.labelSmall?.copyWith(
+                    color: platform.brandColor,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+                Text(
+                  profile.profileUrl,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: theme.colorScheme.onSurfaceVariant,
+                    fontSize: 11.5,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 6),
+          FilledButton.tonalIcon(
+            onPressed: () => onContinueDownload(profile.profileUrl),
+            style: FilledButton.styleFrom(
+              visualDensity: VisualDensity.compact,
+              padding: const EdgeInsets.symmetric(horizontal: 10),
+            ),
+            icon: const Icon(Icons.cloud_download_outlined, size: 16),
+            label: const Text(
+              'Lanjut Unduh',
+              style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700),
+            ),
+          ),
+          IconButton(
+            onPressed: onEditLink,
+            visualDensity: VisualDensity.compact,
+            constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+            padding: EdgeInsets.zero,
+            icon: const Icon(Icons.edit_outlined, size: 17),
+            tooltip: 'Edit link profil',
+          ),
+        ],
       ),
     );
   }

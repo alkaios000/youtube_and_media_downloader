@@ -62,6 +62,12 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   void _handleSharedLink(String rawText) {
     final clean = UrlParser.extractUrl(rawText);
     if (clean == null) return;
+    _openProfileAndAnalyze(clean);
+  }
+
+  void _openProfileAndAnalyze(String profileUrl) {
+    final clean = UrlParser.extractUrl(profileUrl) ?? profileUrl.trim();
+    if (clean.isEmpty) return;
     _urlController.value = TextEditingValue(
       text: clean,
       selection: TextSelection.collapsed(offset: clean.length),
@@ -96,8 +102,11 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      resizeToAvoidBottomInset: false,
+    return GestureDetector(
+      behavior: HitTestBehavior.translucent,
+      onTap: () => FocusManager.instance.primaryFocus?.unfocus(),
+      child: Scaffold(
+        resizeToAvoidBottomInset: false,
       body: SafeArea(
         child: IndexedStack(
           index: _tabIndex,
@@ -130,7 +139,10 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
             _ActiveTabListener(
               active: _tabIndex == 1,
               listenable: widget.manager,
-              builder: (_) => FilesScreen(manager: widget.manager),
+              builder: (_) => FilesScreen(
+                manager: widget.manager,
+                onOpenProfileUrl: _openProfileAndAnalyze,
+              ),
             ),
             _ActiveTabListener(
               active: _tabIndex == 2,
@@ -149,9 +161,13 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
         listenable: widget.manager,
         builder: (context, _) {
           final activeCount = widget.manager.activeDownloads.length;
+          final pausedCount = widget.manager.pausedDownloads.length;
+          final badgeCount = activeCount > 0 ? activeCount : pausedCount;
+          final badgeBg = activeCount > 0 ? null : const Color(0xFFF59E0B);
           return NavigationBar(
             selectedIndex: _tabIndex,
             onDestinationSelected: (index) {
+              FocusManager.instance.primaryFocus?.unfocus();
               setState(() => _tabIndex = index);
               if (index == 1) {
                 widget.manager.refreshManagedFiles();
@@ -173,13 +189,15 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
               ),
               NavigationDestination(
                 icon: Badge(
-                  isLabelVisible: activeCount > 0,
-                  label: Text('$activeCount'),
+                  isLabelVisible: badgeCount > 0,
+                  backgroundColor: badgeBg,
+                  label: Text('$badgeCount'),
                   child: const Icon(Icons.history_outlined),
                 ),
                 selectedIcon: Badge(
-                  isLabelVisible: activeCount > 0,
-                  label: Text('$activeCount'),
+                  isLabelVisible: badgeCount > 0,
+                  backgroundColor: badgeBg,
+                  label: Text('$badgeCount'),
                   child: const Icon(Icons.history_rounded),
                 ),
                 label: 'Riwayat',
@@ -192,6 +210,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
             ],
           );
         },
+      ),
       ),
     );
   }

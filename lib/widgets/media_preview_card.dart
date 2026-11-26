@@ -52,7 +52,8 @@ class _MediaPreviewCardState extends State<MediaPreviewCard> {
     super.dispose();
   }
 
-  bool get _strictLockMarked => widget.info.platform == MediaPlatform.pixiv;
+  /// Strictly lock already-downloaded items across ALL platforms until unmarked.
+  bool get _strictLockMarked => true;
 
   bool _isItemMarked(SelectableMediaItem item) {
     if (widget.info.isBulkProfile) {

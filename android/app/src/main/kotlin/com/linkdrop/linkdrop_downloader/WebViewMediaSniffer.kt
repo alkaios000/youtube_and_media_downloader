@@ -283,6 +283,329 @@ class WebViewMediaSniffer(private val context: Context) {
         }
     }
 
+    /**
+     * Loads a social media profile (TikTok, Instagram, X, Facebook) in Android Chromium WebView,
+     * scrolls down to collect ALL video/reel/post links from rendered DOM + hydration JSON
+     * (and TikTok's own `itemList` network hydration), without any artificial count limit.
+     */
+    @SuppressLint("SetJavaScriptEnabled")
+    fun sniffProfileItems(
+        activity: Activity,
+        url: String,
+        platform: String,
+        timeoutMs: Long = 28000L,
+        onResult: (Map<String, Any?>) -> Unit,
+        onError: (String, String) -> Unit,
+    ) {
+        mainHandler.post {
+            val finished = AtomicBoolean(false)
+            val collectedById = Collections.synchronizedMap(LinkedHashMap<String, Map<String, Any?>>())
+            var finalLoadedUrl = url
+            var creatorName = ""
+            var pageLoaded = false
+
+            val desktopUa =
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+                    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+            val userAgent = if (platform.equals("tiktok", ignoreCase = true)) desktopUa else MOBILE_ANDROID_UA
+
+            val rootContainer = activity.window?.decorView as? ViewGroup
+            val webView = try {
+                WebView(activity)
+            } catch (t: Throwable) {
+                onError("WEBVIEW_ERROR", "WebView tidak tersedia: ${t.message}")
+                return@post
+            }
+
+            val holder = FrameLayout(activity).apply {
+                alpha = 0f
+                isClickable = false
+                isFocusable = false
+                addView(webView, FrameLayout.LayoutParams(1280, 2200))
+            }
+            rootContainer?.addView(holder, ViewGroup.LayoutParams(1, 1))
+
+            fun cleanup() {
+                mainHandler.post {
+                    runCatching {
+                        webView.stopLoading()
+                        webView.webViewClient = WebViewClient()
+                        webView.webChromeClient = null
+                        webView.loadUrl("about:blank")
+                        rootContainer?.removeView(holder)
+                        webView.destroy()
+                    }
+                }
+            }
+
+            fun completeNow() {
+                if (!finished.compareAndSet(false, true)) return
+                runCatching {
+                    CookieManager.getInstance().flush()
+                    exportAllCookiesToNetscapeFile()
+                }
+                val itemsList = synchronized(collectedById) { collectedById.values.toList() }
+                cleanup()
+                if (itemsList.isEmpty()) {
+                    onError(
+                        "PROFILE_SNIFF_EMPTY",
+                        "Tidak menemukan daftar video/reel dari profil $platform. Coba Login Browser $platform di Pengaturan lalu ulangi.",
+                    )
+                } else {
+                    onResult(
+                        mapOf(
+                            "finalUrl" to finalLoadedUrl,
+                            "creator" to creatorName,
+                            "items" to itemsList,
+                        ),
+                    )
+                }
+            }
+
+            try {
+                val cm = CookieManager.getInstance()
+                cm.setAcceptCookie(true)
+                cm.setAcceptThirdPartyCookies(webView, true)
+
+                webView.settings.apply {
+                    javaScriptEnabled = true
+                    domStorageEnabled = true
+                    databaseEnabled = true
+                    loadsImagesAutomatically = false
+                    mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
+                    userAgentString = userAgent
+                    cacheMode = WebSettings.LOAD_DEFAULT
+                    useWideViewPort = true
+                    loadWithOverviewMode = true
+                }
+
+                webView.webChromeClient = WebChromeClient()
+                webView.webViewClient = object : WebViewClient() {
+                    override fun shouldOverrideUrlLoading(
+                        view: WebView?,
+                        request: WebResourceRequest?,
+                    ): Boolean {
+                        val target = request?.url?.toString() ?: return false
+                        if (!target.startsWith("http://") && !target.startsWith("https://")) return true
+                        finalLoadedUrl = target
+                        return false
+                    }
+
+                    override fun onPageFinished(view: WebView?, loadedUrl: String?) {
+                        super.onPageFinished(view, loadedUrl)
+                        if (!loadedUrl.isNullOrBlank() && loadedUrl.startsWith("http")) {
+                            finalLoadedUrl = loadedUrl
+                        }
+                        pageLoaded = true
+                    }
+                }
+
+                val startTime = System.currentTimeMillis()
+                var lastCount = 0
+                var stalePolls = 0
+
+                val poller = object : Runnable {
+                    override fun run() {
+                        if (finished.get()) return
+                        val elapsed = System.currentTimeMillis() - startTime
+                        if (elapsed >= timeoutMs) {
+                            completeNow()
+                            return
+                        }
+                        if (!pageLoaded && elapsed < 3500L) {
+                            mainHandler.postDelayed(this, 700L)
+                            return
+                        }
+
+                        webView.evaluateJavascript(buildProfileExtractionJs(platform)) { rawJs ->
+                            if (finished.get()) return@evaluateJavascript
+                            runCatching {
+                                if (!rawJs.isNullOrBlank() && rawJs != "null") {
+                                    val unquoted = if (rawJs.startsWith("\"") && rawJs.endsWith("\"")) {
+                                        JSONObject("{\"v\":$rawJs}").getString("v")
+                                    } else {
+                                        rawJs
+                                    }
+                                    val json = JSONObject(unquoted)
+                                    val c = json.optString("creator", "").trim()
+                                    if (c.isNotEmpty() && creatorName.isEmpty()) creatorName = c
+
+                                    val arr = json.optJSONArray("items")
+                                    if (arr != null) {
+                                        for (i in 0 until arr.length()) {
+                                            val obj = arr.optJSONObject(i) ?: continue
+                                            val id = obj.optString("id", "").trim()
+                                            val itemUrl = obj.optString("url", "").trim()
+                                            if (id.isEmpty() || !itemUrl.startsWith("http")) continue
+                                            val entry = mapOf(
+                                                "id" to id,
+                                                "url" to itemUrl,
+                                                "title" to obj.optString("title", "").trim(),
+                                                "thumbnail" to obj.optString("thumbnail", "").trim(),
+                                                "badge" to obj.optString("badge", "").trim(),
+                                                "kind" to obj.optString("kind", "video").trim(),
+                                                "author" to obj.optString("author", creatorName).trim(),
+                                            )
+                                            synchronized(collectedById) {
+                                                val prev = collectedById[id]
+                                                if (prev == null || (prev["thumbnail"]?.toString().isNullOrEmpty() && entry["thumbnail"].toString().isNotEmpty())) {
+                                                    collectedById[id] = entry
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            val currentCount = synchronized(collectedById) { collectedById.size }
+                            if (currentCount > lastCount) {
+                                lastCount = currentCount
+                                stalePolls = 0
+                            } else if (currentCount > 0) {
+                                stalePolls++
+                            }
+
+                            // Stop once scrolling yields no more new items for 4 consecutive cycles (~4.8s)
+                            if (currentCount > 0 && stalePolls >= 4) {
+                                completeNow()
+                            } else {
+                                // Smoothly scroll down to trigger lazy-loading of remaining reels/posts
+                                webView.evaluateJavascript(
+                                    "window.scrollBy(0, Math.max(window.innerHeight * 2, 1600));",
+                                    null,
+                                )
+                                mainHandler.postDelayed(this, 1200L)
+                            }
+                        }
+                    }
+                }
+
+                webView.loadUrl(url)
+                mainHandler.postDelayed(poller, 1800L)
+            } catch (t: Throwable) {
+                Log.e(TAG, "sniffProfileItems crashed", t)
+                cleanup()
+                if (finished.compareAndSet(false, true)) {
+                    onError("WEBVIEW_ERROR", t.message ?: "Gagal memuat profil")
+                }
+            }
+        }
+    }
+
+    private fun buildProfileExtractionJs(platform: String): String {
+        val platLower = platform.lowercase()
+        return """
+        (function() {
+          try {
+            var platform = '$platLower';
+            var creator = '';
+            var byId = {};
+
+            function addItem(id, url, title, thumb, badge, kind, author) {
+              if (!id || !url) return;
+              if (!byId[id] || (!byId[id].thumbnail && thumb)) {
+                byId[id] = {
+                  id: String(id),
+                  url: String(url),
+                  title: String(title || ''),
+                  thumbnail: String(thumb || ''),
+                  badge: String(badge || ''),
+                  kind: String(kind || 'video'),
+                  author: String(author || creator || '')
+                };
+              }
+            }
+
+            if (platform === 'tiktok') {
+              var pathMatch = location.pathname.match(/\/@([^\/?#]+)/);
+              if (pathMatch && pathMatch[1]) creator = pathMatch[1];
+
+              // 1. Parse TikTok hydration script (__UNIVERSAL_DATA_FOR_REHYDRATION__ / SIGI_STATE)
+              try {
+                var el = document.getElementById('__UNIVERSAL_DATA_FOR_REHYDRATION__') || document.getElementById('SIGI_STATE');
+                if (el && el.textContent) {
+                  var data = JSON.parse(el.textContent);
+                  function scanTk(node, depth) {
+                    if (!node || depth > 10) return;
+                    if (Array.isArray(node)) {
+                      for (var i = 0; i < node.length; i++) scanTk(node[i], depth + 1);
+                      return;
+                    }
+                    if (typeof node !== 'object') return;
+                    if (node.id && (node.video || node.imagePost) && (node.desc !== undefined || node.author)) {
+                      var uid = (node.author && (node.author.uniqueId || node.author.nickname)) || creator || 'tiktok';
+                      if (!creator && uid) creator = uid;
+                      var isPhoto = !!node.imagePost;
+                      var itemUrl = 'https://www.tiktok.com/@' + uid + (isPhoto ? '/photo/' : '/video/') + node.id;
+                      var thumb = (node.video && (node.video.cover || node.video.originCover || node.video.dynamicCover)) || '';
+                      var dur = (node.video && node.video.duration) ? (node.video.duration + 's') : (isPhoto ? 'Foto' : 'Video');
+                      addItem(node.id, itemUrl, node.desc || ('TikTok_' + node.id), thumb, dur, isPhoto ? 'image' : 'video', uid);
+                    }
+                    var ks = Object.keys(node);
+                    for (var k = 0; k < ks.length; k++) {
+                      var c = node[ks[k]];
+                      if (c && typeof c === 'object') scanTk(c, depth + 1);
+                    }
+                  }
+                  scanTk(data, 0);
+                }
+              } catch (e) {}
+
+              // 2. Scan rendered DOM anchors for ALL loaded reels/videos/photos
+              var anchors = document.querySelectorAll('a[href*="/video/"], a[href*="/photo/"]');
+              for (var i = 0; i < anchors.length; i++) {
+                var a = anchors[i];
+                var href = a.href || '';
+                var m = href.match(/\/@([^\/?#]+)\/(video|photo)\/(\d+)/);
+                if (!m) continue;
+                var u = m[1];
+                var kindStr = m[2];
+                var vidId = m[3];
+                if (!creator) creator = u;
+                var img = a.querySelector('img');
+                var thumb = (img && (img.currentSrc || img.src)) || '';
+                var alt = (img && img.alt) || a.getAttribute('title') || a.innerText || ('TikTok_' + vidId);
+                alt = alt.replace(/\s+/g, ' ').trim();
+                var cleanHref = 'https://www.tiktok.com/@' + u + '/' + kindStr + '/' + vidId;
+                addItem(vidId, cleanHref, alt, thumb, kindStr === 'photo' ? 'Foto' : 'Video', kindStr === 'photo' ? 'image' : 'video', u);
+              }
+            } else if (platform === 'instagram') {
+              var igMatch = location.pathname.match(/^\/([^\/?#]+)/);
+              if (igMatch && igMatch[1]) creator = igMatch[1];
+              var igLinks = document.querySelectorAll('a[href*="/reel/"], a[href*="/p/"]');
+              for (var j = 0; j < igLinks.length; j++) {
+                var la = igLinks[j];
+                var hm = (la.href || '').match(/\/(reel|p)\/([A-Za-z0-9_-]{5,30})/);
+                if (!hm) continue;
+                var code = hm[2];
+                var im = la.querySelector('img');
+                var th = (im && (im.currentSrc || im.src)) || '';
+                var tit = (im && im.alt) || ('Instagram_' + code);
+                addItem(code, 'https://www.instagram.com/' + hm[1] + '/' + code + '/', tit, th, hm[1] === 'reel' ? 'Reel' : 'Post', 'video', creator);
+              }
+            } else if (platform === 'x') {
+              var xLinks = document.querySelectorAll('a[href*="/status/"]');
+              for (var x = 0; x < xLinks.length; x++) {
+                var xa = xLinks[x];
+                var xm = (xa.href || '').match(/\/([^\/?#]+)\/status\/(\d+)/);
+                if (!xm) continue;
+                if (!creator) creator = xm[1];
+                var xid = xm[2];
+                addItem(xid, 'https://x.com/' + xm[1] + '/status/' + xid, 'Post X ' + xid, '', 'Post', 'video', xm[1]);
+              }
+            }
+
+            var out = [];
+            var ids = Object.keys(byId);
+            for (var n = 0; n < ids.length; n++) out.push(byId[ids[n]]);
+            return JSON.stringify({ creator: creator, items: out });
+          } catch (err) {
+            return JSON.stringify({ creator: '', items: [] });
+          }
+        })();
+        """.trimIndent()
+    }
+
     @SuppressLint("SetJavaScriptEnabled")
     fun openLoginDialog(
         activity: Activity,
@@ -410,6 +733,10 @@ class WebViewMediaSniffer(private val context: Context) {
             "facebook" -> cm.getCookie("https://www.facebook.com").orEmpty().contains("c_user=") ||
                 cm.getCookie("https://m.facebook.com").orEmpty().contains("c_user=")
             "pixiv" -> cm.getCookie("https://www.pixiv.net").orEmpty().contains("PHPSESSID=")
+            "tiktok" -> {
+                val c = cm.getCookie("https://www.tiktok.com").orEmpty()
+                c.contains("sessionid=") || c.contains("sid_tt=") || c.contains("tt_chain_token=")
+            }
             else -> false
         }
     }

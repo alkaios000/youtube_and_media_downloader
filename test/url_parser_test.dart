@@ -1,11 +1,16 @@
 import 'dart:convert';
 
+import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:linkdrop_downloader/models/app_settings.dart';
+import 'package:linkdrop_downloader/models/creator_profile.dart';
+import 'package:linkdrop_downloader/models/download_item.dart';
 import 'package:linkdrop_downloader/models/managed_file.dart';
 import 'package:linkdrop_downloader/models/media_info.dart';
 import 'package:linkdrop_downloader/models/media_platform.dart';
 import 'package:linkdrop_downloader/services/media_extractor_service.dart';
 import 'package:linkdrop_downloader/services/native_bridge.dart';
+import 'package:linkdrop_downloader/services/storage_service.dart';
 
 void main() {
   group('UrlParser.extractUrl, detectPlatform & inspect', () {
@@ -236,6 +241,66 @@ void main() {
       final names = ['art_10.jpg', 'art_2.jpg', 'art_1.jpg', 'art_11.jpg'];
       names.sort(naturalCompareFileNames);
       expect(names, ['art_1.jpg', 'art_2.jpg', 'art_10.jpg', 'art_11.jpg']);
+    });
+  });
+
+  group('CreatorProfileRecord & Settings Backup Export/Import', () {
+    test('normalizes lookupKey consistently and round-trips backup JSON with paused items', () {
+      final profile = CreatorProfileRecord(
+        platform: MediaPlatform.pixiv,
+        creatorFolder: 'WLOP / Artist:01',
+        displayName: 'WLOP',
+        profileUrl: 'https://www.pixiv.net/users/2188232',
+        lastSyncedAt: DateTime(2026, 5, 1),
+      );
+      expect(
+        profile.lookupKey,
+        CreatorProfileRecord.buildLookupKey('Pixiv', 'WLOP _ Artist_01'),
+      );
+
+      final pausedItem = DownloadItem(
+        id: 'task_paused_1',
+        title: 'Demo Video',
+        author: 'Creator',
+        sourceUrl: 'https://www.tiktok.com/@creator/video/7345678901234567890',
+        platform: MediaPlatform.tiktok,
+        mediaKind: MediaKind.video,
+        formatLabel: 'Video HD MP4',
+        extension: 'mp4',
+        status: DownloadStatus.paused,
+        progress: 42.0,
+        statusText: 'Dijeda (42%)',
+        createdAt: DateTime(2026, 5, 1),
+        markerKey: 'tt:7345678901234567890',
+        resumePayload: const {
+          'engine': 'ytDlp',
+          'audioOnly': false,
+        },
+      );
+
+      final storage = StorageService();
+      final jsonText = storage.buildBackupJson(
+        settings: const AppSettings(
+          themeMode: ThemeMode.light,
+          defaultQuality: DefaultQualityPreset.p1080,
+          clipboardAutoDetect: false,
+          useAria2c: true,
+        ),
+        downloadedMarkers: {'pixiv:101', 'tt:7345678901234567890'},
+        creatorProfiles: [profile],
+        history: [pausedItem],
+      );
+
+      final restored = storage.parseBackupJson(jsonText);
+      expect(restored.settings.themeMode, ThemeMode.light);
+      expect(restored.settings.defaultQuality, DefaultQualityPreset.p1080);
+      expect(restored.settings.clipboardAutoDetect, isFalse);
+      expect(restored.settings.useAria2c, isTrue);
+      expect(restored.downloadedMarkers, containsAll(['pixiv:101', 'tt:7345678901234567890']));
+      expect(restored.creatorProfiles.single.profileUrl, 'https://www.pixiv.net/users/2188232');
+      expect(restored.history.single.status, DownloadStatus.paused);
+      expect(restored.history.single.canResume, isTrue);
+      expect(restored.history.single.resumePayload?['engine'], 'ytDlp');
     });
   });
 }

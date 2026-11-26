@@ -53,6 +53,11 @@ class _LinkDropAppState extends State<LinkDropApp> {
           themeMode: themeMode,
           theme: AppTheme.lightTheme(),
           darkTheme: AppTheme.darkTheme(),
+          builder: (context, appChild) => GestureDetector(
+            behavior: HitTestBehavior.translucent,
+            onTap: () => FocusManager.instance.primaryFocus?.unfocus(),
+            child: appChild ?? const SizedBox.shrink(),
+          ),
           home: child,
         );
       },

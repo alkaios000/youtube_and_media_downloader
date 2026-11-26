@@ -20,11 +20,23 @@ class MediaExtractorService {
     required String rawInput,
     String? cookiesPath,
   }) async {
-    final detection = UrlParser.inspect(rawInput);
+    var detection = UrlParser.inspect(rawInput);
     if (detection == null) {
       throw Exception(
         'Link tidak valid. Tempelkan tautan media atau profil (YouTube, TikTok, Douyin, Instagram, X, Pixiv, Facebook).',
       );
+    }
+
+    // Resolve TikTok short links (vt.tiktok.com / vm.tiktok.com / tiktok.com/t/) first
+    // so shared TikTok profile links are detected accurately as Bulk Profile!
+    if (detection.platform == MediaPlatform.tiktok) {
+      final resolved = await _direct.resolveTikTokUrl(detection.cleanUrl);
+      if (resolved != detection.cleanUrl) {
+        final reinspected = UrlParser.inspect(resolved);
+        if (reinspected != null) {
+          detection = reinspected;
+        }
+      }
     }
 
     final cleanUrl = detection.cleanUrl;
@@ -222,20 +234,123 @@ class MediaExtractorService {
       }
     } catch (_) {}
 
-    // 2. TikTok profile fallback via TikWM user/posts API
-    if (platform == MediaPlatform.tiktok &&
-        (detection.usernameHint?.isNotEmpty ?? false)) {
-      final ttProfile = await _direct.extractTikTokProfileFallback(
-        cleanUrl,
-        detection.usernameHint!,
-      );
-      if (ttProfile != null && ttProfile.selectableItems.isNotEmpty) {
-        return ttProfile;
+    // 2. TikTok profile fallback chain:
+    //    (a) Native Android Chromium WebView Profile Scraper (scrolls real TikTok page -> ALL reels/videos!)
+    //    (b) Direct SSR HTML hydration fallback
+    //    (c) TikWM fallback (if reachable)
+    if (platform == MediaPlatform.tiktok) {
+      try {
+        final sniffed = await bridge.sniffProfileItems(
+          url: cleanUrl,
+          platform: 'tiktok',
+          timeoutMs: 32000,
+        );
+        final fromSniff = _buildProfileFromSniff(
+          originalUrl: cleanUrl,
+          platform: MediaPlatform.tiktok,
+          sniffed: sniffed,
+          usernameHint: detection.usernameHint,
+        );
+        if (fromSniff != null && fromSniff.selectableItems.isNotEmpty) {
+          return fromSniff;
+        }
+      } catch (_) {}
+
+      if (detection.usernameHint?.isNotEmpty ?? false) {
+        final tkCookie = await _safeCookieHeader('https://www.tiktok.com/');
+        final ssrProfile = await _direct.extractTikTokProfileDirectHtml(
+          cleanUrl,
+          detection.usernameHint!,
+          cookieHeader: tkCookie,
+        );
+        if (ssrProfile != null && ssrProfile.selectableItems.isNotEmpty) {
+          return ssrProfile;
+        }
+
+        final ttProfile = await _direct.extractTikTokProfileFallback(
+          cleanUrl,
+          detection.usernameHint!,
+        );
+        if (ttProfile != null && ttProfile.selectableItems.isNotEmpty) {
+          return ttProfile;
+        }
       }
     }
 
+    // 3. Instagram / X WebView Profile Scraper fallback when yt-dlp cannot fetch profile
+    if (platform == MediaPlatform.instagram || platform == MediaPlatform.x) {
+      try {
+        final sniffed = await bridge.sniffProfileItems(
+          url: cleanUrl,
+          platform: platform.name,
+          timeoutMs: 28000,
+        );
+        final fromSniff = _buildProfileFromSniff(
+          originalUrl: cleanUrl,
+          platform: platform,
+          sniffed: sniffed,
+          usernameHint: detection.usernameHint,
+        );
+        if (fromSniff != null && fromSniff.selectableItems.isNotEmpty) {
+          return fromSniff;
+        }
+      } catch (_) {}
+    }
+
     throw Exception(
-      'Gagal memuat daftar media dari profil ${platform.label}. Pastikan akun bersifat publik atau login lewat Pengaturan -> Login Browser terlebih dahulu.',
+      'Gagal memuat daftar media dari profil ${platform.label}. Pastikan akun bersifat publik atau login lewat Pengaturan -> Login Browser (${platform.label}) terlebih dahulu.',
+    );
+  }
+
+  MediaInfo? _buildProfileFromSniff({
+    required String originalUrl,
+    required MediaPlatform platform,
+    required SniffedProfileResult sniffed,
+    String? usernameHint,
+  }) {
+    if (sniffed.items.isEmpty) return null;
+    final creator = (sniffed.creator.isNotEmpty
+            ? sniffed.creator
+            : (usernameHint ?? platform.label))
+        .replaceFirst('@', '')
+        .trim();
+    final items = <SelectableMediaItem>[];
+    for (int i = 0; i < sniffed.items.length; i++) {
+      final raw = sniffed.items[i];
+      final isImg = raw.kind.toLowerCase() == 'image';
+      items.add(
+        SelectableMediaItem(
+          id: 'sniff_prof_${platform.name}_${raw.id.isNotEmpty ? raw.id : i}',
+          title: raw.title.isNotEmpty ? raw.title : '${platform.label}_${raw.id}',
+          thumbnailUrl: raw.thumbnail.startsWith('http') ? raw.thumbnail : null,
+          sourcePostUrl: raw.url,
+          extension: isImg ? 'jpg' : 'mp4',
+          kind: isImg ? MediaKind.image : MediaKind.video,
+          engine: DownloadEngine.ytDlp,
+          badgeLabel: raw.badge.isNotEmpty ? raw.badge : '#${i + 1}',
+          author: raw.author.isNotEmpty ? raw.author : creator,
+        ),
+      );
+    }
+
+    final profileUrl = sniffed.finalUrl.startsWith('http')
+        ? sniffed.finalUrl
+        : originalUrl;
+
+    return MediaInfo(
+      originalUrl: profileUrl,
+      platform: platform,
+      title: 'Profil ${platform.label} @$creator (${items.length} media)',
+      author: creator,
+      thumbnailUrl: items
+          .map((e) => e.thumbnailUrl)
+          .whereType<String>()
+          .firstOrNull,
+      extractorLabel: '${platform.label} Browser Profil',
+      options: const [],
+      selectableItems: items,
+      isBulkProfile: true,
+      creatorProfileUrl: profileUrl,
     );
   }
 
@@ -313,6 +428,7 @@ class MediaExtractorService {
       options: const [],
       selectableItems: items,
       isBulkProfile: true,
+      creatorProfileUrl: originalUrl,
     );
   }
 
@@ -624,6 +740,10 @@ class MediaExtractorService {
     );
 
     final extractor = data['extractor_key']?.toString() ?? 'yt-dlp';
+    final channelUrl = (data['channel_url']?.toString() ??
+            data['uploader_url']?.toString() ??
+            '')
+        .trim();
 
     return MediaInfo(
       originalUrl: originalUrl,
@@ -634,6 +754,7 @@ class MediaExtractorService {
       duration: duration,
       extractorLabel: 'yt-dlp ($extractor)',
       options: options,
+      creatorProfileUrl: channelUrl.startsWith('http') ? channelUrl : null,
     );
   }
 
