@@ -616,11 +616,12 @@ class MainActivity : FlutterActivity() {
                     }
 
                     "deleteFile" -> {
-                        val ok = bridge.deleteFile(
+                        bridge.deleteFileAsync(
                             filePath = call.argument<String>("filePath"),
                             contentUri = call.argument<String>("contentUri"),
-                        )
-                        result.success(ok)
+                        ) { ok ->
+                            result.success(ok)
+                        }
                     }
 
                     "deleteMultipleFiles" -> {

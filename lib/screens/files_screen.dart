@@ -2463,7 +2463,7 @@ class _FilesScreenState extends State<FilesScreen> {
     );
     if (!ok) return;
 
-    await widget.manager.deleteMultipleManagedFiles(selected);
+    unawaited(widget.manager.deleteMultipleManagedFiles(selected));
     if (!mounted) return;
     if (_isSelectionMode) _exitSelectionMode();
   }

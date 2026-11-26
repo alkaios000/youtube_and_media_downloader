@@ -108,6 +108,7 @@ class DownloadManager extends ChangeNotifier {
   int _activeDownloadCount = 0;
   int _pausedDownloadCount = 0;
   List<ManagedFile> _managedFiles = const [];
+  final Set<String> _pendingDeletedKeys = <String>{};
   Set<String> _downloadedMarkers = <String>{};
   final Map<String, CreatorProfileRecord> _creatorProfiles = {};
   final Map<String, AlbumMetadata> _albumMetadata = {};
@@ -1072,8 +1073,11 @@ class DownloadManager extends ChangeNotifier {
     _isLoadingFiles = true;
     _notifyImmediate();
     try {
+      final fresh = await _bridge.listManagedFiles();
       _managedFiles = List<ManagedFile>.unmodifiable(
-        await _bridge.listManagedFiles(),
+        _pendingDeletedKeys.isEmpty
+            ? fresh
+            : fresh.where((f) => !_pendingDeletedKeys.contains(f.uniqueKey)),
       );
     } catch (_) {
       // Keep previous list if plugin unavailable (e.g. unit tests)
@@ -3044,20 +3048,74 @@ class DownloadManager extends ChangeNotifier {
     return _bridge.shareMultipleFiles(files);
   }
 
-  Future<bool> deleteManagedFile(ManagedFile file) async {
-    final ok = await _bridge.deleteFile(
-      filePath: file.savedPath,
-      contentUri: file.contentUri,
-    );
-    await refreshManagedFiles();
-    return ok;
+  void _optimisticallyRemoveManagedFiles(Iterable<ManagedFile> files) {
+    final keys = <String>{};
+    for (final f in files) {
+      keys.add(f.uniqueKey);
+    }
+    if (keys.isEmpty) return;
+    _pendingDeletedKeys.addAll(keys);
+    if (_managedFiles.isNotEmpty) {
+      final filtered = _managedFiles
+          .where((f) => !keys.contains(f.uniqueKey))
+          .toList(growable: false);
+      if (filtered.length != _managedFiles.length) {
+        _managedFiles = List<ManagedFile>.unmodifiable(filtered);
+        _notifyImmediate();
+      }
+    }
   }
 
+  /// Removes [file] from in-memory state **immediately** (0ms UI update) and
+  /// performs native storage deletion asynchronously off the UI thread —
+  /// avoiding expensive full MediaStore/filesystem rescans on every delete.
+  Future<bool> deleteManagedFile(ManagedFile file) async {
+    _optimisticallyRemoveManagedFiles([file]);
+    try {
+      final ok = await _bridge.deleteFile(
+        filePath: file.savedPath,
+        contentUri: file.contentUri,
+      );
+      if (!ok) {
+        final stillExists = await _bridge.fileExists(
+          filePath: file.savedPath,
+          contentUri: file.contentUri,
+        );
+        _pendingDeletedKeys.remove(file.uniqueKey);
+        if (stillExists) {
+          unawaited(refreshManagedFiles());
+        }
+        return !stillExists;
+      }
+      _pendingDeletedKeys.remove(file.uniqueKey);
+      return true;
+    } catch (_) {
+      _pendingDeletedKeys.remove(file.uniqueKey);
+      return false;
+    }
+  }
+
+  /// Removes [files] from in-memory state **immediately** (0ms UI update) and
+  /// deletes them on disk in a background native IO batch.
   Future<int> deleteMultipleManagedFiles(List<ManagedFile> files) async {
     if (files.isEmpty) return 0;
-    final deletedCount = await _bridge.deleteMultipleFiles(files);
-    await refreshManagedFiles();
-    return deletedCount;
+    final batch = List<ManagedFile>.from(files, growable: false);
+    _optimisticallyRemoveManagedFiles(batch);
+    try {
+      final deletedCount = await _bridge.deleteMultipleFiles(batch);
+      for (final f in batch) {
+        _pendingDeletedKeys.remove(f.uniqueKey);
+      }
+      if (deletedCount < batch.length) {
+        unawaited(refreshManagedFiles());
+      }
+      return deletedCount;
+    } catch (_) {
+      for (final f in batch) {
+        _pendingDeletedKeys.remove(f.uniqueKey);
+      }
+      return 0;
+    }
   }
 
   Future<int> unlockManagedFiles(List<ManagedFile> files) async {

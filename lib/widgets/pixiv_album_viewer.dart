@@ -1540,7 +1540,7 @@ class _PixivAlbumViewerState extends State<PixivAlbumViewer> {
           : 'Hapus permanen ${targets.length} foto terpilih dari perangkat?',
     );
     if (!ok) return;
-    await widget.manager.deleteMultipleManagedFiles(targets);
+    unawaited(widget.manager.deleteMultipleManagedFiles(targets));
     if (!mounted) return;
     if (_isSelectionMode) _exitSelection();
   }

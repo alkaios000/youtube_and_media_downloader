@@ -2157,6 +2157,17 @@ class MediaEngineBridge(private val context: Context) {
         }
     }
 
+    fun deleteFileAsync(
+        filePath: String?,
+        contentUri: String?,
+        onDone: (Boolean) -> Unit,
+    ) {
+        scope.launch {
+            val ok = deleteFile(filePath = filePath, contentUri = contentUri)
+            postToMain { onDone(ok) }
+        }
+    }
+
     fun deleteFile(filePath: String?, contentUri: String?): Boolean {
         var deleted = false
         if (!contentUri.isNullOrBlank() && contentUri.startsWith("content://")) {

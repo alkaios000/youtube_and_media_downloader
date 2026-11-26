@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
@@ -227,7 +228,6 @@ class _FileGalleryViewerState extends State<FileGalleryViewer> {
   bool _isZoomed = false;
   bool _togglingPrivacy = false;
   bool _fastDeleteEnabled = false;
-  bool _isDeleting = false;
 
   @override
   void initState() {
@@ -564,10 +564,7 @@ class _FileGalleryViewerState extends State<FileGalleryViewer> {
                               label: 'Hapus',
                               color: const Color(0xFFF87171),
                               activePill: _fastDeleteEnabled,
-                              loading: _isDeleting,
-                              onTap: _isDeleting
-                                  ? () {}
-                                  : _confirmDeleteCurrent,
+                              onTap: _confirmDeleteCurrent,
                             ),
                           ),
                         ],
@@ -622,7 +619,7 @@ class _FileGalleryViewerState extends State<FileGalleryViewer> {
   }
 
   Future<void> _confirmDeleteCurrent() async {
-    if (_isDeleting || _images.isEmpty) return;
+    if (_images.isEmpty) return;
     final target = _current;
     if (!_fastDeleteEnabled) {
       final ok = await showBottomDeleteConfirm(
@@ -635,28 +632,36 @@ class _FileGalleryViewerState extends State<FileGalleryViewer> {
       HapticFeedback.lightImpact();
     }
 
-    setState(() => _isDeleting = true);
-    try {
-      await widget.manager.deleteManagedFile(target);
-      if (!mounted) return;
-      final idx = _images.indexWhere((f) => f.uniqueKey == target.uniqueKey);
-      if (idx >= 0) {
-        _images.removeAt(idx);
-      } else if (_currentIndex >= 0 && _currentIndex < _images.length) {
-        _images.removeAt(_currentIndex);
-      }
-      if (_images.isEmpty) {
-        Navigator.pop(context);
-        return;
-      }
-      setState(() {
+    final idx = _images.indexWhere((f) => f.uniqueKey == target.uniqueKey);
+    if (idx < 0) return;
+
+    final wasAtEnd = _currentIndex >= _images.length - 1;
+    // Update UI immediately on frame 0 — zero lag even during rapid Fast Delete taps!
+    setState(() {
+      _images.removeAt(idx);
+      if (_images.isNotEmpty) {
         if (_currentIndex >= _images.length) {
           _currentIndex = _images.length - 1;
         }
         _isZoomed = false;
+      }
+    });
+
+    // DownloadManager updates managedFiles synchronously then deletes on background IO.
+    unawaited(widget.manager.deleteManagedFile(target));
+
+    if (_images.isEmpty) {
+      Navigator.pop(context);
+      return;
+    }
+    if (wasAtEnd && _pageController.hasClients) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && _pageController.hasClients && _images.isNotEmpty) {
+          _pageController.jumpToPage(
+            _currentIndex.clamp(0, _images.length - 1),
+          );
+        }
       });
-    } finally {
-      if (mounted) setState(() => _isDeleting = false);
     }
   }
 
