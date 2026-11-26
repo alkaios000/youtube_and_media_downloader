@@ -81,6 +81,17 @@ Future<void> showSetWallpaperSheet(
           ),
         );
     }
+  } on MissingPluginException {
+    if (!context.mounted) return;
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        const SnackBar(
+          content: Text(
+            'Modul native belum terpasang. Stop lalu Run ulang aplikasi (atau pasang APK terbaru) agar fitur Wallpaper aktif.',
+          ),
+        ),
+      );
   } on PlatformException catch (e) {
     if (!context.mounted) return;
     ScaffoldMessenger.of(context)

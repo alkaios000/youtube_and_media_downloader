@@ -1052,7 +1052,7 @@ class DownloadManager extends ChangeNotifier {
 
     final effectiveHeaders = {
       ...headers,
-      ...DirectExtractors.buildPixivHeaders(
+      ...DirectExtractors.buildPixivCdnHeaders(
         cookieHeader: pixivCookie,
         customCookies: _settings.customCookies,
       ),
@@ -1379,7 +1379,7 @@ class DownloadManager extends ChangeNotifier {
     if (item.platform == MediaPlatform.pixiv) {
       final freshCookie = await _resolvePixivCookieHeader();
       headers.addAll(
-        DirectExtractors.buildPixivHeaders(
+        DirectExtractors.buildPixivCdnHeaders(
           cookieHeader: freshCookie,
           customCookies: _settings.customCookies,
         ),

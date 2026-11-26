@@ -655,7 +655,7 @@ class MediaEngineBridge(private val context: Context) {
                             "-y", "-f", "concat", "-safe", "0", "-i", "concat.txt",
                             "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2",
                             "-c:v", "libx264", "-pix_fmt", "yuv420p",
-                            "-vsync", "vfr", "-crf", "18", "-preset", "veryfast",
+                            "-fps_mode", "vfr", "-crf", "18", "-preset", "veryfast",
                             "-movflags", "+faststart",
                             outFile.absolutePath,
                         ),
@@ -669,7 +669,7 @@ class MediaEngineBridge(private val context: Context) {
                                 "-y", "-f", "concat", "-safe", "0", "-i", "concat.txt",
                                 "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2",
                                 "-c:v", "mpeg4", "-q:v", "3", "-pix_fmt", "yuv420p",
-                                "-vsync", "vfr", "-movflags", "+faststart",
+                                "-fps_mode", "vfr", "-movflags", "+faststart",
                                 outFile.absolutePath,
                             ),
                         )
@@ -686,7 +686,10 @@ class MediaEngineBridge(private val context: Context) {
 
                 if (!ok) {
                     Log.e(TAG, "convertUgoiraZip FFmpeg failed: $lastLog")
-                    throw IllegalStateException("Gagal mengonversi Ugoira dengan FFmpeg.")
+                    val detail = lastLog.lines().lastOrNull { it.isNotBlank() }?.take(140).orEmpty()
+                    throw IllegalStateException(
+                        if (detail.isNotEmpty()) "Gagal konversi Ugoira (FFmpeg): $detail" else "Gagal mengonversi Ugoira dengan FFmpeg.",
+                    )
                 }
 
                 val safeName = sanitizeFileName(fileName)

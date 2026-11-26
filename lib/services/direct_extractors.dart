@@ -99,7 +99,23 @@ class DirectExtractors {
     return map.entries.map((e) => '${e.key}=${e.value}').join('; ');
   }
 
-  /// Builds full browser-equivalent Pixiv Ajax & CDN headers including `Cookie` and `x-user-id`.
+  /// Builds clean headers for downloading binary media (images & Ugoira ZIPs) from `i.pximg.net`.
+  static Map<String, String> buildPixivCdnHeaders({
+    String cookieHeader = '',
+    String customCookies = '',
+  }) {
+    final mergedCookie = mergePixivCookies(
+      cookieHeader: cookieHeader,
+      customCookies: customCookies,
+    );
+    return <String, String>{
+      ...pixivHeaders,
+      'Accept': '*/*',
+      if (mergedCookie.isNotEmpty) 'Cookie': mergedCookie,
+    };
+  }
+
+  /// Builds full browser-equivalent Pixiv Ajax API headers including `Cookie` and `x-user-id`.
   static Map<String, String> buildPixivHeaders({
     String cookieHeader = '',
     String customCookies = '',
@@ -261,6 +277,12 @@ class DirectExtractors {
       // -----------------------------------------------------------------------
       // PIXIV UGOIRA (Animated illustration: illustType == 2)
       // -----------------------------------------------------------------------
+      final cdnHeaders = <String, String>{
+        ...pixivHeaders,
+        'Accept': '*/*',
+        if ((headers['Cookie'] ?? '').isNotEmpty) 'Cookie': headers['Cookie']!,
+      };
+
       if (illustType == 2) {
         final ugoira = await _fetchPixivUgoiraMetaWithHeaders(illustId, headers);
         if (ugoira == null) {
@@ -290,7 +312,7 @@ class DirectExtractors {
             kind: MediaKind.video,
             engine: DownloadEngine.directHttp,
             directUrl: ugoira.zipUrl,
-            headers: headers,
+            headers: cdnHeaders,
             isUgoira: true,
             ugoiraFrames: ugoira.frames,
           ),
@@ -302,7 +324,7 @@ class DirectExtractors {
             kind: MediaKind.image,
             engine: DownloadEngine.directHttp,
             directUrl: ugoira.zipUrl,
-            headers: headers,
+            headers: cdnHeaders,
             isUgoira: true,
             ugoiraFrames: ugoira.frames,
           ),
@@ -323,7 +345,7 @@ class DirectExtractors {
               engine: DownloadEngine.directHttp,
               directUrl: coverOrig,
               galleryUrls: [coverOrig],
-              headers: headers,
+              headers: cdnHeaders,
             ),
           );
         }
@@ -334,7 +356,7 @@ class DirectExtractors {
           title: title,
           author: author,
           thumbnailUrl: metaSmall.startsWith('http') ? metaSmall : (coverOrig.isNotEmpty ? coverOrig : null),
-          thumbnailHeaders: headers,
+          thumbnailHeaders: cdnHeaders,
           duration: duration,
           extractorLabel: isR18 ? 'Pixiv Ugoira ($r18Tag)' : 'Pixiv Ugoira Engine',
           options: ugoiraOptions,
