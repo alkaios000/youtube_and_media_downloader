@@ -26,7 +26,7 @@ class DirectExtractors {
             Dio(
               BaseOptions(
                 connectTimeout: const Duration(seconds: 20),
-                receiveTimeout: const Duration(seconds: 25),
+                receiveTimeout: const Duration(seconds: 45),
                 sendTimeout: const Duration(seconds: 20),
                 validateStatus: (status) => status != null && status < 500,
               ),
@@ -48,7 +48,7 @@ class DirectExtractors {
       return _extractPixivArtwork(url, illustId, headers);
     }
 
-    // 2. Check if user profile link or username search
+    // 2. Check if user bookmarks or user profile link / username search
     String? userId = _extractPixivUserId(url);
     if (userId == null) {
       final uri = Uri.tryParse(url);
@@ -58,6 +58,10 @@ class DirectExtractors {
       }
     }
     if (userId != null) {
+      if (url.toLowerCase().contains('/bookmarks')) {
+        final bmInfo = await _extractPixivUserBookmarks(url, userId, headers);
+        if (bmInfo != null) return bmInfo;
+      }
       return _extractPixivUserProfile(url, userId, headers);
     }
 
@@ -255,82 +259,70 @@ class DirectExtractors {
         ids.addAll((body['manga'] as Map).keys.map((e) => e.toString()));
       }
 
-      // Sort newest artwork ID first — NO cap, load ALL works in parallel chunks of 48!
+      // Sort newest artwork ID first — ZERO limit anywhere!
+      // Pixiv's /profile/illusts accepts up to 100 IDs per request; we paginate
+      // through ALL IDs with retries + auto-split + zero-drop fallback so EVERY
+      // single artwork on the profile is returned without any cap.
       ids.sort((a, b) => (int.tryParse(b) ?? 0).compareTo(int.tryParse(a) ?? 0));
       if (ids.isEmpty) return null;
 
-      const chunkSize = 48;
-      final chunks = <List<String>>[];
-      for (int start = 0; start < ids.length; start += chunkSize) {
-        final end = (start + chunkSize > ids.length) ? ids.length : start + chunkSize;
-        chunks.add(ids.sublist(start, end));
+      const batchSize = 100;
+      final batches = <List<String>>[];
+      for (int start = 0; start < ids.length; start += batchSize) {
+        final end = (start + batchSize > ids.length) ? ids.length : start + batchSize;
+        batches.add(ids.sublist(start, end));
       }
 
-      // Fetch up to 4 chunks concurrently so even hundreds/thousands of artworks load quickly.
       final allWorksMap = <String, Map>{};
-      const concurrency = 4;
-      for (int i = 0; i < chunks.length; i += concurrency) {
-        final group = chunks.sublist(
+      const concurrency = 3;
+      for (int i = 0; i < batches.length; i += concurrency) {
+        final group = batches.sublist(
           i,
-          (i + concurrency > chunks.length) ? chunks.length : i + concurrency,
+          (i + concurrency > batches.length) ? batches.length : i + concurrency,
         );
         final groupResults = await Future.wait(
-          group.map((chunk) async {
-            try {
-              final queryIds = chunk.map((id) => 'ids[]=$id').join('&');
-              final worksRes = await _dio.get<dynamic>(
-                'https://www.pixiv.net/ajax/user/$userId/profile/illusts?$queryIds&work_category=illustManga&is_first_page=0',
-                options: Options(headers: headers),
-              );
-              final worksBody = worksRes.data is String
-                  ? jsonDecode(worksRes.data as String)
-                  : worksRes.data;
-              if (worksBody is Map && worksBody['error'] != true) {
-                final works = worksBody['body']?['works'];
-                if (works is Map) {
-                  return works;
-                }
-              }
-            } catch (_) {}
-            return null;
-          }),
+          group.map((batch) => _fetchPixivWorksBatch(userId, batch, headers)),
         );
         for (final wMap in groupResults) {
-          if (wMap == null) continue;
-          wMap.forEach((key, value) {
-            if (value is Map) {
-              allWorksMap[key.toString()] = value;
-            }
-          });
+          allWorksMap.addAll(wMap);
+        }
+        if (i + concurrency < batches.length) {
+          await Future<void>.delayed(const Duration(milliseconds: 120));
         }
       }
 
-      if (allWorksMap.isEmpty) return null;
-
       String creatorName = 'Pixiv_$userId';
-      final items = <SelectableMediaItem>[];
+      for (final work in allWorksMap.values) {
+        final uName = work['userName']?.toString().trim() ?? '';
+        if (uName.isNotEmpty) {
+          creatorName = uName;
+          break;
+        }
+      }
 
+      // Build items for 100% of IDs — NEVER drop any artwork even if metadata failed!
+      final items = <SelectableMediaItem>[];
       for (final id in ids) {
         final work = allWorksMap[id];
-        if (work == null) continue;
-        final uName = work['userName']?.toString().trim() ?? '';
-        if (uName.isNotEmpty) creatorName = uName;
-
-        final workTitle = (work['title']?.toString() ?? 'Pixiv_$id').trim();
-        final thumb = work['url']?.toString() ?? '';
-        final pageCount = (work['pageCount'] as num?)?.toInt() ?? 1;
+        final workTitle =
+            (work?['title']?.toString() ?? 'Pixiv_$id').trim();
+        final thumb = work?['url']?.toString() ?? '';
+        final pageCount = (work?['pageCount'] as num?)?.toInt() ?? 0;
+        final badge = pageCount > 1
+            ? '$pageCount Hal'
+            : (pageCount == 1 ? '1 Hal' : 'Pixiv');
 
         items.add(
           SelectableMediaItem(
             id: 'pixiv_work_$id',
-            title: workTitle,
+            title: workTitle.isNotEmpty ? workTitle : 'Pixiv_$id',
             thumbnailUrl: thumb.startsWith('http') ? thumb : null,
             sourcePostUrl: 'https://www.pixiv.net/artworks/$id',
             extension: 'jpg',
             kind: MediaKind.image,
             engine: DownloadEngine.directHttp,
             headers: headers,
-            badgeLabel: pageCount > 1 ? '$pageCount Hal' : '1 Hal',
+            badgeLabel: badge,
             author: creatorName,
             pixivIllustId: id,
           ),
@@ -344,9 +336,182 @@ class DirectExtractors {
         platform: MediaPlatform.pixiv,
         title: 'Karya $creatorName (${items.length} karya)',
         author: creatorName,
+        thumbnailUrl: items
+            .map((e) => e.thumbnailUrl)
+            .whereType<String>()
+            .firstOrNull,
+        thumbnailHeaders: headers,
+        extractorLabel: 'Pixiv Profil Massal (Tanpa Batas)',
+        options: const [],
+        selectableItems: items,
+        isBulkProfile: true,
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Fetches metadata for a batch of Pixiv work IDs with retry/backoff on 429
+  /// and automatic halving if an oversized/invalid batch triggers HTTP 400.
+  Future<Map<String, Map>> _fetchPixivWorksBatch(
+    String userId,
+    List<String> batch,
+    Map<String, String> headers, {
+    int depth = 0,
+  }) async {
+    if (batch.isEmpty) return const {};
+    final queryIds = batch.map((id) => 'ids[]=$id').join('&');
+    final endpoint =
+        'https://www.pixiv.net/ajax/user/$userId/profile/illusts?$queryIds&work_category=illustManga&is_first_page=0';
+
+    for (int attempt = 0; attempt < 3; attempt++) {
+      try {
+        final worksRes = await _dio.get<dynamic>(
+          endpoint,
+          options: Options(headers: headers),
+        );
+        final status = worksRes.statusCode ?? 0;
+
+        if (status == 429 || status >= 500) {
+          await Future<void>.delayed(Duration(milliseconds: 500 * (attempt + 1)));
+          continue;
+        }
+
+        if (status == 400 && batch.length > 10 && depth < 3) {
+          final mid = batch.length ~/ 2;
+          final left = await _fetchPixivWorksBatch(
+            userId,
+            batch.sublist(0, mid),
+            headers,
+            depth: depth + 1,
+          );
+          final right = await _fetchPixivWorksBatch(
+            userId,
+            batch.sublist(mid),
+            headers,
+            depth: depth + 1,
+          );
+          return {...left, ...right};
+        }
+
+        final worksBody = worksRes.data is String
+            ? jsonDecode(worksRes.data as String)
+            : worksRes.data;
+        if (worksBody is Map && worksBody['error'] != true) {
+          final works = worksBody['body']?['works'];
+          if (works is Map) {
+            final result = <String, Map>{};
+            works.forEach((key, value) {
+              if (value is Map) result[key.toString()] = value;
+            });
+            return result;
+          }
+        }
+      } catch (_) {
+        if (attempt < 2) {
+          await Future<void>.delayed(Duration(milliseconds: 450 * (attempt + 1)));
+        }
+      }
+    }
+    return const {};
+  }
+
+  /// Loads ALL bookmarks of a Pixiv user (no limit) by paginating until `offset >= total`.
+  Future<MediaInfo?> _extractPixivUserBookmarks(
+    String originalUrl,
+    String userId,
+    Map<String, String> headers,
+  ) async {
+    try {
+      final items = <SelectableMediaItem>[];
+      final seenIds = <String>{};
+      int offset = 0;
+      int pageSize = 100;
+      int? total;
+
+      while (true) {
+        Response<dynamic>? res;
+        for (int attempt = 0; attempt < 2; attempt++) {
+          try {
+            res = await _dio.get<dynamic>(
+              'https://www.pixiv.net/ajax/user/$userId/illusts/bookmarks',
+              queryParameters: {
+                'tag': '',
+                'offset': offset,
+                'limit': pageSize,
+                'rest': 'show',
+              },
+              options: Options(headers: headers),
+            );
+            if ((res.statusCode ?? 0) == 429) {
+              await Future<void>.delayed(const Duration(milliseconds: 700));
+              continue;
+            }
+            break;
+          } catch (_) {
+            if (attempt == 0) {
+              await Future<void>.delayed(const Duration(milliseconds: 500));
+            }
+          }
+        }
+
+        if (res == null) break;
+        final body = res.data is String ? jsonDecode(res.data as String) : res.data;
+        if (body is! Map || body['error'] == true) {
+          if (pageSize > 48 && offset == 0) {
+            pageSize = 48;
+            continue;
+          }
+          break;
+        }
+
+        final data = body['body'] as Map?;
+        final works = data?['works'] as List?;
+        total ??= (data?['total'] as num?)?.toInt();
+        if (works == null || works.isEmpty) break;
+
+        int added = 0;
+        for (final w in works) {
+          if (w is! Map) continue;
+          final id = w['id']?.toString() ?? '';
+          if (id.isEmpty || !seenIds.add(id)) continue;
+          final title = (w['title']?.toString() ?? 'Pixiv_$id').trim();
+          final artist = (w['userName']?.toString() ?? 'Pixiv').trim();
+          final thumb = w['url']?.toString() ?? '';
+          final pageCount = (w['pageCount'] as num?)?.toInt() ?? 1;
+          items.add(
+            SelectableMediaItem(
+              id: 'pixiv_bm_$id',
+              title: title.isNotEmpty ? title : 'Pixiv_$id',
+              thumbnailUrl: thumb.startsWith('http') ? thumb : null,
+              sourcePostUrl: 'https://www.pixiv.net/artworks/$id',
+              extension: 'jpg',
+              kind: MediaKind.image,
+              engine: DownloadEngine.directHttp,
+              headers: headers,
+              badgeLabel: pageCount > 1 ? '$pageCount Hal' : '1 Hal',
+              author: artist.isNotEmpty ? artist : 'Pixiv',
+              pixivIllustId: id,
+            ),
+          );
+          added++;
+        }
+
+        offset += works.length;
+        if (added == 0 || (total != null && offset >= total)) break;
+        await Future<void>.delayed(const Duration(milliseconds: 120));
+      }
+
+      if (items.isEmpty) return null;
+
+      return MediaInfo(
+        originalUrl: originalUrl,
+        platform: MediaPlatform.pixiv,
+        title: 'Bookmark Pixiv (${items.length} karya)',
+        author: 'Pixiv_Bookmarks_$userId',
         thumbnailUrl: items.first.thumbnailUrl,
         thumbnailHeaders: headers,
-        extractorLabel: 'Pixiv Profil Massal',
+        extractorLabel: 'Pixiv Bookmark (Tanpa Batas)',
         options: const [],
         selectableItems: items,
         isBulkProfile: true,

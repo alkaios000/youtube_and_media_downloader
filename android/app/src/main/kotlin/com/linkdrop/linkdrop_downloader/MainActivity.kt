@@ -270,7 +270,6 @@ class MainActivity : FlutterActivity() {
                     "extractProfileItems" -> {
                         val url = call.argument<String>("url")
                         val cookiesPath = call.argument<String>("cookiesPath")
-                        val limit = call.argument<Int>("limit")
                         if (url.isNullOrBlank()) {
                             result.error("INVALID_ARGS", "URL profil kosong", null)
                             return@setMethodCallHandler
@@ -278,7 +277,6 @@ class MainActivity : FlutterActivity() {
                         bridge.extractProfileItems(
                             url = url,
                             cookiesPath = cookiesPath,
-                            limit = limit,
                             onSuccess = { json -> result.success(json) },
                             onError = { code, message -> result.error(code, message, null) },
                         )
