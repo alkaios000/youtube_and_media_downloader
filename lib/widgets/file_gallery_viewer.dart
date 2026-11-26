@@ -1,4 +1,3 @@
-import 'dart:io';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
@@ -8,6 +7,7 @@ import '../models/managed_file.dart';
 import '../models/media_info.dart';
 import '../models/media_metadata.dart';
 import '../services/download_manager.dart';
+import 'sharp_original_image.dart';
 import 'wallpaper_sheet.dart';
 
 /// Quick 3-option content rating picker sheet (Biasa / Ecchi / NSFW)
@@ -749,17 +749,18 @@ class _ZoomablePhotoPageState extends State<_ZoomablePhotoPage>
       child: InteractiveViewer(
         transformationController: _controller,
         minScale: 1.0,
-        maxScale: 5.0,
+        maxScale: 8.0,
         clipBehavior: Clip.none,
         panEnabled: _zoomed,
         child: SizedBox.expand(
           child: Center(
-            child: Image.file(
-              File(widget.filePath),
-              cacheWidth: 1280,
-              filterQuality: FilterQuality.low,
-              gaplessPlayback: true,
+            child: SharpOriginalImage(
+              filePath: widget.filePath,
               fit: BoxFit.contain,
+              highZoomActive: _zoomed,
+              originalUpgradeDelay: const Duration(milliseconds: 90),
+              maxOriginalDimension: 6144,
+              maxOriginalPixels: 32 * 1000 * 1000,
               errorBuilder: (_, _, _) => const Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [

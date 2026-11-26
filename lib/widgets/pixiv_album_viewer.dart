@@ -11,6 +11,7 @@ import '../models/media_info.dart';
 import '../models/media_metadata.dart';
 import '../services/download_manager.dart';
 import 'file_gallery_viewer.dart';
+import 'sharp_original_image.dart';
 import 'wallpaper_sheet.dart';
 
 enum _AlbumReaderMode { pixivScroll, galleryGrid, rowList }
@@ -781,10 +782,6 @@ class _PixivAlbumViewerState extends State<PixivAlbumViewer> {
     final theme = Theme.of(context);
     final bottomPad = _isSelectionMode ? 104.0 : 32.0;
     final mediaSize = MediaQuery.sizeOf(context);
-    final screenPxWidth =
-        (mediaSize.width * MediaQuery.devicePixelRatioOf(context))
-            .round()
-            .clamp(540, 900);
     // Reserve ~65% of screen height before Photo #1 finishes decoding so
     // Flutter mounts STRICTLY 1 photo (not 4-5 undecoded 180px stubs!) on slide!
     final loadingPlaceholderHeight = (mediaSize.height * 0.65).clamp(380.0, 580.0);
@@ -870,13 +867,14 @@ class _PixivAlbumViewerState extends State<PixivAlbumViewer> {
                                   ],
                                 ),
                               )
-                            : Image.file(
-                                File(page.savedPath),
+                            : SharpOriginalImage(
+                                filePath: page.savedPath,
                                 width: double.infinity,
-                                cacheWidth: screenPxWidth,
-                                filterQuality: FilterQuality.low,
-                                gaplessPlayback: true,
                                 fit: BoxFit.fitWidth,
+                                originalUpgradeDelay:
+                                    const Duration(milliseconds: 140),
+                                maxOriginalDimension: 4096,
+                                maxOriginalPixels: 18 * 1000 * 1000,
                                 frameBuilder: (context, child, frame, wasSync) {
                                   if (wasSync || frame != null) {
                                     return child;
@@ -1067,8 +1065,8 @@ class _PixivAlbumViewerState extends State<PixivAlbumViewer> {
                               )
                             : Image.file(
                                 File(page.savedPath),
-                                cacheWidth: 320,
-                                filterQuality: FilterQuality.low,
+                                cacheWidth: 400,
+                                filterQuality: FilterQuality.medium,
                                 fit: BoxFit.cover,
                                 errorBuilder: (_, _, _) => Container(
                                   color:

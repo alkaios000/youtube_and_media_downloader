@@ -18,6 +18,7 @@ import 'package:linkdrop_downloader/theme/app_theme.dart';
 import 'package:linkdrop_downloader/widgets/file_gallery_viewer.dart';
 import 'package:linkdrop_downloader/widgets/media_preview_card.dart';
 import 'package:linkdrop_downloader/widgets/pixiv_album_viewer.dart';
+import 'package:linkdrop_downloader/widgets/sharp_original_image.dart';
 
 class _MemoryStorageService extends StorageService {
   @override
@@ -1186,5 +1187,63 @@ void main() {
     expect(backup.photoRatings[photoToMark.ratingKey], ContentRating.nsfw);
 
     manager.dispose();
+  });
+
+  testWidgets(
+      'SharpOriginalImage uses untouched native FileImage for full-res quality and upgrades immediately on zoom',
+      (WidgetTester tester) async {
+    // 1) Normal & high-res Pixiv original (e.g. 3840x5120 = 19.6 MP) stays 100% untouched FileImage!
+    final untouched = buildOriginalQualityProvider(
+      '/nonexistent/hq.png',
+      naturalSize: (width: 3840, height: 5120),
+      maxOriginalDimension: 6144,
+      maxOriginalPixels: 32 * 1000 * 1000,
+    );
+    expect(untouched, isA<FileImage>());
+
+    // 2) Extreme 12000x16000 (192 MP) canvas is safely bounded within GPU limits without OOM
+    final bounded = buildOriginalQualityProvider(
+      '/nonexistent/giant.png',
+      naturalSize: (width: 12000, height: 16000),
+      maxOriginalDimension: 6144,
+      maxOriginalPixels: 32 * 1000 * 1000,
+    );
+    expect(bounded, isA<ResizeImage>());
+    final resized = bounded as ResizeImage;
+    expect(resized.width, lessThanOrEqualTo(6144));
+    expect(resized.height, lessThanOrEqualTo(6144));
+    expect(resized.allowUpscaling, isFalse);
+
+    // 3) Widget starts at screen-sharp preview (FilterQuality.medium), then promotes to
+    // untouched FileImage after settle delay — and switches to FilterQuality.high when zoomed!
+    bool zoomed = false;
+    late StateSetter setOuter;
+    await tester.pumpWidget(
+      StatefulBuilder(
+        builder: (context, setState) {
+          setOuter = setState;
+          return MaterialApp(
+            home: SharpOriginalImage(
+              filePath: '/nonexistent/test.jpg',
+              highZoomActive: zoomed,
+              originalUpgradeDelay: const Duration(milliseconds: 100),
+            ),
+          );
+        },
+      ),
+    );
+    await tester.pump();
+
+    var img = tester.widget<Image>(find.byType(Image));
+    expect(img.filterQuality, FilterQuality.medium);
+    expect(img.gaplessPlayback, isTrue);
+    expect(img.image, isA<ResizeImage>());
+
+    // Promote immediately when user zooms in -> raw FileImage + FilterQuality.high!
+    setOuter(() => zoomed = true);
+    await tester.pump();
+    img = tester.widget<Image>(find.byType(Image));
+    expect(img.filterQuality, FilterQuality.high);
+    expect(img.image, isA<FileImage>());
   });
 }

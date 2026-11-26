@@ -261,8 +261,8 @@ class _PlatformAllPhotosScreenState extends State<PlatformAllPhotosScreen> {
                                   children: [
                                     Image.file(
                                       File(photo.savedPath),
-                                      cacheWidth: 260,
-                                      filterQuality: FilterQuality.low,
+                                      cacheWidth: 380,
+                                      filterQuality: FilterQuality.medium,
                                       fit: BoxFit.cover,
                                       errorBuilder: (_, _, _) => Container(
                                         color: theme.colorScheme

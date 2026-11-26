@@ -1830,8 +1830,8 @@ class _FilesScreenState extends State<FilesScreen> {
                                   )
                                 : Image.file(
                                     File(album.cover.savedPath),
-                                    cacheWidth: 380,
-                                    filterQuality: FilterQuality.low,
+                                    cacheWidth: 540,
+                                    filterQuality: FilterQuality.medium,
                                     fit: BoxFit.cover,
                                     errorBuilder: (_, _, _) => Container(
                                       color: theme

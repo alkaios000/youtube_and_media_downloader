@@ -8,9 +8,10 @@ import 'theme/app_theme.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
-  // Cap decoded image memory so scrolling huge histories/galleries never OOMs.
-  PaintingBinding.instance.imageCache.maximumSize = 200;
-  PaintingBinding.instance.imageCache.maximumSizeBytes = 64 * 1024 * 1024;
+  // Generous yet safe decoded image cache so full-resolution Pixiv artworks
+  // stay razor-sharp in RAM without re-decode stutter or OOM on huge lists.
+  PaintingBinding.instance.imageCache.maximumSize = 180;
+  PaintingBinding.instance.imageCache.maximumSizeBytes = 128 * 1024 * 1024;
   FlutterError.onError = (details) {
     FlutterError.presentError(details);
   };
