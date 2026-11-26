@@ -497,6 +497,7 @@ class DownloadManager extends ChangeNotifier {
     MediaInfo info,
     MediaFormatOption option, {
     List<String> extraMarkerKeys = const [],
+    bool markAlbumKey = true,
   }) async {
     if (_permissionChecked && !_permissionStatus.granted && _permissionStatus.sdkInt <= 28) {
       await requestStoragePermissions();
@@ -535,6 +536,7 @@ class DownloadManager extends ChangeNotifier {
           info,
           option,
           extraMarkerKeys: extraMarkerKeys,
+          markAlbumKey: markAlbumKey,
         ),
       );
     } else {
@@ -544,6 +546,7 @@ class DownloadManager extends ChangeNotifier {
           info,
           option,
           extraMarkerKeys: extraMarkerKeys,
+          markAlbumKey: markAlbumKey,
         ),
       );
     }
@@ -583,31 +586,48 @@ class DownloadManager extends ChangeNotifier {
   }
 
   /// Downloads ONLY the user-selected photos from a multi-photo post (Pixiv, X, IG, TikTok, Douyin).
-  Future<void> downloadSelectedPhotos(
+  /// For Pixiv, any photo/album already marked downloaded is strictly skipped unless unmarked first.
+  Future<int> downloadSelectedPhotos(
     MediaInfo info,
     List<SelectableMediaItem> selected,
   ) async {
-    if (selected.isEmpty) return;
+    if (selected.isEmpty) return 0;
     if (_permissionChecked && !_permissionStatus.granted && _permissionStatus.sdkInt <= 28) {
       await requestStoragePermissions();
     }
 
+    final isPixiv = info.platform == MediaPlatform.pixiv;
+    if (isPixiv && isMarkedDownloaded(info.markerKey)) {
+      return 0;
+    }
+
+    final eligible = isPixiv
+        ? selected.where((item) => !isMarkedDownloaded(item.markerKey)).toList()
+        : selected;
+    if (eligible.isEmpty) return 0;
+
     final urls = <String>[];
     final extraKeys = <String>[];
-    for (final item in selected) {
+    for (final item in eligible) {
       final u = item.directUrl;
       if (u != null && u.startsWith('http')) {
         urls.add(u);
         if (item.markerKey.isNotEmpty) extraKeys.add(item.markerKey);
       }
     }
-    if (urls.isEmpty) return;
+    if (urls.isEmpty) return 0;
 
-    final first = selected.first;
+    // Mark parent album key only if ALL pages of this post will be downloaded
+    final allPagesCovered = info.selectableItems.isEmpty ||
+        info.selectableItems.every(
+          (p) => extraKeys.contains(p.markerKey) || isMarkedDownloaded(p.markerKey),
+        );
+
+    final first = eligible.first;
     final customOption = MediaFormatOption(
       id: 'selected_photos_${DateTime.now().millisecondsSinceEpoch}',
-      label: selected.length > 1
-          ? '${selected.length} Foto Terpilih'
+      label: eligible.length > 1
+          ? '${eligible.length} Foto Terpilih'
           : 'Foto Terpilih',
       subtitle: '${first.extension.toUpperCase()} • ${info.author}',
       extension: first.extension,
@@ -618,29 +638,39 @@ class DownloadManager extends ChangeNotifier {
       headers: first.headers,
     );
 
-    await startDownload(info, customOption, extraMarkerKeys: extraKeys);
+    await startDownload(
+      info,
+      customOption,
+      extraMarkerKeys: extraKeys,
+      markAlbumKey: allPagesCovered,
+    );
+    return urls.length;
   }
 
   /// Bulk downloads selected items from a Profile or Playlist URL (Pixiv, YouTube, TikTok, IG, X, FB, Douyin).
-  /// Uses a load-balanced worker pool:
-  /// - Direct HTTP / Pixiv artworks run up to 3 tasks concurrently sharing 4 HTTP file streams (fast & lightweight!)
-  /// - Native yt-dlp / FFmpeg jobs run 1 at a time so CPU/RAM never lag.
-  Future<void> startBulkDownloads(
+  /// For Pixiv, any artwork already marked downloaded is strictly excluded unless its marker was removed first.
+  Future<int> startBulkDownloads(
     MediaInfo collectionInfo,
     List<SelectableMediaItem> selected, {
     bool audioOnly = false,
   }) async {
-    if (selected.isEmpty) return;
+    if (selected.isEmpty) return 0;
     if (_permissionChecked && !_permissionStatus.granted && _permissionStatus.sdkInt <= 28) {
       await requestStoragePermissions();
     }
+
+    final isPixiv = collectionInfo.platform == MediaPlatform.pixiv;
+    final eligible = isPixiv
+        ? selected.where((sel) => !isMarkedDownloaded(sel.markerKey)).toList()
+        : selected;
+    if (eligible.isEmpty) return 0;
 
     final directQueue = <(String, SelectableMediaItem)>[];
     final ytDlpQueue = <(String, SelectableMediaItem)>[];
     final newItems = <DownloadItem>[];
 
-    for (int i = 0; i < selected.length; i++) {
-      final sel = selected[i];
+    for (int i = 0; i < eligible.length; i++) {
+      final sel = eligible[i];
       final taskId = _nextTaskId('bulk');
       final isAudio = audioOnly && sel.kind == MediaKind.video;
       final ext = isAudio ? 'mp3' : sel.extension;
@@ -664,7 +694,7 @@ class DownloadManager extends ChangeNotifier {
           mediaKind: kind,
           status: DownloadStatus.queued,
           progress: 0,
-          statusText: 'Dalam antrean (${i + 1}/${selected.length})...',
+          statusText: 'Dalam antrean (${i + 1}/${eligible.length})...',
           createdAt: DateTime.now(),
           subFiles: [
             SubFileTask(
@@ -692,6 +722,7 @@ class DownloadManager extends ChangeNotifier {
     if (ytDlpQueue.isNotEmpty) {
       unawaited(_processYtDlpBulkQueue(collectionInfo, ytDlpQueue, audioOnly: audioOnly));
     }
+    return eligible.length;
   }
 
   /// Concurrent worker pool (3 workers) for fast Pixiv & Direct HTTP bulk tasks.
@@ -869,6 +900,7 @@ class DownloadManager extends ChangeNotifier {
     MediaInfo info,
     MediaFormatOption option, {
     List<String> extraMarkerKeys = const [],
+    bool markAlbumKey = true,
   }) async {
     await _ytDlpPool.run(() async {
       if (_isDisposed || _isTaskCancelled(taskId)) return;
@@ -934,7 +966,10 @@ class DownloadManager extends ChangeNotifier {
           ),
         );
 
-        await markManyDownloaded([info.markerKey, ...extraMarkerKeys]);
+        await markManyDownloaded([
+          if (markAlbumKey) info.markerKey,
+          ...extraMarkerKeys,
+        ]);
         _schedulePostDownloadSync();
       } catch (e) {
         final rawMsg = e.toString();
@@ -969,6 +1004,7 @@ class DownloadManager extends ChangeNotifier {
     MediaInfo info,
     MediaFormatOption option, {
     List<String> extraMarkerKeys = const [],
+    bool markAlbumKey = true,
   }) async {
     if (_isDisposed || _isTaskCancelled(taskId)) return;
 
@@ -1281,7 +1317,10 @@ class DownloadManager extends ChangeNotifier {
           ),
         );
 
-        await markManyDownloaded([info.markerKey, ...extraMarkerKeys]);
+        await markManyDownloaded([
+          if (markAlbumKey) info.markerKey,
+          ...extraMarkerKeys,
+        ]);
         _schedulePostDownloadSync();
       } else {
         final firstErr = failedSubs.isNotEmpty

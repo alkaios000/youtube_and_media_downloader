@@ -350,33 +350,56 @@ class _DownloaderScreenState extends State<DownloaderScreen> {
                     },
                     onUnmarkKeys: (keys) async {
                       await manager.unmarkMany(keys);
-                      _showSnack('Penandaan album pada daftar ini dihapus.');
+                      _showSnack('Penandaan terpilih berhasil dihapus.');
+                    },
+                    onMarkKeys: (keys) async {
+                      await manager.markManyDownloaded(keys);
                     },
                     onDismiss: manager.clearPreview,
                     onDownloadOption: (selected) async {
+                      if (preview.platform == MediaPlatform.pixiv &&
+                          manager.isMarkedDownloaded(preview.markerKey)) {
+                        _showSnack(
+                          'Karya Pixiv ini sudah ditandai terunduh. Hapus tanda dulu untuk mengunduh ulang.',
+                        );
+                        return;
+                      }
                       await manager.startDownload(preview, selected);
                       manager.clearPreview();
                       widget.urlController.clear();
                       _showSnack('Mulai mengunduh ${selected.label}...');
                     },
                     onDownloadSelectedPhotos: (selected) async {
-                      await manager.downloadSelectedPhotos(preview, selected);
+                      final started =
+                          await manager.downloadSelectedPhotos(preview, selected);
+                      if (started == 0) {
+                        _showSnack(
+                          'Semua foto terpilih sudah ditandai terunduh. Hapus tanda dulu untuk mengunduh ulang.',
+                        );
+                        return;
+                      }
                       manager.clearPreview();
                       widget.urlController.clear();
                       _showSnack(
-                        'Mulai mengunduh ${selected.length} foto terpilih...',
+                        'Mulai mengunduh $started foto terpilih...',
                       );
                     },
                     onDownloadBulkProfile: (selected, audioOnly) async {
-                      await manager.startBulkDownloads(
+                      final started = await manager.startBulkDownloads(
                         preview,
                         selected,
                         audioOnly: audioOnly,
                       );
+                      if (started == 0) {
+                        _showSnack(
+                          'Semua karya terpilih sudah ditandai terunduh. Hapus tanda dulu untuk mengunduh ulang.',
+                        );
+                        return;
+                      }
                       manager.clearPreview();
                       widget.urlController.clear();
                       _showSnack(
-                        'Antrean unduh massal dimulai (${selected.length} media)...',
+                        'Antrean unduh massal dimulai ($started media)...',
                       );
                     },
                   ),

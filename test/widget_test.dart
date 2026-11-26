@@ -1,8 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:linkdrop_downloader/models/media_info.dart';
+import 'package:linkdrop_downloader/models/media_platform.dart';
 import 'package:linkdrop_downloader/screens/home_shell.dart';
 import 'package:linkdrop_downloader/services/download_manager.dart';
 import 'package:linkdrop_downloader/theme/app_theme.dart';
+import 'package:linkdrop_downloader/widgets/media_preview_card.dart';
 
 void main() {
   testWidgets('all_download simplified UI has 4 tabs and live link detection',
@@ -55,5 +58,111 @@ void main() {
     expect(find.text('File Unduhan'), findsOneWidget);
 
     manager.dispose();
+  });
+
+  testWidgets('Pixiv marked items cannot be checked/downloaded until unmarked (single or bulk)',
+      (WidgetTester tester) async {
+    final markers = <String>{'pixiv:101', 'pixiv:102'};
+    List<SelectableMediaItem>? downloadedBulk;
+
+    final pixivProfile = MediaInfo(
+      originalUrl: 'https://www.pixiv.net/users/11',
+      platform: MediaPlatform.pixiv,
+      title: 'Karya Artist (3 karya)',
+      author: 'Artist',
+      extractorLabel: 'Pixiv',
+      options: const [],
+      isBulkProfile: true,
+      selectableItems: const [
+        SelectableMediaItem(
+          id: 'w1',
+          title: 'Work 101',
+          sourcePostUrl: 'https://www.pixiv.net/artworks/101',
+          extension: 'jpg',
+          kind: MediaKind.image,
+          engine: DownloadEngine.directHttp,
+          badgeLabel: '1 Hal',
+          pixivIllustId: '101',
+        ),
+        SelectableMediaItem(
+          id: 'w2',
+          title: 'Work 102',
+          sourcePostUrl: 'https://www.pixiv.net/artworks/102',
+          extension: 'jpg',
+          kind: MediaKind.image,
+          engine: DownloadEngine.directHttp,
+          badgeLabel: '2 Hal',
+          pixivIllustId: '102',
+        ),
+        SelectableMediaItem(
+          id: 'w3',
+          title: 'Work 103',
+          sourcePostUrl: 'https://www.pixiv.net/artworks/103',
+          extension: 'jpg',
+          kind: MediaKind.image,
+          engine: DownloadEngine.directHttp,
+          badgeLabel: '3 Hal',
+          pixivIllustId: '103',
+        ),
+      ],
+    );
+
+    await tester.pumpWidget(
+      StatefulBuilder(
+        builder: (context, setOuterState) {
+          return MaterialApp(
+            theme: AppTheme.darkTheme(),
+            home: Scaffold(
+              body: SingleChildScrollView(
+                child: MediaPreviewCard(
+                  info: pixivProfile,
+                  initialOption: null,
+                  isDownloaded: (key) => markers.contains(key),
+                  onUnmarkKey: (key) async => setOuterState(() => markers.remove(key)),
+                  onUnmarkKeys: (keys) async =>
+                      setOuterState(() => markers.removeAll(keys)),
+                  onDownloadOption: (_) {},
+                  onDownloadSelectedPhotos: (_) {},
+                  onDownloadBulkProfile: (chosen, _) => downloadedBulk = chosen,
+                  onDismiss: () {},
+                ),
+              ),
+            ),
+          );
+        },
+      ),
+    );
+    await tester.pump();
+
+    // Only the 1 unmarked work (Work 103) is selected; marked items (101, 102) are locked!
+    expect(find.text('1 / 1 dipilih'), findsOneWidget);
+    expect(find.text('Unduh Massal (1 Media)'), findsOneWidget);
+
+    // Tapping a marked tile ('1 Hal' / Work 101) MUST NOT select it!
+    await tester.tap(find.text('1 Hal'));
+    await tester.pump();
+    expect(find.text('1 / 1 dipilih'), findsOneWidget);
+
+    // Enter Bulk Unmark Mode -> Select All Marked -> Remove selected markers!
+    await tester.tap(find.text('Hapus Tanda Massal'));
+    await tester.pump();
+    expect(find.text('Mode Hapus Penanda (0 / 2 dipilih)'), findsOneWidget);
+
+    await tester.tap(find.text('Pilih Semua Tanda (2)'));
+    await tester.pump();
+    expect(find.text('Hapus 2 Penanda'), findsOneWidget);
+
+    await tester.tap(find.text('Hapus 2 Penanda'));
+    await tester.pump();
+    expect(markers, isEmpty);
+
+    // Now all 3 items are unlocked and can be selected & downloaded!
+    await tester.tap(find.text('Pilih Semua'));
+    await tester.pump();
+    expect(find.text('3 / 3 dipilih'), findsOneWidget);
+
+    await tester.tap(find.text('Unduh Massal (3 Media)'));
+    await tester.pump();
+    expect(downloadedBulk?.length, 3);
   });
 }

@@ -17,6 +17,7 @@ class MediaPreviewCard extends StatefulWidget {
   final bool Function(String markerKey) isDownloaded;
   final Future<void> Function(String markerKey)? onUnmarkKey;
   final Future<void> Function(Iterable<String> markerKeys)? onUnmarkKeys;
+  final Future<void> Function(Iterable<String> markerKeys)? onMarkKeys;
 
   const MediaPreviewCard({
     super.key,
@@ -29,6 +30,7 @@ class MediaPreviewCard extends StatefulWidget {
     this.isDownloaded = _neverDownloaded,
     this.onUnmarkKey,
     this.onUnmarkKeys,
+    this.onMarkKeys,
   });
 
   @override
@@ -38,7 +40,23 @@ class MediaPreviewCard extends StatefulWidget {
 class _MediaPreviewCardState extends State<MediaPreviewCard> {
   MediaFormatOption? _selectedOption;
   final Set<String> _selectedIds = {};
+  final Set<String> _unmarkSelectedIds = {};
   bool _bulkAudioOnly = false;
+  bool _isUnmarkMode = false;
+
+  bool get _strictLockMarked => widget.info.platform == MediaPlatform.pixiv;
+
+  bool _isItemMarked(SelectableMediaItem item) {
+    if (widget.info.isBulkProfile) {
+      return widget.isDownloaded(item.markerKey);
+    }
+    return widget.isDownloaded(item.markerKey) ||
+        widget.isDownloaded(widget.info.markerKey);
+  }
+
+  bool _isItemLocked(SelectableMediaItem item) {
+    return _strictLockMarked && _isItemMarked(item);
+  }
 
   @override
   void initState() {
@@ -51,6 +69,8 @@ class _MediaPreviewCardState extends State<MediaPreviewCard> {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.info.originalUrl != widget.info.originalUrl) {
       _resetSelection();
+    } else {
+      _pruneSelections();
     }
   }
 
@@ -58,29 +78,171 @@ class _MediaPreviewCardState extends State<MediaPreviewCard> {
     _selectedOption = widget.initialOption ??
         (widget.info.options.isNotEmpty ? widget.info.options.first : null);
     _selectedIds.clear();
+    _unmarkSelectedIds.clear();
+    _isUnmarkMode = false;
+    _bulkAudioOnly = false;
+
     final items = widget.info.selectableItems;
-    if (widget.info.isBulkProfile) {
-      // Pre-select only NOT-yet-downloaded albums/media so revisiting a profile
-      // makes grabbing new releases 1-tap without re-downloading old albums!
+    if (widget.info.isBulkProfile || _strictLockMarked) {
+      // Never pre-select already downloaded items (and on Pixiv, marked items are strictly locked!)
       for (final item in items) {
-        if (!widget.isDownloaded(item.markerKey)) {
+        if (!_isItemMarked(item)) {
           _selectedIds.add(item.id);
         }
       }
     } else {
-      final undownloaded =
-          items.where((e) => !widget.isDownloaded(e.markerKey)).toList();
+      final undownloaded = items.where((e) => !_isItemMarked(e)).toList();
       if (undownloaded.isNotEmpty && undownloaded.length < items.length) {
         _selectedIds.addAll(undownloaded.map((e) => e.id));
       } else {
         _selectedIds.addAll(items.map((e) => e.id));
       }
     }
-    _bulkAudioOnly = false;
+  }
+
+  void _pruneSelections() {
+    final items = widget.info.selectableItems;
+    if (_strictLockMarked) {
+      for (final item in items) {
+        if (_isItemLocked(item)) {
+          _selectedIds.remove(item.id);
+        }
+      }
+    }
+    final markedIds = items.where(_isItemMarked).map((e) => e.id).toSet();
+    _unmarkSelectedIds.removeWhere((id) => !markedIds.contains(id));
+    if (markedIds.isEmpty && _isUnmarkMode) {
+      _isUnmarkMode = false;
+    }
+  }
+
+  Future<void> _unmarkSingleItem(SelectableMediaItem item) async {
+    if (widget.info.isBulkProfile) {
+      await widget.onUnmarkKey?.call(item.markerKey);
+      return;
+    }
+
+    // For multi-photo post: if the whole album key was marked, split it into
+    // remaining pages so ONLY this specific photo becomes unlocked!
+    if (widget.isDownloaded(widget.info.markerKey)) {
+      final remainingKeys = widget.info.selectableItems
+          .where((e) => e.id != item.id && e.markerKey.isNotEmpty)
+          .map((e) => e.markerKey)
+          .toList();
+      await widget.onUnmarkKeys?.call([widget.info.markerKey, item.markerKey]);
+      if (remainingKeys.isNotEmpty) {
+        await widget.onMarkKeys?.call(remainingKeys);
+      }
+    } else {
+      await widget.onUnmarkKey?.call(item.markerKey);
+    }
+  }
+
+  Future<void> _executeBulkUnmarkSelected(List<SelectableMediaItem> items) async {
+    if (_unmarkSelectedIds.isEmpty) return;
+    final chosenItems =
+        items.where((e) => _unmarkSelectedIds.contains(e.id)).toList();
+    if (chosenItems.isEmpty) return;
+
+    if (widget.info.isBulkProfile) {
+      final keys = chosenItems.map((e) => e.markerKey).toList();
+      await widget.onUnmarkKeys?.call(keys);
+    } else {
+      final chosenIds = chosenItems.map((e) => e.id).toSet();
+      final keysToRemove = <String>[
+        ...chosenItems.map((e) => e.markerKey),
+        if (widget.isDownloaded(widget.info.markerKey)) widget.info.markerKey,
+      ];
+      final remainingMarkedKeys = items
+          .where((e) => !chosenIds.contains(e.id) && _isItemMarked(e))
+          .map((e) => e.markerKey)
+          .toList();
+      await widget.onUnmarkKeys?.call(keysToRemove);
+      if (widget.isDownloaded(widget.info.markerKey) &&
+          remainingMarkedKeys.isNotEmpty) {
+        await widget.onMarkKeys?.call(remainingMarkedKeys);
+      }
+    }
+
+    if (!mounted) return;
+    setState(() {
+      _unmarkSelectedIds.clear();
+      _isUnmarkMode = false;
+    });
+  }
+
+  Future<void> _confirmUnmarkAll(
+    BuildContext context,
+    List<SelectableMediaItem> items,
+    int downloadedCount,
+  ) async {
+    final keysToRemove = <String>[
+      if (!widget.info.isBulkProfile && widget.info.markerKey.isNotEmpty)
+        widget.info.markerKey,
+      ...items.where(_isItemMarked).map((e) => e.markerKey),
+    ];
+    if (keysToRemove.isEmpty) return;
+
+    if (downloadedCount == 1) {
+      await widget.onUnmarkKeys?.call(keysToRemove);
+      if (mounted) {
+        setState(() {
+          _unmarkSelectedIds.clear();
+          _isUnmarkMode = false;
+        });
+      }
+      return;
+    }
+
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Hapus Semua Penandaan?'),
+        content: Text(
+          'Hapus tanda "Sudah diunduh" dari semua $downloadedCount media di daftar ini? File yang sudah tersimpan di HP tidak ikut terhapus.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Batal'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            style: FilledButton.styleFrom(
+              backgroundColor: Theme.of(ctx).colorScheme.error,
+            ),
+            child: const Text('Hapus Semua Tanda'),
+          ),
+        ],
+      ),
+    );
+    if (ok == true) {
+      await widget.onUnmarkKeys?.call(keysToRemove);
+      if (mounted) {
+        setState(() {
+          _unmarkSelectedIds.clear();
+          _isUnmarkMode = false;
+        });
+      }
+    }
+  }
+
+  void _showLockedHint(BuildContext context) {
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        const SnackBar(
+          duration: Duration(seconds: 2),
+          content: Text(
+            'Sudah tertandai terunduh — tidak bisa dicentang. Hapus tanda dulu (ketuk badge hijau atau Hapus Tanda Massal).',
+          ),
+        ),
+      );
   }
 
   @override
   Widget build(BuildContext context) {
+    _pruneSelections();
     if (widget.info.isBulkProfile) {
       return _buildBulkProfileCard(context);
     }
@@ -97,13 +259,17 @@ class _MediaPreviewCardState extends State<MediaPreviewCard> {
     final theme = Theme.of(context);
     final info = widget.info;
     final items = info.selectableItems;
-    final allSelected = _selectedIds.length == items.length && items.isNotEmpty;
     final hasVideoItems = items.any((i) => i.kind == MediaKind.video);
 
-    final downloadedItems =
-        items.where((e) => widget.isDownloaded(e.markerKey)).toList();
+    final downloadedItems = items.where(_isItemMarked).toList();
     final downloadedCount = downloadedItems.length;
-    final undownloadedCount = items.length - downloadedCount;
+    final eligibleItems = items.where((e) => !_isItemLocked(e)).toList();
+    final undownloadedItems = items.where((e) => !_isItemMarked(e)).toList();
+
+    final allEligibleSelected = eligibleItems.isNotEmpty &&
+        eligibleItems.every((e) => _selectedIds.contains(e.id));
+    final allMarkedSelectedForUnmark = downloadedItems.isNotEmpty &&
+        downloadedItems.every((e) => _unmarkSelectedIds.contains(e.id));
 
     return Card(
       clipBehavior: Clip.antiAlias,
@@ -145,93 +311,130 @@ class _MediaPreviewCardState extends State<MediaPreviewCard> {
 
             if (downloadedCount > 0) ...[
               const SizedBox(height: 10),
-              _DownloadedNoticeStrip(
-                message: '$downloadedCount dari ${items.length} media sudah pernah diunduh',
-                actionLabel: 'Hapus Tanda',
-                onClear: widget.onUnmarkKeys != null
-                    ? () => _confirmUnmarkBulk(
-                          context,
-                          downloadedItems.map((e) => e.markerKey).toList(),
-                          downloadedCount,
-                        )
-                    : null,
-              ),
-            ],
-
-            const SizedBox(height: 12),
-
-            // Select All / Select Only New / Count
-            Wrap(
-              spacing: 8,
-              runSpacing: 8,
-              crossAxisAlignment: WrapCrossAlignment.center,
-              children: [
-                FilledButton.tonalIcon(
-                  onPressed: () {
+              if (_isUnmarkMode)
+                _UnmarkModeBanner(
+                  selectedCount: _unmarkSelectedIds.length,
+                  totalMarked: downloadedCount,
+                  allMarkedSelected: allMarkedSelectedForUnmark,
+                  onToggleSelectAllMarked: () {
                     setState(() {
-                      if (allSelected) {
-                        _selectedIds.clear();
+                      if (allMarkedSelectedForUnmark) {
+                        _unmarkSelectedIds.clear();
                       } else {
-                        _selectedIds.addAll(items.map((e) => e.id));
+                        _unmarkSelectedIds
+                          ..clear()
+                          ..addAll(downloadedItems.map((e) => e.id));
                       }
                     });
                   },
-                  style: FilledButton.styleFrom(
-                    visualDensity: VisualDensity.compact,
-                  ),
-                  icon: Icon(
-                    allSelected ? Icons.deselect_rounded : Icons.select_all_rounded,
-                    size: 17,
-                  ),
-                  label: Text(allSelected ? 'Batal Semua' : 'Pilih Semua'),
+                  onDone: () => setState(() {
+                    _isUnmarkMode = false;
+                    _unmarkSelectedIds.clear();
+                  }),
+                )
+              else
+                _DownloadedNoticeStrip(
+                  message: _strictLockMarked
+                      ? '$downloadedCount/${items.length} sudah diunduh (terkunci dari unduh ulang)'
+                      : '$downloadedCount dari ${items.length} media sudah pernah diunduh',
+                  showBulkPickBtn: downloadedCount > 1 && widget.onUnmarkKeys != null,
+                  onPickBulkUnmark: () {
+                    setState(() {
+                      _isUnmarkMode = true;
+                      _unmarkSelectedIds.clear();
+                    });
+                  },
+                  onClearAll: widget.onUnmarkKeys != null
+                      ? () => _confirmUnmarkAll(context, items, downloadedCount)
+                      : null,
                 ),
-                if (downloadedCount > 0 && undownloadedCount > 0)
-                  OutlinedButton.icon(
-                    onPressed: () {
-                      setState(() {
-                        _selectedIds
-                          ..clear()
-                          ..addAll(
-                            items
-                                .where((e) => !widget.isDownloaded(e.markerKey))
-                                .map((e) => e.id),
-                          );
-                      });
-                    },
-                    style: OutlinedButton.styleFrom(
+            ],
+
+            if (!_isUnmarkMode) ...[
+              const SizedBox(height: 12),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                crossAxisAlignment: WrapCrossAlignment.center,
+                children: [
+                  FilledButton.tonalIcon(
+                    onPressed: eligibleItems.isEmpty
+                        ? null
+                        : () {
+                            setState(() {
+                              if (allEligibleSelected) {
+                                _selectedIds.clear();
+                              } else {
+                                _selectedIds
+                                  ..clear()
+                                  ..addAll(eligibleItems.map((e) => e.id));
+                              }
+                            });
+                          },
+                    style: FilledButton.styleFrom(
                       visualDensity: VisualDensity.compact,
                     ),
-                    icon: const Icon(Icons.fiber_new_rounded, size: 17),
-                    label: Text('Belum ($undownloadedCount)'),
+                    icon: Icon(
+                      allEligibleSelected
+                          ? Icons.deselect_rounded
+                          : Icons.select_all_rounded,
+                      size: 17,
+                    ),
+                    label: Text(
+                      allEligibleSelected
+                          ? 'Batal Semua'
+                          : (_strictLockMarked && downloadedCount > 0
+                              ? 'Pilih Belum (${eligibleItems.length})'
+                              : 'Pilih Semua'),
+                    ),
                   ),
-                Text(
-                  '${_selectedIds.length} / ${items.length} dipilih',
-                  style: theme.textTheme.labelMedium?.copyWith(
-                    color: theme.colorScheme.primary,
-                    fontWeight: FontWeight.w700,
-                  ),
-                ),
-              ],
-            ),
-
-            if (hasVideoItems && info.platform != MediaPlatform.pixiv) ...[
-              const SizedBox(height: 10),
-              SegmentedButton<bool>(
-                segments: const [
-                  ButtonSegment(
-                    value: false,
-                    icon: Icon(Icons.videocam_rounded, size: 17),
-                    label: Text('Video MP4'),
-                  ),
-                  ButtonSegment(
-                    value: true,
-                    icon: Icon(Icons.audiotrack_rounded, size: 17),
-                    label: Text('Audio MP3'),
+                  if (!_strictLockMarked &&
+                      downloadedCount > 0 &&
+                      undownloadedItems.isNotEmpty)
+                    OutlinedButton.icon(
+                      onPressed: () {
+                        setState(() {
+                          _selectedIds
+                            ..clear()
+                            ..addAll(undownloadedItems.map((e) => e.id));
+                        });
+                      },
+                      style: OutlinedButton.styleFrom(
+                        visualDensity: VisualDensity.compact,
+                      ),
+                      icon: const Icon(Icons.fiber_new_rounded, size: 17),
+                      label: Text('Belum (${undownloadedItems.length})'),
+                    ),
+                  Text(
+                    '${_selectedIds.length} / ${eligibleItems.length} dipilih',
+                    style: theme.textTheme.labelMedium?.copyWith(
+                      color: theme.colorScheme.primary,
+                      fontWeight: FontWeight.w700,
+                    ),
                   ),
                 ],
-                selected: {_bulkAudioOnly},
-                onSelectionChanged: (s) => setState(() => _bulkAudioOnly = s.first),
               ),
+
+              if (hasVideoItems && info.platform != MediaPlatform.pixiv) ...[
+                const SizedBox(height: 10),
+                SegmentedButton<bool>(
+                  segments: const [
+                    ButtonSegment(
+                      value: false,
+                      icon: Icon(Icons.videocam_rounded, size: 17),
+                      label: Text('Video MP4'),
+                    ),
+                    ButtonSegment(
+                      value: true,
+                      icon: Icon(Icons.audiotrack_rounded, size: 17),
+                      label: Text('Audio MP3'),
+                    ),
+                  ],
+                  selected: {_bulkAudioOnly},
+                  onSelectionChanged: (s) =>
+                      setState(() => _bulkAudioOnly = s.first),
+                ),
+              ],
             ],
 
             const SizedBox(height: 12),
@@ -243,69 +446,91 @@ class _MediaPreviewCardState extends State<MediaPreviewCard> {
             ),
 
             const SizedBox(height: 14),
-            SizedBox(
-              height: 50,
-              child: FilledButton.icon(
-                onPressed: _selectedIds.isEmpty
-                    ? null
-                    : () {
-                        final chosen = items
-                            .where((e) => _selectedIds.contains(e.id))
-                            .toList();
-                        widget.onDownloadBulkProfile(chosen, _bulkAudioOnly);
-                      },
-                style: FilledButton.styleFrom(
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(14),
+            if (_isUnmarkMode)
+              Row(
+                children: [
+                  Expanded(
+                    child: SizedBox(
+                      height: 48,
+                      child: FilledButton.icon(
+                        onPressed: _unmarkSelectedIds.isEmpty
+                            ? null
+                            : () => _executeBulkUnmarkSelected(items),
+                        style: FilledButton.styleFrom(
+                          backgroundColor: theme.colorScheme.error,
+                          foregroundColor: Colors.white,
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(14),
+                          ),
+                        ),
+                        icon: const Icon(Icons.bookmark_remove_rounded),
+                        label: Text(
+                          'Hapus ${_unmarkSelectedIds.length} Penanda',
+                          style: const TextStyle(
+                            fontSize: 14.5,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                      ),
+                    ),
                   ),
-                ),
-                icon: const Icon(Icons.download_for_offline_rounded),
-                label: Text(
-                  'Unduh Massal (${_selectedIds.length} Media)',
-                  style: const TextStyle(
-                    fontSize: 15,
-                    fontWeight: FontWeight.w700,
+                  const SizedBox(width: 8),
+                  SizedBox(
+                    height: 48,
+                    child: OutlinedButton(
+                      onPressed: () =>
+                          _confirmUnmarkAll(context, items, downloadedCount),
+                      style: OutlinedButton.styleFrom(
+                        foregroundColor: theme.colorScheme.error,
+                        side: BorderSide(color: theme.colorScheme.error),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(14),
+                        ),
+                      ),
+                      child: const Text('Semua'),
+                    ),
+                  ),
+                ],
+              )
+            else
+              SizedBox(
+                height: 50,
+                child: FilledButton.icon(
+                  onPressed: _selectedIds.isEmpty
+                      ? null
+                      : () {
+                          final chosen = items
+                              .where((e) =>
+                                  _selectedIds.contains(e.id) &&
+                                  !_isItemLocked(e))
+                              .toList();
+                          if (chosen.isEmpty) {
+                            _showLockedHint(context);
+                            return;
+                          }
+                          widget.onDownloadBulkProfile(chosen, _bulkAudioOnly);
+                        },
+                  style: FilledButton.styleFrom(
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(14),
+                    ),
+                  ),
+                  icon: const Icon(Icons.download_for_offline_rounded),
+                  label: Text(
+                    eligibleItems.isEmpty && _strictLockMarked
+                        ? 'Semua Sudah Diunduh (Hapus Tanda Dulu)'
+                        : 'Unduh Massal (${_selectedIds.length} Media)',
+                    style: const TextStyle(
+                      fontSize: 14.5,
+                      fontWeight: FontWeight.w700,
+                    ),
                   ),
                 ),
               ),
-            ),
           ],
         ),
       ),
     );
-  }
-
-  Future<void> _confirmUnmarkBulk(
-    BuildContext context,
-    List<String> keys,
-    int count,
-  ) async {
-    if (count == 1) {
-      await widget.onUnmarkKeys?.call(keys);
-      return;
-    }
-    final ok = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Hapus Penandaan?'),
-        content: Text(
-          'Hapus tanda "Sudah diunduh" dari $count media pada daftar ini? File yang sudah tersimpan di perangkat tidak ikut terhapus.',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, false),
-            child: const Text('Batal'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(ctx, true),
-            child: const Text('Hapus Tanda'),
-          ),
-        ],
-      ),
-    );
-    if (ok == true) {
-      await widget.onUnmarkKeys?.call(keys);
-    }
   }
 
   // =========================================================================
@@ -315,9 +540,16 @@ class _MediaPreviewCardState extends State<MediaPreviewCard> {
     final theme = Theme.of(context);
     final info = widget.info;
     final items = info.selectableItems;
-    final allSelected = _selectedIds.length == items.length && items.isNotEmpty;
     final extraOptions = info.options.where((o) => !o.isImage).toList();
-    final albumAlreadyDownloaded = widget.isDownloaded(info.markerKey);
+
+    final downloadedItems = items.where(_isItemMarked).toList();
+    final downloadedCount = downloadedItems.length;
+    final eligibleItems = items.where((e) => !_isItemLocked(e)).toList();
+
+    final allEligibleSelected = eligibleItems.isNotEmpty &&
+        eligibleItems.every((e) => _selectedIds.contains(e.id));
+    final allMarkedSelectedForUnmark = downloadedItems.isNotEmpty &&
+        downloadedItems.every((e) => _unmarkSelectedIds.contains(e.id));
 
     return Card(
       clipBehavior: Clip.antiAlias,
@@ -359,53 +591,88 @@ class _MediaPreviewCardState extends State<MediaPreviewCard> {
               ),
             ),
 
-            if (albumAlreadyDownloaded) ...[
+            if (downloadedCount > 0) ...[
               const SizedBox(height: 10),
-              _DownloadedNoticeStrip(
-                message: 'Album ini sudah pernah diunduh',
-                actionLabel: 'Hapus Tanda',
-                onClear: widget.onUnmarkKeys != null
-                    ? () => widget.onUnmarkKeys!([
-                          info.markerKey,
-                          ...items.map((e) => e.markerKey),
-                        ])
-                    : (widget.onUnmarkKey != null
-                        ? () => widget.onUnmarkKey!(info.markerKey)
-                        : null),
-              ),
-            ],
-
-            const SizedBox(height: 12),
-            Row(
-              children: [
-                Text(
-                  'Pilih Foto (${_selectedIds.length}/${items.length})',
-                  style: theme.textTheme.labelLarge?.copyWith(
-                    fontWeight: FontWeight.w700,
-                  ),
-                ),
-                const Spacer(),
-                TextButton.icon(
-                  onPressed: () {
+              if (_isUnmarkMode)
+                _UnmarkModeBanner(
+                  selectedCount: _unmarkSelectedIds.length,
+                  totalMarked: downloadedCount,
+                  allMarkedSelected: allMarkedSelectedForUnmark,
+                  onToggleSelectAllMarked: () {
                     setState(() {
-                      if (allSelected) {
-                        _selectedIds.clear();
+                      if (allMarkedSelectedForUnmark) {
+                        _unmarkSelectedIds.clear();
                       } else {
-                        _selectedIds.addAll(items.map((e) => e.id));
+                        _unmarkSelectedIds
+                          ..clear()
+                          ..addAll(downloadedItems.map((e) => e.id));
                       }
                     });
                   },
-                  style: TextButton.styleFrom(
-                    visualDensity: VisualDensity.compact,
-                  ),
-                  icon: Icon(
-                    allSelected ? Icons.deselect_rounded : Icons.select_all_rounded,
-                    size: 17,
-                  ),
-                  label: Text(allSelected ? 'Reset' : 'Pilih Semua'),
+                  onDone: () => setState(() {
+                    _isUnmarkMode = false;
+                    _unmarkSelectedIds.clear();
+                  }),
+                )
+              else
+                _DownloadedNoticeStrip(
+                  message: downloadedCount == items.length
+                      ? (_strictLockMarked
+                          ? 'Album ini sudah diunduh (terkunci)'
+                          : 'Album ini sudah pernah diunduh')
+                      : '$downloadedCount/${items.length} foto sudah diunduh',
+                  showBulkPickBtn: downloadedCount > 1 && widget.onUnmarkKeys != null,
+                  onPickBulkUnmark: () {
+                    setState(() {
+                      _isUnmarkMode = true;
+                      _unmarkSelectedIds.clear();
+                    });
+                  },
+                  onClearAll: widget.onUnmarkKeys != null
+                      ? () => _confirmUnmarkAll(context, items, downloadedCount)
+                      : null,
                 ),
-              ],
-            ),
+            ],
+
+            if (!_isUnmarkMode) ...[
+              const SizedBox(height: 12),
+              Row(
+                children: [
+                  Text(
+                    'Pilih Foto (${_selectedIds.length}/${eligibleItems.length})',
+                    style: theme.textTheme.labelLarge?.copyWith(
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                  const Spacer(),
+                  TextButton.icon(
+                    onPressed: eligibleItems.isEmpty
+                        ? null
+                        : () {
+                            setState(() {
+                              if (allEligibleSelected) {
+                                _selectedIds.clear();
+                              } else {
+                                _selectedIds
+                                  ..clear()
+                                  ..addAll(eligibleItems.map((e) => e.id));
+                              }
+                            });
+                          },
+                    style: TextButton.styleFrom(
+                      visualDensity: VisualDensity.compact,
+                    ),
+                    icon: Icon(
+                      allEligibleSelected
+                          ? Icons.deselect_rounded
+                          : Icons.select_all_rounded,
+                      size: 17,
+                    ),
+                    label: Text(allEligibleSelected ? 'Reset' : 'Pilih Semua'),
+                  ),
+                ],
+              ),
+            ],
             const SizedBox(height: 8),
 
             _buildAdaptiveSelectableGrid(
@@ -415,32 +682,87 @@ class _MediaPreviewCardState extends State<MediaPreviewCard> {
             ),
 
             const SizedBox(height: 14),
-            SizedBox(
-              height: 48,
-              child: FilledButton.icon(
-                onPressed: _selectedIds.isEmpty
-                    ? null
-                    : () {
-                        final chosen = items
-                            .where((e) => _selectedIds.contains(e.id))
-                            .toList();
-                        widget.onDownloadSelectedPhotos(chosen);
-                      },
-                style: FilledButton.styleFrom(
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(14),
+            if (_isUnmarkMode)
+              Row(
+                children: [
+                  Expanded(
+                    child: SizedBox(
+                      height: 48,
+                      child: FilledButton.icon(
+                        onPressed: _unmarkSelectedIds.isEmpty
+                            ? null
+                            : () => _executeBulkUnmarkSelected(items),
+                        style: FilledButton.styleFrom(
+                          backgroundColor: theme.colorScheme.error,
+                          foregroundColor: Colors.white,
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(14),
+                          ),
+                        ),
+                        icon: const Icon(Icons.bookmark_remove_rounded),
+                        label: Text(
+                          'Hapus ${_unmarkSelectedIds.length} Penanda',
+                          style: const TextStyle(
+                            fontSize: 14.5,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                      ),
+                    ),
                   ),
-                ),
-                icon: const Icon(Icons.download_rounded),
-                label: Text(
-                  'Unduh ${_selectedIds.length} Foto Terpilih',
-                  style: const TextStyle(
-                    fontSize: 15,
-                    fontWeight: FontWeight.w700,
+                  const SizedBox(width: 8),
+                  SizedBox(
+                    height: 48,
+                    child: OutlinedButton(
+                      onPressed: () =>
+                          _confirmUnmarkAll(context, items, downloadedCount),
+                      style: OutlinedButton.styleFrom(
+                        foregroundColor: theme.colorScheme.error,
+                        side: BorderSide(color: theme.colorScheme.error),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(14),
+                        ),
+                      ),
+                      child: const Text('Semua'),
+                    ),
+                  ),
+                ],
+              )
+            else
+              SizedBox(
+                height: 48,
+                child: FilledButton.icon(
+                  onPressed: _selectedIds.isEmpty
+                      ? null
+                      : () {
+                          final chosen = items
+                              .where((e) =>
+                                  _selectedIds.contains(e.id) &&
+                                  !_isItemLocked(e))
+                              .toList();
+                          if (chosen.isEmpty) {
+                            _showLockedHint(context);
+                            return;
+                          }
+                          widget.onDownloadSelectedPhotos(chosen);
+                        },
+                  style: FilledButton.styleFrom(
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(14),
+                    ),
+                  ),
+                  icon: const Icon(Icons.download_rounded),
+                  label: Text(
+                    eligibleItems.isEmpty && _strictLockMarked
+                        ? 'Semua Foto Sudah Diunduh'
+                        : 'Unduh ${_selectedIds.length} Foto Terpilih',
+                    style: const TextStyle(
+                      fontSize: 14.5,
+                      fontWeight: FontWeight.w700,
+                    ),
                   ),
                 ),
               ),
-            ),
 
             if (extraOptions.isNotEmpty) ...[
               const SizedBox(height: 12),
@@ -474,6 +796,7 @@ class _MediaPreviewCardState extends State<MediaPreviewCard> {
     final selected = _selectedOption ??
         (info.options.isNotEmpty ? info.options.first : null);
     final alreadyDownloaded = widget.isDownloaded(info.markerKey);
+    final lockedForRedownload = _strictLockMarked && alreadyDownloaded;
 
     return Card(
       clipBehavior: Clip.antiAlias,
@@ -566,9 +889,11 @@ class _MediaPreviewCardState extends State<MediaPreviewCard> {
               children: [
                 if (alreadyDownloaded) ...[
                   _DownloadedNoticeStrip(
-                    message: 'Media ini sudah pernah diunduh',
-                    actionLabel: 'Hapus Tanda',
-                    onClear: widget.onUnmarkKey != null
+                    message: lockedForRedownload
+                        ? 'Karya ini sudah diunduh (hapus tanda untuk unduh ulang)'
+                        : 'Media ini sudah pernah diunduh',
+                    showBulkPickBtn: false,
+                    onClearAll: widget.onUnmarkKey != null
                         ? () => widget.onUnmarkKey!(info.markerKey)
                         : null,
                   ),
@@ -698,17 +1023,25 @@ class _MediaPreviewCardState extends State<MediaPreviewCard> {
                     width: double.infinity,
                     height: 50,
                     child: FilledButton.icon(
-                      onPressed: () => widget.onDownloadOption(selected),
+                      onPressed: lockedForRedownload
+                          ? null
+                          : () => widget.onDownloadOption(selected),
                       style: FilledButton.styleFrom(
                         shape: RoundedRectangleBorder(
                           borderRadius: BorderRadius.circular(14),
                         ),
                       ),
-                      icon: const Icon(Icons.download_rounded),
+                      icon: Icon(
+                        lockedForRedownload
+                            ? Icons.lock_rounded
+                            : Icons.download_rounded,
+                      ),
                       label: Text(
-                        'Unduh ${selected.extension.toUpperCase()}',
+                        lockedForRedownload
+                            ? 'Sudah Diunduh (Hapus Tanda Dulu)'
+                            : 'Unduh ${selected.extension.toUpperCase()}',
                         style: const TextStyle(
-                          fontSize: 15,
+                          fontSize: 14.5,
                           fontWeight: FontWeight.w700,
                         ),
                       ),
@@ -745,16 +1078,39 @@ class _MediaPreviewCardState extends State<MediaPreviewCard> {
       itemCount: items.length,
       itemBuilder: (context, index) {
         final item = items[index];
-        final isSelected = _selectedIds.contains(item.id);
-        final isDone = widget.isDownloaded(item.markerKey);
+        final isDone = _isItemMarked(item);
+        final isLocked = _isItemLocked(item);
+        final isSelected = _selectedIds.contains(item.id) && !isLocked;
+        final isPickedForUnmark = _unmarkSelectedIds.contains(item.id);
+
         return _SelectableGridTile(
           item: item,
           selected: isSelected,
           downloaded: isDone,
-          onUnmark: isDone && widget.onUnmarkKey != null
-              ? () => widget.onUnmarkKey!(item.markerKey)
+          locked: isLocked,
+          unmarkMode: _isUnmarkMode,
+          pickedForUnmark: isPickedForUnmark,
+          onUnmark: !_isUnmarkMode && isDone && widget.onUnmarkKey != null
+              ? () => _unmarkSingleItem(item)
               : null,
           onTap: () {
+            if (_isUnmarkMode) {
+              if (!isDone) return;
+              setState(() {
+                if (isPickedForUnmark) {
+                  _unmarkSelectedIds.remove(item.id);
+                } else {
+                  _unmarkSelectedIds.add(item.id);
+                }
+              });
+              return;
+            }
+
+            if (isLocked) {
+              _showLockedHint(context);
+              return;
+            }
+
             setState(() {
               if (isSelected) {
                 _selectedIds.remove(item.id);
@@ -781,7 +1137,9 @@ class _MediaPreviewCardState extends State<MediaPreviewCard> {
         ),
         const SizedBox(height: 6),
         Text(
-          'Geser kotak di atas untuk melihat seluruh ${items.length} media • Ketuk badge hijau untuk hapus tanda',
+          _isUnmarkMode
+              ? 'Ketuk item bertanda hijau untuk dipilih hapus penandaannya'
+              : 'Geser kotak di atas untuk melihat seluruh ${items.length} media • Ketuk badge hijau untuk hapus tanda',
           textAlign: TextAlign.center,
           style: Theme.of(context).textTheme.labelSmall?.copyWith(
                 color: Theme.of(context).colorScheme.onSurfaceVariant,
@@ -805,51 +1163,168 @@ class _MediaPreviewCardState extends State<MediaPreviewCard> {
 
 class _DownloadedNoticeStrip extends StatelessWidget {
   final String message;
-  final String actionLabel;
-  final VoidCallback? onClear;
+  final bool showBulkPickBtn;
+  final VoidCallback? onPickBulkUnmark;
+  final VoidCallback? onClearAll;
 
   const _DownloadedNoticeStrip({
     required this.message,
-    required this.actionLabel,
-    this.onClear,
+    required this.showBulkPickBtn,
+    this.onPickBulkUnmark,
+    this.onClearAll,
   });
 
   @override
   Widget build(BuildContext context) {
     const emerald = Color(0xFF22C55E);
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 7),
+      padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 8),
       decoration: BoxDecoration(
         color: emerald.withValues(alpha: 0.12),
         borderRadius: BorderRadius.circular(11),
         border: Border.all(color: emerald.withValues(alpha: 0.4)),
       ),
-      child: Row(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Icon(Icons.check_circle_rounded, color: emerald, size: 17),
-          const SizedBox(width: 8),
-          Expanded(
-            child: Text(
-              message,
-              style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                    fontWeight: FontWeight.w700,
-                    color: emerald,
-                  ),
-            ),
+          Row(
+            children: [
+              const Icon(Icons.check_circle_rounded, color: emerald, size: 17),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  message,
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                        fontWeight: FontWeight.w700,
+                        color: emerald,
+                      ),
+                ),
+              ),
+            ],
           ),
-          if (onClear != null)
-            TextButton(
-              onPressed: onClear,
-              style: TextButton.styleFrom(
-                visualDensity: VisualDensity.compact,
-                padding: const EdgeInsets.symmetric(horizontal: 8),
-                foregroundColor: Theme.of(context).colorScheme.error,
-              ),
-              child: Text(
-                actionLabel,
-                style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700),
-              ),
+          if (showBulkPickBtn || onClearAll != null) ...[
+            const SizedBox(height: 6),
+            Wrap(
+              spacing: 8,
+              runSpacing: 4,
+              children: [
+                if (showBulkPickBtn && onPickBulkUnmark != null)
+                  OutlinedButton.icon(
+                    onPressed: onPickBulkUnmark,
+                    style: OutlinedButton.styleFrom(
+                      visualDensity: VisualDensity.compact,
+                      padding: const EdgeInsets.symmetric(horizontal: 10),
+                      side: BorderSide(color: emerald.withValues(alpha: 0.6)),
+                      foregroundColor: emerald,
+                    ),
+                    icon: const Icon(Icons.checklist_rtl_rounded, size: 15),
+                    label: const Text(
+                      'Hapus Tanda Massal',
+                      style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700),
+                    ),
+                  ),
+                if (onClearAll != null)
+                  TextButton.icon(
+                    onPressed: onClearAll,
+                    style: TextButton.styleFrom(
+                      visualDensity: VisualDensity.compact,
+                      padding: const EdgeInsets.symmetric(horizontal: 8),
+                      foregroundColor: Theme.of(context).colorScheme.error,
+                    ),
+                    icon: const Icon(Icons.delete_sweep_outlined, size: 16),
+                    label: Text(
+                      showBulkPickBtn ? 'Hapus Semua Tanda' : 'Hapus Tanda',
+                      style: const TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ),
+              ],
             ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _UnmarkModeBanner extends StatelessWidget {
+  final int selectedCount;
+  final int totalMarked;
+  final bool allMarkedSelected;
+  final VoidCallback onToggleSelectAllMarked;
+  final VoidCallback onDone;
+
+  const _UnmarkModeBanner({
+    required this.selectedCount,
+    required this.totalMarked,
+    required this.allMarkedSelected,
+    required this.onToggleSelectAllMarked,
+    required this.onDone,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final err = Theme.of(context).colorScheme.error;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 8),
+      decoration: BoxDecoration(
+        color: err.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(11),
+        border: Border.all(color: err.withValues(alpha: 0.45)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(Icons.bookmark_remove_rounded, color: err, size: 18),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  'Mode Hapus Penanda ($selectedCount / $totalMarked dipilih)',
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                        fontWeight: FontWeight.w800,
+                        color: err,
+                      ),
+                ),
+              ),
+              TextButton(
+                onPressed: onDone,
+                style: TextButton.styleFrom(
+                  visualDensity: VisualDensity.compact,
+                  padding: const EdgeInsets.symmetric(horizontal: 8),
+                ),
+                child: const Text('Batal'),
+              ),
+            ],
+          ),
+          const SizedBox(height: 4),
+          Wrap(
+            spacing: 8,
+            children: [
+              FilledButton.tonalIcon(
+                onPressed: onToggleSelectAllMarked,
+                style: FilledButton.styleFrom(
+                  visualDensity: VisualDensity.compact,
+                  padding: const EdgeInsets.symmetric(horizontal: 10),
+                ),
+                icon: Icon(
+                  allMarkedSelected
+                      ? Icons.deselect_rounded
+                      : Icons.select_all_rounded,
+                  size: 16,
+                ),
+                label: Text(
+                  allMarkedSelected
+                      ? 'Batal Pilih Tanda'
+                      : 'Pilih Semua Tanda ($totalMarked)',
+                  style: const TextStyle(fontSize: 12),
+                ),
+              ),
+            ],
+          ),
         ],
       ),
     );
@@ -860,6 +1335,9 @@ class _SelectableGridTile extends StatelessWidget {
   final SelectableMediaItem item;
   final bool selected;
   final bool downloaded;
+  final bool locked;
+  final bool unmarkMode;
+  final bool pickedForUnmark;
   final VoidCallback? onUnmark;
   final VoidCallback onTap;
 
@@ -867,6 +1345,9 @@ class _SelectableGridTile extends StatelessWidget {
     required this.item,
     required this.selected,
     required this.downloaded,
+    required this.locked,
+    required this.unmarkMode,
+    required this.pickedForUnmark,
     this.onUnmark,
     required this.onTap,
   });
@@ -874,20 +1355,39 @@ class _SelectableGridTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final errColor = theme.colorScheme.error;
+
+    Color borderColor;
+    double borderWidth;
+    if (unmarkMode) {
+      borderColor = pickedForUnmark
+          ? errColor
+          : (downloaded
+              ? const Color(0xFF22C55E).withValues(alpha: 0.75)
+              : theme.colorScheme.outlineVariant.withValues(alpha: 0.4));
+      borderWidth = pickedForUnmark ? 2.4 : 1.2;
+    } else if (selected) {
+      borderColor = theme.colorScheme.primary;
+      borderWidth = 2.2;
+    } else if (downloaded) {
+      borderColor = const Color(0xFF22C55E).withValues(alpha: 0.75);
+      borderWidth = 1.5;
+    } else {
+      borderColor = theme.colorScheme.outlineVariant;
+      borderWidth = 1;
+    }
+
+    final shouldDim = unmarkMode
+        ? (!downloaded || !pickedForUnmark)
+        : (!selected);
+
     return GestureDetector(
       onTap: onTap,
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 140),
         decoration: BoxDecoration(
           borderRadius: BorderRadius.circular(12),
-          border: Border.all(
-            color: selected
-                ? theme.colorScheme.primary
-                : (downloaded
-                    ? const Color(0xFF22C55E).withValues(alpha: 0.75)
-                    : theme.colorScheme.outlineVariant),
-            width: selected ? 2.2 : (downloaded ? 1.5 : 1),
-          ),
+          border: Border.all(color: borderColor, width: borderWidth),
         ),
         clipBehavior: Clip.antiAlias,
         child: Stack(
@@ -905,9 +1405,15 @@ class _SelectableGridTile extends StatelessWidget {
             else
               _gridPlaceholder(theme),
 
-            // Dim overlay when unselected so selection pops immediately
-            if (!selected)
-              Container(color: Colors.black.withValues(alpha: 0.35)),
+            if (shouldDim)
+              Container(
+                color: Colors.black.withValues(
+                  alpha: unmarkMode && !downloaded ? 0.62 : (locked ? 0.48 : 0.32),
+                ),
+              ),
+
+            if (unmarkMode && pickedForUnmark)
+              Container(color: errColor.withValues(alpha: 0.22)),
 
             // Bottom gradient + badge/title
             Positioned(
@@ -939,7 +1445,7 @@ class _SelectableGridTile extends StatelessWidget {
               ),
             ),
 
-            // "✓ Sudah" downloaded marker badge on top-left (tap directly to remove marker!)
+            // "✓ Sudah" downloaded marker badge on top-left
             if (downloaded)
               Positioned(
                 top: 5,
@@ -987,27 +1493,76 @@ class _SelectableGridTile extends StatelessWidget {
                 ),
               ),
 
-            // Checkmark selection indicator on top-right
-            Positioned(
-              top: 5,
-              right: 5,
-              child: Container(
-                width: 23,
-                height: 23,
-                decoration: BoxDecoration(
-                  color: selected
-                      ? theme.colorScheme.primary
-                      : Colors.black.withValues(alpha: 0.5),
-                  shape: BoxShape.circle,
-                  border: Border.all(color: Colors.white, width: 1.5),
+            // Top-right indicator:
+            // - Unmark mode: red checkbox on marked items only
+            // - Locked Pixiv item: clean lock badge (cannot be checked!)
+            // - Normal item: primary checkmark / plus circle
+            if (unmarkMode && downloaded)
+              Positioned(
+                top: 5,
+                right: 5,
+                child: Container(
+                  width: 23,
+                  height: 23,
+                  decoration: BoxDecoration(
+                    color: pickedForUnmark
+                        ? errColor
+                        : Colors.black.withValues(alpha: 0.55),
+                    shape: BoxShape.circle,
+                    border: Border.all(color: Colors.white, width: 1.6),
+                  ),
+                  child: Icon(
+                    pickedForUnmark
+                        ? Icons.delete_outline_rounded
+                        : Icons.radio_button_unchecked_rounded,
+                    size: 14,
+                    color: Colors.white,
+                  ),
                 ),
-                child: Icon(
-                  selected ? Icons.check_rounded : Icons.add_rounded,
-                  size: 14,
-                  color: Colors.white,
+              )
+            else if (!unmarkMode && locked)
+              Positioned(
+                top: 5,
+                right: 5,
+                child: Container(
+                  width: 23,
+                  height: 23,
+                  decoration: BoxDecoration(
+                    color: Colors.black.withValues(alpha: 0.65),
+                    shape: BoxShape.circle,
+                    border: Border.all(
+                      color: const Color(0xFF22C55E),
+                      width: 1.5,
+                    ),
+                  ),
+                  child: const Icon(
+                    Icons.lock_rounded,
+                    size: 13,
+                    color: Color(0xFF22C55E),
+                  ),
+                ),
+              )
+            else if (!unmarkMode)
+              Positioned(
+                top: 5,
+                right: 5,
+                child: Container(
+                  width: 23,
+                  height: 23,
+                  decoration: BoxDecoration(
+                    color: selected
+                        ? theme.colorScheme.primary
+                        : Colors.black.withValues(alpha: 0.5),
+                    shape: BoxShape.circle,
+                    border: Border.all(color: Colors.white, width: 1.5),
+                  ),
+                  child: Icon(
+                    selected ? Icons.check_rounded : Icons.add_rounded,
+                    size: 14,
+                    color: Colors.white,
+                  ),
                 ),
               ),
-            ),
           ],
         ),
       ),
