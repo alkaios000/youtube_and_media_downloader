@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:linkdrop_downloader/models/download_item.dart';
 import 'package:linkdrop_downloader/models/media_info.dart';
 import 'package:linkdrop_downloader/models/media_platform.dart';
+import 'package:linkdrop_downloader/screens/downloads_screen.dart';
 import 'package:linkdrop_downloader/screens/home_shell.dart';
 import 'package:linkdrop_downloader/services/download_manager.dart';
 import 'package:linkdrop_downloader/theme/app_theme.dart';
@@ -230,5 +232,35 @@ void main() {
     // Only the 1 unmarked TikTok reel is selectable; marked reel is locked!
     expect(find.text('1 / 1 dipilih'), findsOneWidget);
     expect(find.text('Unduh Massal (1 Media)'), findsOneWidget);
+  });
+
+  test('sortLoadingDownloads puts actively processing (saving/downloading) above queued & paused', () {
+    DownloadItem makeItem(String id, DownloadStatus status) => DownloadItem(
+          id: id,
+          title: id,
+          author: 'Creator',
+          sourceUrl: 'https://example.com/$id',
+          platform: MediaPlatform.pixiv,
+          mediaKind: MediaKind.image,
+          formatLabel: 'HD',
+          extension: 'jpg',
+          status: status,
+          createdAt: DateTime(2026),
+        );
+
+    final raw = [
+      makeItem('q1', DownloadStatus.queued),
+      makeItem('p1', DownloadStatus.paused),
+      makeItem('d1', DownloadStatus.downloading),
+      makeItem('q2', DownloadStatus.queued),
+      makeItem('s1', DownloadStatus.saving),
+      makeItem('d2', DownloadStatus.downloading),
+    ];
+
+    final sorted = sortLoadingDownloads(raw);
+    expect(
+      sorted.map((e) => e.id).toList(),
+      ['s1', 'd1', 'd2', 'q1', 'q2', 'p1'],
+    );
   });
 }

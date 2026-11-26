@@ -9,10 +9,51 @@ import '../widgets/download_tile.dart';
 
 enum _LibraryFilter { all, video, audio, image }
 
+/// Whether [item] belongs to the "Berjalan / Loading" section of Riwayat.
+bool isLoadingHistoryItem(DownloadItem item) => item.isActive || item.isPaused;
+
+int _loadingPriority(DownloadStatus status) {
+  switch (status) {
+    case DownloadStatus.saving:
+      return 0;
+    case DownloadStatus.downloading:
+      return 1;
+    case DownloadStatus.queued:
+      return 2;
+    case DownloadStatus.paused:
+      return 3;
+    case DownloadStatus.completed:
+    case DownloadStatus.failed:
+    case DownloadStatus.cancelled:
+      return 4;
+  }
+}
+
+/// Orders loading items so actively processing downloads (`saving` / `downloading`)
+/// ALWAYS stay at the very top, followed by `queued` and `paused`, while preserving
+/// stable relative order within each group.
+List<DownloadItem> sortLoadingDownloads(List<DownloadItem> items) {
+  final indexed = items.asMap().entries.toList(growable: false);
+  indexed.sort((a, b) {
+    final pa = _loadingPriority(a.value.status);
+    final pb = _loadingPriority(b.value.status);
+    if (pa != pb) return pa.compareTo(pb);
+    return a.key.compareTo(b.key);
+  });
+  return indexed.map((e) => e.value).toList(growable: false);
+}
+
 class DownloadsScreen extends StatefulWidget {
   final DownloadManager manager;
 
-  const DownloadsScreen({super.key, required this.manager});
+  /// Optional controller: `0` = Berjalan (loading), `1` = Selesai.
+  final ValueNotifier<int>? sectionNotifier;
+
+  const DownloadsScreen({
+    super.key,
+    required this.manager,
+    this.sectionNotifier,
+  });
 
   @override
   State<DownloadsScreen> createState() => _DownloadsScreenState();
@@ -21,29 +62,97 @@ class DownloadsScreen extends StatefulWidget {
 class _DownloadsScreenState extends State<DownloadsScreen> {
   _LibraryFilter _filter = _LibraryFilter.all;
   String _search = '';
+  late int _sectionIndex;
+
+  @override
+  void initState() {
+    super.initState();
+    final hasLoading = widget.manager.items.any(isLoadingHistoryItem);
+    _sectionIndex = widget.sectionNotifier?.value ?? (hasLoading ? 0 : 1);
+    widget.sectionNotifier?.addListener(_onExternalSectionChanged);
+  }
+
+  @override
+  void didUpdateWidget(covariant DownloadsScreen oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.sectionNotifier != widget.sectionNotifier) {
+      oldWidget.sectionNotifier?.removeListener(_onExternalSectionChanged);
+      widget.sectionNotifier?.addListener(_onExternalSectionChanged);
+      if (widget.sectionNotifier != null) {
+        _sectionIndex = widget.sectionNotifier!.value;
+      }
+    }
+  }
+
+  @override
+  void dispose() {
+    widget.sectionNotifier?.removeListener(_onExternalSectionChanged);
+    super.dispose();
+  }
+
+  void _onExternalSectionChanged() {
+    final next = widget.sectionNotifier?.value;
+    if (next != null && next != _sectionIndex && mounted) {
+      setState(() => _sectionIndex = next);
+    }
+  }
+
+  void _selectSection(int next) {
+    if (_sectionIndex == next) return;
+    setState(() => _sectionIndex = next);
+    if (widget.sectionNotifier != null && widget.sectionNotifier!.value != next) {
+      widget.sectionNotifier!.value = next;
+    }
+  }
+
+  bool _matchesFilterAndSearch(DownloadItem item) {
+    final matchesFilter = switch (_filter) {
+      _LibraryFilter.all => true,
+      _LibraryFilter.video => item.mediaKind == MediaKind.video,
+      _LibraryFilter.audio => item.mediaKind == MediaKind.audio,
+      _LibraryFilter.image => item.mediaKind == MediaKind.image,
+    };
+    if (!matchesFilter) return false;
+    if (_search.trim().isEmpty) return true;
+    final q = _search.toLowerCase();
+    return item.title.toLowerCase().contains(q) ||
+        item.author.toLowerCase().contains(q) ||
+        item.platform.label.toLowerCase().contains(q);
+  }
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final allItems = widget.manager.items;
 
-    final filtered = allItems.where((item) {
-      final matchesFilter = switch (_filter) {
-        _LibraryFilter.all => true,
-        _LibraryFilter.video => item.mediaKind == MediaKind.video,
-        _LibraryFilter.audio => item.mediaKind == MediaKind.audio,
-        _LibraryFilter.image => item.mediaKind == MediaKind.image,
-      };
-      if (!matchesFilter) return false;
-      if (_search.trim().isEmpty) return true;
-      final q = _search.toLowerCase();
-      return item.title.toLowerCase().contains(q) ||
-          item.author.toLowerCase().contains(q) ||
-          item.platform.label.toLowerCase().contains(q);
-    }).toList();
+    final allLoading = allItems.where(isLoadingHistoryItem).toList(growable: false);
+    final allFinished =
+        allItems.where((i) => !isLoadingHistoryItem(i)).toList(growable: false);
+
+    final filteredLoading = sortLoadingDownloads(
+      allLoading.where(_matchesFilterAndSearch).toList(growable: false),
+    );
+    final filteredFinished =
+        allFinished.where(_matchesFilterAndSearch).toList(growable: false);
+
+    final processingItems = filteredLoading
+        .where((i) =>
+            i.status == DownloadStatus.saving ||
+            i.status == DownloadStatus.downloading)
+        .toList(growable: false);
+    final queuedItems = filteredLoading
+        .where((i) => i.status == DownloadStatus.queued)
+        .toList(growable: false);
+    final pausedItems = filteredLoading
+        .where((i) => i.status == DownloadStatus.paused)
+        .toList(growable: false);
 
     final activeCount = widget.manager.activeDownloads.length;
     final pausedCount = widget.manager.pausedDownloads.length;
+    final isLoadingTab = _sectionIndex == 0;
+    final currentTotalCount = isLoadingTab ? allLoading.length : allFinished.length;
+    final currentEmpty =
+        isLoadingTab ? filteredLoading.isEmpty : filteredFinished.isEmpty;
 
     return CustomScrollView(
       keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
@@ -67,11 +176,11 @@ class _DownloadsScreenState extends State<DownloadsScreen> {
                 ),
                 tooltip: 'Lanjut Semua ($pausedCount)',
               ),
-            if (widget.manager.historyItems.isNotEmpty)
+            if (allFinished.isNotEmpty)
               IconButton(
                 onPressed: _confirmClearHistory,
                 icon: const Icon(Icons.delete_sweep_outlined),
-                tooltip: 'Bersihkan riwayat',
+                tooltip: 'Bersihkan riwayat selesai',
               ),
           ],
         ),
@@ -79,8 +188,27 @@ class _DownloadsScreenState extends State<DownloadsScreen> {
           child: Padding(
             padding: const EdgeInsets.fromLTRB(16, 4, 16, 12),
             child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
+                // 2-Section Switcher: Loading/Berjalan vs Selesai
+                SegmentedButton<int>(
+                  showSelectedIcon: false,
+                  segments: [
+                    ButtonSegment<int>(
+                      value: 0,
+                      icon: const Icon(Icons.downloading_rounded, size: 18),
+                      label: Text('Berjalan (${allLoading.length})'),
+                    ),
+                    ButtonSegment<int>(
+                      value: 1,
+                      icon: const Icon(Icons.check_circle_outline_rounded, size: 18),
+                      label: Text('Selesai (${allFinished.length})'),
+                    ),
+                  ],
+                  selected: {_sectionIndex},
+                  onSelectionChanged: (s) => _selectSection(s.first),
+                ),
+                const SizedBox(height: 12),
                 TextField(
                   onChanged: (v) => setState(() => _search = v),
                   decoration: const InputDecoration(
@@ -88,13 +216,13 @@ class _DownloadsScreenState extends State<DownloadsScreen> {
                     prefixIcon: Icon(Icons.search_rounded),
                   ),
                 ),
-                const SizedBox(height: 12),
+                const SizedBox(height: 10),
                 SingleChildScrollView(
                   scrollDirection: Axis.horizontal,
                   child: Row(
                     children: [
                       _FilterPill(
-                        label: 'Semua (${allItems.length})',
+                        label: 'Semua ($currentTotalCount)',
                         selected: _filter == _LibraryFilter.all,
                         onTap: () => setState(() => _filter = _LibraryFilter.all),
                       ),
@@ -119,7 +247,7 @@ class _DownloadsScreenState extends State<DownloadsScreen> {
                     ],
                   ),
                 ),
-                if (pausedCount > 0) ...[
+                if (isLoadingTab && pausedCount > 0) ...[
                   const SizedBox(height: 10),
                   Container(
                     padding: const EdgeInsets.symmetric(
@@ -167,7 +295,7 @@ class _DownloadsScreenState extends State<DownloadsScreen> {
             ),
           ),
         ),
-        if (filtered.isEmpty)
+        if (currentEmpty)
           SliverFillRemaining(
             hasScrollBody: false,
             child: Center(
@@ -177,23 +305,31 @@ class _DownloadsScreenState extends State<DownloadsScreen> {
                   mainAxisSize: MainAxisSize.min,
                   children: [
                     Icon(
-                      Icons.folder_open_rounded,
-                      size: 58,
-                      color: theme.colorScheme.onSurfaceVariant.withValues(alpha: 0.5),
+                      isLoadingTab
+                          ? Icons.downloading_rounded
+                          : Icons.folder_open_rounded,
+                      size: 56,
+                      color: theme.colorScheme.onSurfaceVariant
+                          .withValues(alpha: 0.5),
                     ),
                     const SizedBox(height: 12),
                     Text(
-                      allItems.isEmpty
-                          ? 'Belum ada media diunduh'
+                      currentTotalCount == 0
+                          ? (isLoadingTab
+                              ? 'Tidak ada unduhan yang sedang berjalan'
+                              : 'Belum ada unduhan yang selesai')
                           : 'Tidak ada hasil yang cocok',
+                      textAlign: TextAlign.center,
                       style: theme.textTheme.titleMedium?.copyWith(
                         fontWeight: FontWeight.w700,
                       ),
                     ),
                     const SizedBox(height: 6),
                     Text(
-                      allItems.isEmpty
-                          ? 'Tempel tautan di tab Unduh untuk mulai menyimpan video, audio, atau foto ke folder Pictures/all_download (Album all_download).'
+                      currentTotalCount == 0
+                          ? (isLoadingTab
+                              ? 'Semua unduhan aktif, antrean, dan yang dijeda akan muncul di sini dengan proses aktif di urutan teratas.'
+                              : 'Media yang selesai diunduh akan tersimpan rapi di sini.')
                           : 'Coba ubah kata kunci pencarian atau filter kategori.',
                       textAlign: TextAlign.center,
                       style: theme.textTheme.bodySmall?.copyWith(
@@ -205,42 +341,111 @@ class _DownloadsScreenState extends State<DownloadsScreen> {
               ),
             ),
           )
-        else
-          SliverPadding(
-            padding: const EdgeInsets.fromLTRB(16, 4, 16, 28),
-            sliver: SliverList.separated(
-              itemCount: filtered.length,
-              separatorBuilder: (_, _) => const SizedBox(height: 10),
-              itemBuilder: (context, index) {
-                final item = filtered[index];
-                final markerKey = item.markerKey.isNotEmpty
-                    ? item.markerKey
-                    : canonicalMarkerKey(item.sourceUrl);
-                return DownloadTile(
-                  item: item,
-                  isMarkedDownloaded: widget.manager.isMarkedDownloaded(markerKey),
-                  onTapDetail: () => showDownloadDetailSheet(
-                    context,
-                    manager: widget.manager,
-                    itemId: item.id,
-                  ),
-                  onPause: item.isActive
-                      ? () => widget.manager.pauseDownload(item.id)
-                      : null,
-                  onResume: item.canResume
-                      ? () => widget.manager.resumeDownload(item.id)
-                      : null,
-                  onCancel: (item.isActive || item.isPaused)
-                      ? () => widget.manager.cancelDownload(item.id)
-                      : null,
-                  onOpen: () => _openFile(item),
-                  onShare: () => widget.manager.shareDownloadedItem(item),
-                  onDelete: () => _confirmDeleteItem(item),
-                );
-              },
+        else if (isLoadingTab) ...[
+          if (processingItems.isNotEmpty) ...[
+            _buildSectionHeaderSliver(
+              context,
+              title: 'Sedang Diproses (${processingItems.length})',
+              color: const Color(0xFF38BDF8),
+              icon: Icons.bolt_rounded,
             ),
-          ),
+            _buildItemsSliver(
+              processingItems,
+              bottomPad:
+                  (queuedItems.isEmpty && pausedItems.isEmpty) ? 28.0 : 12.0,
+            ),
+          ],
+          if (queuedItems.isNotEmpty) ...[
+            _buildSectionHeaderSliver(
+              context,
+              title: 'Antrean (${queuedItems.length})',
+              color: theme.colorScheme.onSurfaceVariant,
+              icon: Icons.schedule_rounded,
+            ),
+            _buildItemsSliver(
+              queuedItems,
+              bottomPad: pausedItems.isEmpty ? 28.0 : 12.0,
+            ),
+          ],
+          if (pausedItems.isNotEmpty) ...[
+            _buildSectionHeaderSliver(
+              context,
+              title: 'Dijeda (${pausedItems.length})',
+              color: const Color(0xFFF59E0B),
+              icon: Icons.pause_circle_outline_rounded,
+            ),
+            _buildItemsSliver(pausedItems, bottomPad: 28.0),
+          ],
+        ] else
+          _buildItemsSliver(filteredFinished, bottomPad: 28.0),
       ],
+    );
+  }
+
+  Widget _buildSectionHeaderSliver(
+    BuildContext context, {
+    required String title,
+    required Color color,
+    required IconData icon,
+  }) {
+    return SliverToBoxAdapter(
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(18, 4, 18, 6),
+        child: Row(
+          children: [
+            Icon(icon, size: 15, color: color),
+            const SizedBox(width: 6),
+            Text(
+              title,
+              style: Theme.of(context).textTheme.labelMedium?.copyWith(
+                    color: color,
+                    fontWeight: FontWeight.w800,
+                    letterSpacing: 0.2,
+                  ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildItemsSliver(
+    List<DownloadItem> items, {
+    required double bottomPad,
+  }) {
+    return SliverPadding(
+      padding: EdgeInsets.fromLTRB(16, 2, 16, bottomPad),
+      sliver: SliverList.separated(
+        itemCount: items.length,
+        separatorBuilder: (_, _) => const SizedBox(height: 10),
+        itemBuilder: (context, index) {
+          final item = items[index];
+          final markerKey = item.markerKey.isNotEmpty
+              ? item.markerKey
+              : canonicalMarkerKey(item.sourceUrl);
+          return DownloadTile(
+            item: item,
+            isMarkedDownloaded: widget.manager.isMarkedDownloaded(markerKey),
+            onTapDetail: () => showDownloadDetailSheet(
+              context,
+              manager: widget.manager,
+              itemId: item.id,
+            ),
+            onPause: item.isActive
+                ? () => widget.manager.pauseDownload(item.id)
+                : null,
+            onResume: item.canResume
+                ? () => widget.manager.resumeDownload(item.id)
+                : null,
+            onCancel: (item.isActive || item.isPaused)
+                ? () => widget.manager.cancelDownload(item.id)
+                : null,
+            onOpen: () => _openFile(item),
+            onShare: () => widget.manager.shareDownloadedItem(item),
+            onDelete: () => _confirmDeleteItem(item),
+          );
+        },
+      ),
     );
   }
 

@@ -19,6 +19,7 @@ class HomeShell extends StatefulWidget {
 
 class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   final TextEditingController _urlController = TextEditingController();
+  final ValueNotifier<int> _historySectionNotifier = ValueNotifier<int>(0);
   int _tabIndex = 0;
   String? _detectedClipboardUrl;
   String? _lastDismissedClipboardUrl;
@@ -39,6 +40,7 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _urlController.dispose();
+    _historySectionNotifier.dispose();
     super.dispose();
   }
 
@@ -133,7 +135,10 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
                     _detectedClipboardUrl = null;
                   });
                 },
-                onOpenHistoryTab: () => setState(() => _tabIndex = 2),
+                onOpenHistoryTab: () {
+                  _historySectionNotifier.value = 0;
+                  setState(() => _tabIndex = 2);
+                },
               ),
             ),
             _ActiveTabListener(
@@ -147,7 +152,10 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
             _ActiveTabListener(
               active: _tabIndex == 2,
               listenable: widget.manager,
-              builder: (_) => DownloadsScreen(manager: widget.manager),
+              builder: (_) => DownloadsScreen(
+                manager: widget.manager,
+                sectionNotifier: _historySectionNotifier,
+              ),
             ),
             _ActiveTabListener(
               active: _tabIndex == 3,
@@ -168,6 +176,11 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
             selectedIndex: _tabIndex,
             onDestinationSelected: (index) {
               FocusManager.instance.primaryFocus?.unfocus();
+              if (index == 2 && _tabIndex != 2) {
+                final hasLoading = widget.manager.activeDownloads.isNotEmpty ||
+                    widget.manager.pausedDownloads.isNotEmpty;
+                _historySectionNotifier.value = hasLoading ? 0 : 1;
+              }
               setState(() => _tabIndex = index);
               if (index == 1) {
                 widget.manager.refreshManagedFiles();
