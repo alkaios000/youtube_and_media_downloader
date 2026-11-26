@@ -36,6 +36,7 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.TimeZone
+import java.util.UUID
 import java.util.concurrent.TimeUnit
 import java.util.zip.ZipInputStream
 import kotlinx.coroutines.CoroutineExceptionHandler
@@ -43,6 +44,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import org.json.JSONArray
+import org.json.JSONObject
 
 class MediaEngineBridge(private val context: Context) {
     companion object {
@@ -491,6 +494,27 @@ class MediaEngineBridge(private val context: Context) {
     }
 
     /**
+     * Builds the complete `LD_LIBRARY_PATH` required by bundled `libffmpeg.so`.
+     * Crucially includes `python/usr/lib` (which provides `libexpat.so.1` needed
+     * by `libfontconfig.so`), `ffmpeg/usr/lib`, `aria2c/usr/lib`, and `nativeLibDir`.
+     */
+    private fun buildFfmpegLdLibraryPath(nativeLibDir: File, existingLd: String = ""): String {
+        val pkgsBase = File(context.noBackupFilesDir, "youtubedl-android/packages")
+        val candidates = listOf(
+            File(pkgsBase, "ffmpeg/usr/lib"),
+            File(pkgsBase, "python/usr/lib"),
+            File(pkgsBase, "aria2c/usr/lib"),
+            nativeLibDir,
+        )
+        val parts = ArrayList<String>(5)
+        for (dir in candidates) {
+            if (dir.exists()) parts.add(dir.absolutePath)
+        }
+        if (existingLd.isNotBlank()) parts.add(existingLd)
+        return parts.joinToString(":")
+    }
+
+    /**
      * Converts a downloaded Pixiv Ugoira `.zip` archive + frame delay metadata into a smooth
      * playable H.264 `.mp4` video (or animated `.gif`) using the bundled native `libffmpeg.so`,
      * then exports directly to Private Vault (default for Pixiv) or Public Gallery.
@@ -589,12 +613,6 @@ class MediaEngineBridge(private val context: Context) {
                 val outExt = if (isGif) "gif" else "mp4"
                 val outFile = File(workDir, "ugoira_out.$outExt")
 
-                val ffmpegLibDir = File(context.noBackupFilesDir, "youtubedl-android/packages/ffmpeg/usr/lib")
-                val ldParts = listOfNotNull(
-                    ffmpegLibDir.takeIf { it.exists() }?.absolutePath,
-                    nativeLibDir.absolutePath,
-                )
-
                 fun runFfmpeg(args: List<String>): Pair<Int, String> {
                     if (outFile.exists()) runCatching { outFile.delete() }
                     val cmd = mutableListOf(ffmpegBin.absolutePath)
@@ -603,8 +621,8 @@ class MediaEngineBridge(private val context: Context) {
                     pb.directory(framesDir)
                     pb.redirectErrorStream(true)
                     val existingLd = pb.environment()["LD_LIBRARY_PATH"].orEmpty()
-                    val fullLd = (ldParts + listOfNotNull(existingLd.takeIf { it.isNotBlank() })).joinToString(":")
-                    pb.environment()["LD_LIBRARY_PATH"] = fullLd
+                    pb.environment()["LD_LIBRARY_PATH"] =
+                        buildFfmpegLdLibraryPath(nativeLibDir, existingLd)
 
                     val proc = pb.start()
                     val logBuf = StringBuilder()
@@ -654,11 +672,14 @@ class MediaEngineBridge(private val context: Context) {
                         }
                     }
                 } else {
+                    val vfFilter = "pad=ceil(iw/2)*2:ceil(ih/2)*2:color=black,format=yuv420p"
+                    // Attempt 1: Variable-frame-rate H.264 High@4.1 (exact Pixiv frame delays)
                     val (code1, log1) = runFfmpeg(
                         listOf(
                             "-y", "-f", "concat", "-safe", "0", "-i", "concat.txt",
-                            "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2",
-                            "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                            "-vf", vfFilter,
+                            "-c:v", "libx264", "-profile:v", "high", "-level", "4.1",
+                            "-pix_fmt", "yuv420p",
                             "-fps_mode", "vfr", "-crf", "18", "-preset", "veryfast",
                             "-movflags", "+faststart",
                             outFile.absolutePath,
@@ -668,12 +689,14 @@ class MediaEngineBridge(private val context: Context) {
                         ok = true
                     } else {
                         lastLog = log1
+                        // Attempt 2: Constant-frame-rate H.264 fallback (handles quirky frame timestamps)
                         val (code2, log2) = runFfmpeg(
                             listOf(
                                 "-y", "-f", "concat", "-safe", "0", "-i", "concat.txt",
-                                "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2",
-                                "-c:v", "mpeg4", "-q:v", "3", "-pix_fmt", "yuv420p",
-                                "-fps_mode", "vfr", "-movflags", "+faststart",
+                                "-vf", vfFilter,
+                                "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                                "-fps_mode", "cfr", "-r", "24", "-crf", "19", "-preset", "veryfast",
+                                "-movflags", "+faststart",
                                 outFile.absolutePath,
                             ),
                         )
@@ -681,6 +704,21 @@ class MediaEngineBridge(private val context: Context) {
                             ok = true
                         } else {
                             lastLog = log2
+                            // Attempt 3: Universal mpeg4 fallback
+                            val (code3, log3) = runFfmpeg(
+                                listOf(
+                                    "-y", "-f", "concat", "-safe", "0", "-i", "concat.txt",
+                                    "-vf", vfFilter,
+                                    "-c:v", "mpeg4", "-q:v", "3", "-pix_fmt", "yuv420p",
+                                    "-fps_mode", "cfr", "-r", "24", "-movflags", "+faststart",
+                                    outFile.absolutePath,
+                                ),
+                            )
+                            if (code3 == 0 && outFile.exists() && outFile.length() > 512L) {
+                                ok = true
+                            } else {
+                                lastLog = log3
+                            }
                         }
                     }
                     if (ok) {
@@ -1260,7 +1298,6 @@ class MediaEngineBridge(private val context: Context) {
             val ffmpegBin = File(nativeLibDir, "libffmpeg.so")
             if (!ffmpegBin.exists()) return null
 
-            val ffmpegLibDir = File(context.noBackupFilesDir, "youtubedl-android/packages/ffmpeg/usr/lib")
             val isAlreadyMp4Like = inputFile.extension.lowercase(Locale.US) in setOf("mp4", "m4v", "mov")
             val outExt = if (isAlreadyMp4Like) "mp4" else inputFile.extension.lowercase(Locale.US)
             val outFile = File(workDir, "fresh_${System.currentTimeMillis()}.$outExt")
@@ -1301,12 +1338,8 @@ class MediaEngineBridge(private val context: Context) {
             val pb = ProcessBuilder(cmd)
             pb.redirectErrorStream(true)
             val existingLd = pb.environment()["LD_LIBRARY_PATH"].orEmpty()
-            val ldParts = listOfNotNull(
-                ffmpegLibDir.takeIf { it.exists() }?.absolutePath,
-                nativeLibDir.absolutePath,
-                existingLd.takeIf { it.isNotBlank() },
-            )
-            pb.environment()["LD_LIBRARY_PATH"] = ldParts.joinToString(":")
+            pb.environment()["LD_LIBRARY_PATH"] =
+                buildFfmpegLdLibraryPath(nativeLibDir, existingLd)
 
             val proc = pb.start()
             val logBuf = StringBuilder()
@@ -1769,6 +1802,7 @@ class MediaEngineBridge(private val context: Context) {
                     runCatching {
                         if (vault.exists()) {
                             vault.walkTopDown()
+                                .onEnter { it == vault || !it.name.startsWith(".") }
                                 .filter { it.isFile && !it.name.startsWith(".") && it.length() > 0 }
                                 .forEach { f ->
                                     if (!seenPaths.add(f.absolutePath)) return@forEach
@@ -2185,6 +2219,363 @@ class MediaEngineBridge(private val context: Context) {
             }
         }
         return deleted
+    }
+
+    // =========================================================================
+    // RECYCLE BIN / TRASH ENGINE (.all_download_vault/.trash + fallback)
+    // =========================================================================
+
+    private val trashLock = Any()
+
+    private fun ensureNoMediaMarker(dir: File) {
+        runCatching {
+            val nomedia = File(dir, ".nomedia")
+            if (!nomedia.exists()) nomedia.createNewFile()
+        }
+    }
+
+    private fun resolveTrashDir(): File {
+        val base = persistentVaultBaseDir() ?: legacyPrivateVaultRoot()
+        val dir = File(base, ".trash")
+        if (!dir.exists()) dir.mkdirs()
+        ensureNoMediaMarker(dir)
+        return dir
+    }
+
+    private fun allTrashDirs(): List<File> {
+        val out = ArrayList<File>(2)
+        persistentVaultBaseDir()?.let { base ->
+            val d = File(base, ".trash")
+            if (d.exists()) out.add(d)
+        }
+        val legacy = File(legacyPrivateVaultRoot(), ".trash")
+        if (legacy.exists() && out.none { it.absolutePath == legacy.absolutePath }) {
+            out.add(legacy)
+        }
+        return out
+    }
+
+    private fun readTrashEntriesLocked(trashDir: File): MutableList<JSONObject> {
+        val indexFile = File(trashDir, "trash_index_v1.json")
+        if (!indexFile.exists()) return mutableListOf()
+        return runCatching {
+            val arr = JSONArray(indexFile.readText(Charsets.UTF_8))
+            val out = ArrayList<JSONObject>(arr.length())
+            for (i in 0 until arr.length()) {
+                val obj = arr.optJSONObject(i) ?: continue
+                val tp = obj.optString("trashPath")
+                if (tp.isNotBlank() && File(tp).exists()) {
+                    out.add(obj)
+                }
+            }
+            out
+        }.getOrDefault(mutableListOf())
+    }
+
+    private fun writeTrashEntriesLocked(trashDir: File, entries: List<JSONObject>) {
+        if (!trashDir.exists()) trashDir.mkdirs()
+        ensureNoMediaMarker(trashDir)
+        val arr = JSONArray()
+        for (e in entries) arr.put(e)
+        val target = File(trashDir, "trash_index_v1.json")
+        val tmp = File(trashDir, "trash_index_v1.json.tmp")
+        runCatching {
+            tmp.writeText(arr.toString(), Charsets.UTF_8)
+            if (target.exists()) target.delete()
+            if (!tmp.renameTo(target)) {
+                target.writeText(arr.toString(), Charsets.UTF_8)
+                tmp.delete()
+            }
+        }
+    }
+
+    private fun jsonObjectToTrashMap(obj: JSONObject): Map<String, Any?> {
+        return mapOf(
+            "id" to obj.optString("id"),
+            "trashPath" to obj.optString("trashPath"),
+            "originalPath" to obj.optString("originalPath"),
+            "fileName" to obj.optString("fileName"),
+            "mimeType" to obj.optString("mimeType"),
+            "mediaKind" to obj.optString("mediaKind", "image"),
+            "fileSize" to obj.optLong("fileSize", 0L),
+            "isPrivate" to obj.optBoolean("isPrivate", true),
+            "platformFolder" to obj.optString("platformFolder", "Pixiv"),
+            "creatorFolder" to obj.optString("creatorFolder", "Umum"),
+            "albumFolder" to obj.optString("albumFolder", ""),
+            "deletedAtMs" to obj.optLong("deletedAtMs", System.currentTimeMillis()),
+        )
+    }
+
+    fun moveFilesToTrash(
+        items: List<Map<String, Any?>>,
+        onDone: (List<Map<String, Any?>>) -> Unit,
+    ) {
+        scope.launch {
+            val trashedResults = ArrayList<Map<String, Any?>>(items.size)
+            val trashDir = resolveTrashDir()
+            val nowMs = System.currentTimeMillis()
+            val newEntries = ArrayList<JSONObject>(items.size)
+
+            for (item in items) {
+                val filePath = item["filePath"]?.toString().orEmpty()
+                val contentUri = item["contentUri"]?.toString().orEmpty()
+                val fileName = item["fileName"]?.toString()?.takeIf { it.isNotBlank() }
+                    ?: File(filePath).name.ifBlank { "media_$nowMs.jpg" }
+                val mimeType = item["mimeType"]?.toString()?.takeIf { it.isNotBlank() }
+                    ?: detectMimeType(fileName)
+                val mediaKind = item["mediaKind"]?.toString()?.takeIf { it.isNotBlank() }
+                    ?: when {
+                        mimeType.startsWith("video/") -> "video"
+                        mimeType.startsWith("audio/") -> "audio"
+                        else -> "image"
+                    }
+                val isPrivate = item["isPrivate"] as? Boolean ?: true
+                val platformFolder = item["platformFolder"]?.toString()?.takeIf { it.isNotBlank() } ?: "Pixiv"
+                val creatorFolder = item["creatorFolder"]?.toString()?.takeIf { it.isNotBlank() } ?: "Umum"
+                val albumFolder = item["albumFolder"]?.toString().orEmpty()
+
+                val trashId = UUID.randomUUID().toString()
+                val safeExt = fileName.substringAfterLast('.', "").take(8)
+                val storedName = if (safeExt.isNotBlank()) "${trashId}.$safeExt" else trashId
+                val destFile = File(trashDir, storedName)
+
+                val moved = runCatching {
+                    var placed = false
+                    val srcFile = if (filePath.isNotBlank()) File(filePath) else null
+                    // Fast path: O(1) atomic rename when file is directly accessible on same volume!
+                    if (srcFile != null && srcFile.exists() && srcFile.isFile) {
+                        if (srcFile.renameTo(destFile) && destFile.exists()) {
+                            placed = true
+                            cleanupEmptyPrivateDirs(srcFile)
+                            if (contentUri.startsWith("content://")) {
+                                runCatching {
+                                    context.contentResolver.delete(Uri.parse(contentUri), null, null)
+                                }
+                            }
+                        } else {
+                            srcFile.copyTo(destFile, overwrite = true)
+                            if (destFile.exists() && destFile.length() > 0L) {
+                                placed = true
+                                deleteFile(filePath, contentUri)
+                            }
+                        }
+                    }
+                    if (!placed && contentUri.startsWith("content://")) {
+                        context.contentResolver.openInputStream(Uri.parse(contentUri))?.use { input ->
+                            FileOutputStream(destFile).use { out ->
+                                input.copyTo(out, bufferSize = 64 * 1024)
+                            }
+                        }
+                        if (destFile.exists() && destFile.length() > 0L) {
+                            placed = true
+                            deleteFile(filePath, contentUri)
+                        }
+                    }
+                    placed
+                }.getOrDefault(false)
+
+                if (moved && destFile.exists()) {
+                    val obj = JSONObject().apply {
+                        put("id", trashId)
+                        put("trashPath", destFile.absolutePath)
+                        put("originalPath", filePath)
+                        put("fileName", fileName)
+                        put("mimeType", mimeType)
+                        put("mediaKind", mediaKind)
+                        put("fileSize", destFile.length())
+                        put("isPrivate", isPrivate)
+                        put("platformFolder", platformFolder)
+                        put("creatorFolder", creatorFolder)
+                        put("albumFolder", albumFolder)
+                        put("deletedAtMs", nowMs)
+                    }
+                    newEntries.add(obj)
+                    trashedResults.add(jsonObjectToTrashMap(obj))
+                } else {
+                    runCatching { if (destFile.exists()) destFile.delete() }
+                }
+            }
+
+            if (newEntries.isNotEmpty()) {
+                synchronized(trashLock) {
+                    val existing = readTrashEntriesLocked(trashDir)
+                    existing.addAll(0, newEntries)
+                    writeTrashEntriesLocked(trashDir, existing)
+                }
+            }
+            postToMain { onDone(trashedResults) }
+        }
+    }
+
+    fun listTrashItems(onDone: (List<Map<String, Any?>>) -> Unit) {
+        scope.launch {
+            val all = ArrayList<Map<String, Any?>>()
+            synchronized(trashLock) {
+                for (dir in allTrashDirs()) {
+                    val entries = readTrashEntriesLocked(dir)
+                    writeTrashEntriesLocked(dir, entries)
+                    for (e in entries) {
+                        all.add(jsonObjectToTrashMap(e))
+                    }
+                }
+            }
+            all.sortByDescending { (it["deletedAtMs"] as? Long) ?: 0L }
+            postToMain { onDone(all) }
+        }
+    }
+
+    fun restoreTrashItems(ids: List<String>, onDone: (Int) -> Unit) {
+        scope.launch {
+            val idSet = ids.toHashSet()
+            if (idSet.isEmpty()) {
+                postToMain { onDone(0) }
+                return@launch
+            }
+            var restored = 0
+            synchronized(trashLock) {
+                for (dir in allTrashDirs()) {
+                    val entries = readTrashEntriesLocked(dir)
+                    val remaining = ArrayList<JSONObject>(entries.size)
+                    var changed = false
+                    for (obj in entries) {
+                        val id = obj.optString("id")
+                        if (!idSet.contains(id)) {
+                            remaining.add(obj)
+                            continue
+                        }
+                        val trashFile = File(obj.optString("trashPath"))
+                        if (!trashFile.exists()) {
+                            changed = true
+                            continue
+                        }
+                        val fileName = obj.optString("fileName").ifBlank { trashFile.name }
+                        val mimeType = obj.optString("mimeType").ifBlank { detectMimeType(fileName) }
+                        val isPrivate = obj.optBoolean("isPrivate", true)
+                        val platformFolder = obj.optString("platformFolder", "Pixiv")
+                        val creatorFolder = obj.optString("creatorFolder", "Umum")
+                        val albumFolder = obj.optString("albumFolder").takeIf { it.isNotBlank() }
+
+                        val ok = runCatching {
+                            if (isPrivate) {
+                                exportFileToPrivateVault(
+                                    sourceFile = trashFile,
+                                    requestedName = fileName,
+                                    mimeType = mimeType,
+                                    platformFolder = platformFolder,
+                                    creatorFolder = creatorFolder,
+                                    albumFolder = albumFolder,
+                                )
+                            } else {
+                                exportFileToPublicStorage(
+                                    sourceFile = trashFile,
+                                    requestedName = fileName,
+                                    mimeType = mimeType,
+                                    platformFolder = platformFolder,
+                                    creatorFolder = creatorFolder,
+                                    albumFolder = albumFolder,
+                                )
+                            }
+                            runCatching { trashFile.delete() }
+                            true
+                        }.getOrDefault(false)
+
+                        if (ok) {
+                            restored++
+                            changed = true
+                        } else {
+                            remaining.add(obj)
+                        }
+                    }
+                    if (changed) {
+                        writeTrashEntriesLocked(dir, remaining)
+                    }
+                }
+            }
+            postToMain { onDone(restored) }
+        }
+    }
+
+    fun deleteTrashItemsPermanently(ids: List<String>, onDone: (Int) -> Unit) {
+        scope.launch {
+            val idSet = ids.toHashSet()
+            var deleted = 0
+            synchronized(trashLock) {
+                for (dir in allTrashDirs()) {
+                    val entries = readTrashEntriesLocked(dir)
+                    val remaining = ArrayList<JSONObject>(entries.size)
+                    var changed = false
+                    for (obj in entries) {
+                        val id = obj.optString("id")
+                        if (idSet.contains(id)) {
+                            runCatching { File(obj.optString("trashPath")).delete() }
+                            deleted++
+                            changed = true
+                        } else {
+                            remaining.add(obj)
+                        }
+                    }
+                    if (changed) {
+                        writeTrashEntriesLocked(dir, remaining)
+                    }
+                }
+            }
+            postToMain { onDone(deleted) }
+        }
+    }
+
+    fun emptyTrash(onDone: (Int) -> Unit) {
+        scope.launch {
+            var deleted = 0
+            synchronized(trashLock) {
+                for (dir in allTrashDirs()) {
+                    val entries = readTrashEntriesLocked(dir)
+                    for (obj in entries) {
+                        runCatching { File(obj.optString("trashPath")).delete() }
+                        deleted++
+                    }
+                    // Also delete any orphaned trash blobs
+                    dir.listFiles()?.forEach { child ->
+                        if (child.isFile && child.name != ".nomedia" && child.name != "trash_index_v1.json") {
+                            runCatching { child.delete() }
+                        }
+                    }
+                    writeTrashEntriesLocked(dir, emptyList())
+                }
+            }
+            postToMain { onDone(deleted) }
+        }
+    }
+
+    fun purgeExpiredTrash(maxAgeDays: Int, onDone: (Int) -> Unit) {
+        scope.launch {
+            if (maxAgeDays <= 0) {
+                postToMain { onDone(0) }
+                return@launch
+            }
+            val cutoffMs = System.currentTimeMillis() - (maxAgeDays.toLong() * 24L * 60L * 60L * 1000L)
+            var purged = 0
+            synchronized(trashLock) {
+                for (dir in allTrashDirs()) {
+                    val entries = readTrashEntriesLocked(dir)
+                    val remaining = ArrayList<JSONObject>(entries.size)
+                    var changed = false
+                    for (obj in entries) {
+                        val deletedAt = obj.optLong("deletedAtMs", System.currentTimeMillis())
+                        if (deletedAt < cutoffMs) {
+                            runCatching { File(obj.optString("trashPath")).delete() }
+                            purged++
+                            changed = true
+                        } else {
+                            remaining.add(obj)
+                        }
+                    }
+                    if (changed) {
+                        writeTrashEntriesLocked(dir, remaining)
+                    }
+                }
+            }
+            postToMain { onDone(purged) }
+        }
     }
 
     /**

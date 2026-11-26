@@ -12,6 +12,7 @@ import '../models/media_metadata.dart';
 import '../services/download_manager.dart';
 import 'app_feedback.dart';
 import 'file_gallery_viewer.dart';
+import 'in_app_video_player.dart';
 import 'sharp_original_image.dart';
 import 'tag_albums_screen.dart';
 import 'wallpaper_sheet.dart';
@@ -875,8 +876,6 @@ class _PixivAlbumViewerState extends State<PixivAlbumViewer> {
                   onTap: () {
                     if (_isSelectionMode) {
                       _togglePage(page);
-                    } else if (page.mediaKind == MediaKind.video) {
-                      widget.manager.openManagedFile(page);
                     } else {
                       _openFullscreenLightbox(pages, index);
                     }
@@ -897,47 +896,12 @@ class _PixivAlbumViewerState extends State<PixivAlbumViewer> {
                     child: Stack(
                       children: [
                         page.mediaKind == MediaKind.video
-                            ? Container(
-                                height: 240,
-                                width: double.infinity,
-                                decoration: BoxDecoration(
-                                  gradient: LinearGradient(
-                                    begin: Alignment.topLeft,
-                                    end: Alignment.bottomRight,
-                                    colors: [
-                                      const Color(0xFF0096FA)
-                                          .withValues(alpha: 0.35),
-                                      const Color(0xFF0F172A),
-                                    ],
-                                  ),
-                                ),
-                                child: Column(
-                                  mainAxisAlignment: MainAxisAlignment.center,
-                                  children: [
-                                    const Icon(
-                                      Icons.play_circle_filled_rounded,
-                                      size: 64,
-                                      color: Colors.white,
-                                    ),
-                                    const SizedBox(height: 10),
-                                    const Text(
-                                      'Animasi Ugoira (MP4)',
-                                      style: TextStyle(
-                                        color: Colors.white,
-                                        fontSize: 15,
-                                        fontWeight: FontWeight.w800,
-                                      ),
-                                    ),
-                                    const SizedBox(height: 4),
-                                    Text(
-                                      'Ketuk untuk memutar • ${formatBytes(page.fileSize)}',
-                                      style: const TextStyle(
-                                        color: Colors.white70,
-                                        fontSize: 12,
-                                      ),
-                                    ),
-                                  ],
-                                ),
+                            ? InAppVideoPlayer(
+                                filePath: page.savedPath,
+                                inlineLoop: true,
+                                autoLoop: true,
+                                onOpenExternal: () =>
+                                    widget.manager.openManagedFile(page),
                               )
                             : SharpOriginalImage(
                                 filePath: page.savedPath,
@@ -1430,23 +1394,23 @@ class _PixivAlbumViewerState extends State<PixivAlbumViewer> {
   // ===========================================================================
   Future<void> _openFullscreenLightbox(List<ManagedFile> pages, int index) async {
     final target = (index >= 0 && index < pages.length) ? pages[index] : null;
-    if (target != null && target.mediaKind == MediaKind.video) {
-      await widget.manager.openManagedFile(target);
+    final viewable = pages
+        .where((p) =>
+            p.mediaKind == MediaKind.image || p.mediaKind == MediaKind.video)
+        .toList(growable: false);
+    if (viewable.isEmpty) {
+      if (target != null) await widget.manager.openManagedFile(target);
       return;
     }
-    final imagesOnly = pages
-        .where((p) => p.mediaKind == MediaKind.image)
-        .toList(growable: false);
-    if (imagesOnly.isEmpty) return;
-    final imgIdx = target != null
-        ? imagesOnly.indexWhere((p) => p.uniqueKey == target.uniqueKey)
+    final viewIdx = target != null
+        ? viewable.indexWhere((p) => p.uniqueKey == target.uniqueKey)
         : 0;
     await Navigator.of(context).push(
       MaterialPageRoute<void>(
         builder: (_) => FileGalleryViewer(
           manager: widget.manager,
-          images: imagesOnly,
-          initialIndex: imgIdx >= 0 ? imgIdx : 0,
+          images: viewable,
+          initialIndex: viewIdx >= 0 ? viewIdx : 0,
         ),
       ),
     );
@@ -1531,18 +1495,49 @@ class _PixivAlbumViewerState extends State<PixivAlbumViewer> {
 
   Future<void> _confirmDeleteMany(List<ManagedFile> targets) async {
     if (targets.isEmpty) return;
+    final useTrash = widget.manager.settings.trashEnabled;
     final ok = await showBottomDeleteConfirm(
       context,
-      title:
-          targets.length == 1 ? 'Hapus Foto?' : 'Hapus ${targets.length} Foto?',
-      message: targets.length == 1
-          ? 'Hapus permanen "${targets.first.fileName}"?'
-          : 'Hapus permanen ${targets.length} foto terpilih dari perangkat?',
+      title: useTrash
+          ? (targets.length == 1
+              ? 'Pindahkan ke Sampah?'
+              : 'Pindahkan ${targets.length} Item ke Sampah?')
+          : (targets.length == 1
+              ? 'Hapus Foto?'
+              : 'Hapus ${targets.length} Foto?'),
+      message: useTrash
+          ? (targets.length == 1
+              ? 'Pindahkan "${targets.first.fileName}" ke Tempat Sampah?'
+              : 'Pindahkan ${targets.length} item terpilih ke Tempat Sampah?')
+          : (targets.length == 1
+              ? 'Hapus permanen "${targets.first.fileName}"?'
+              : 'Hapus permanen ${targets.length} foto terpilih dari perangkat?'),
+      confirmLabel: useTrash ? 'Ke Sampah' : 'Hapus',
     );
     if (!ok) return;
-    unawaited(widget.manager.deleteMultipleManagedFiles(targets));
+    if (useTrash) {
+      unawaited(_trashBatchWithUndo(targets));
+    } else {
+      unawaited(widget.manager.deleteMultipleManagedFiles(targets, permanent: true));
+    }
     if (!mounted) return;
     if (_isSelectionMode) _exitSelection();
+  }
+
+  Future<void> _trashBatchWithUndo(List<ManagedFile> targets) async {
+    final trashed = await widget.manager.moveManagedFilesToTrash(targets);
+    if (trashed.isEmpty || !mounted) return;
+    final ids = trashed.map((e) => e.id).toList(growable: false);
+    showTopToast(
+      context,
+      ids.length == 1
+          ? 'Dipindah ke Sampah'
+          : '${ids.length} item dipindah ke Sampah',
+      duration: const Duration(seconds: 3),
+      icon: Icons.delete_outline_rounded,
+      actionLabel: 'Urungkan',
+      onAction: () => unawaited(widget.manager.restoreTrashItems(ids)),
+    );
   }
 
   void _openAlbumsWithTag(String tag) {

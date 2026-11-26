@@ -18,6 +18,7 @@ import '../widgets/pixiv_album_viewer.dart';
 import '../widgets/tag_albums_screen.dart';
 import '../widgets/wallpaper_sheet.dart';
 import 'platform_all_photos_screen.dart';
+import 'trash_screen.dart';
 
 enum _FileViewMode { gallery, list }
 
@@ -899,6 +900,34 @@ class _FilesScreenState extends State<FilesScreen> {
         _selectedCreatorFolder ?? _selectedPlatformFolder ?? 'File Unduhan',
       ),
       actions: [
+        if (!inCreatorFolder) ...[
+          IconButton(
+            onPressed: () {
+              Navigator.of(context).push(
+                MaterialPageRoute<void>(
+                  builder: (_) => TagExplorerScreen(manager: widget.manager),
+                ),
+              );
+            },
+            icon: const Icon(Icons.tag_rounded),
+            tooltip: 'Penjelajah Tag',
+          ),
+          IconButton(
+            onPressed: () {
+              Navigator.of(context).push(
+                MaterialPageRoute<void>(
+                  builder: (_) => TrashScreen(manager: widget.manager),
+                ),
+              );
+            },
+            icon: Badge(
+              isLabelVisible: widget.manager.trashCount > 0,
+              label: Text('${widget.manager.trashCount}'),
+              child: const Icon(Icons.delete_outline_rounded),
+            ),
+            tooltip: 'Tempat Sampah',
+          ),
+        ],
         if (inCreatorFolder && hasItems)
           IconButton(
             onPressed: () {
@@ -2334,17 +2363,23 @@ class _FilesScreenState extends State<FilesScreen> {
     List<ManagedFile> folderFiles,
   ) async {
     FocusManager.instance.primaryFocus?.unfocus();
-    if (file.mediaKind == MediaKind.image && file.savedPath.isNotEmpty) {
-      final folderImages = folderFiles
-          .where((f) => f.mediaKind == MediaKind.image && f.savedPath.isNotEmpty)
+    if ((file.mediaKind == MediaKind.image ||
+            file.mediaKind == MediaKind.video) &&
+        file.savedPath.isNotEmpty) {
+      final folderViewable = folderFiles
+          .where((f) =>
+              (f.mediaKind == MediaKind.image ||
+                  f.mediaKind == MediaKind.video) &&
+              f.savedPath.isNotEmpty)
           .toList(growable: false);
-      final idx = folderImages.indexWhere((f) => f.uniqueKey == file.uniqueKey);
+      final idx =
+          folderViewable.indexWhere((f) => f.uniqueKey == file.uniqueKey);
       if (idx != -1 && mounted) {
         await Navigator.of(context).push(
           MaterialPageRoute<void>(
             builder: (_) => FileGalleryViewer(
               manager: widget.manager,
-              images: folderImages,
+              images: folderViewable,
               initialIndex: idx,
             ),
           ),
@@ -2455,17 +2490,43 @@ class _FilesScreenState extends State<FilesScreen> {
     required String unitLabel,
   }) async {
     if (selected.isEmpty) return;
+    final useTrash = widget.manager.settings.trashEnabled;
     final ok = await showBottomDeleteConfirm(
       context,
-      title: 'Hapus Permanen?',
-      message:
-          'Hapus $unitLabel dari perangkat? Tindakan ini tidak dapat dibatalkan.',
+      title: useTrash ? 'Pindahkan ke Sampah?' : 'Hapus Permanen?',
+      message: useTrash
+          ? 'Pindahkan $unitLabel ke Tempat Sampah? Anda dapat memulihkannya lagi nanti.'
+          : 'Hapus $unitLabel dari perangkat? Tindakan ini tidak dapat dibatalkan.',
+      confirmLabel: useTrash ? 'Ke Sampah' : 'Hapus',
     );
     if (!ok) return;
 
-    unawaited(widget.manager.deleteMultipleManagedFiles(selected));
+    if (useTrash) {
+      unawaited(_trashSelectedWithUndo(selected, unitLabel));
+    } else {
+      unawaited(
+        widget.manager.deleteMultipleManagedFiles(selected, permanent: true),
+      );
+    }
     if (!mounted) return;
     if (_isSelectionMode) _exitSelectionMode();
+  }
+
+  Future<void> _trashSelectedWithUndo(
+    List<ManagedFile> selected,
+    String unitLabel,
+  ) async {
+    final trashed = await widget.manager.moveManagedFilesToTrash(selected);
+    if (trashed.isEmpty || !mounted) return;
+    final ids = trashed.map((e) => e.id).toList(growable: false);
+    showTopToast(
+      context,
+      '$unitLabel dipindah ke Sampah',
+      duration: const Duration(seconds: 3),
+      icon: Icons.delete_outline_rounded,
+      actionLabel: 'Urungkan',
+      onAction: () => unawaited(widget.manager.restoreTrashItems(ids)),
+    );
   }
 
   void _showAlbumInfoAndTagsSheet(_PixivAlbumGroup album) {

@@ -1,16 +1,22 @@
 package com.linkdrop.linkdrop_downloader
 
 import android.Manifest
+import android.app.KeyguardManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.hardware.biometrics.BiometricManager
+import android.hardware.biometrics.BiometricPrompt
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.CancellationSignal
 import android.os.Environment
 import android.os.Handler
 import android.os.Looper
+import android.os.PowerManager
 import android.provider.Settings
+import android.view.WindowManager
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import io.flutter.embedding.android.FlutterActivity
@@ -25,9 +31,12 @@ class MainActivity : FlutterActivity() {
         private const val ENGINE_CHANNEL = "com.linkdrop.downloader/engine"
         private const val PROGRESS_CHANNEL = "com.linkdrop.downloader/progress"
         private const val SHARE_CHANNEL = "com.linkdrop.downloader/share"
+        private const val ACTION_CHANNEL = "com.linkdrop.downloader/actions"
         private const val PERMISSION_REQUEST_CODE = 4201
         private const val EXPORT_BACKUP_REQUEST_CODE = 4202
         private const val IMPORT_BACKUP_REQUEST_CODE = 4203
+        private const val NOTIFICATION_PERMISSION_REQUEST_CODE = 4204
+        private const val DEVICE_CREDENTIAL_REQUEST_CODE = 4205
 
         // Process-wide singletons so active downloads, FFmpeg/yt-dlp coroutines,
         // and wallpaper jobs survive Android 12/13+ Monet Activity relaunches!
@@ -45,6 +54,9 @@ class MainActivity : FlutterActivity() {
 
         @Volatile
         private var activeShareEventSink: EventChannel.EventSink? = null
+
+        @Volatile
+        private var activeActionEventSink: EventChannel.EventSink? = null
 
         private fun getBridge(appContext: Context): MediaEngineBridge {
             return sharedBridge ?: synchronized(this) {
@@ -66,6 +78,8 @@ class MainActivity : FlutterActivity() {
     private lateinit var bridge: MediaEngineBridge
     private lateinit var sniffer: WebViewMediaSniffer
     private var pendingPermissionResult: MethodChannel.Result? = null
+    private var pendingNotificationPermissionResult: MethodChannel.Result? = null
+    private var pendingAuthResult: MethodChannel.Result? = null
     private var pendingExportResult: MethodChannel.Result? = null
     private var pendingExportJson: String? = null
     private var pendingImportResult: MethodChannel.Result? = null
@@ -144,6 +158,109 @@ class MainActivity : FlutterActivity() {
         }
     }
 
+    private fun hasNotificationPermission(): Boolean {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            ContextCompat.checkSelfPermission(
+                this,
+                Manifest.permission.POST_NOTIFICATIONS,
+            ) == PackageManager.PERMISSION_GRANTED
+        } else {
+            true
+        }
+    }
+
+    private fun isIgnoringBatteryOptimizations(): Boolean {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            runCatching {
+                val pm = getSystemService(Context.POWER_SERVICE) as? PowerManager
+                pm?.isIgnoringBatteryOptimizations(packageName) == true
+            }.getOrDefault(false)
+        } else {
+            true
+        }
+    }
+
+    private fun canAuthenticateBiometric(): Boolean {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            val bm = getSystemService(BiometricManager::class.java)
+            if (bm != null) {
+                val res = bm.canAuthenticate(
+                    BiometricManager.Authenticators.BIOMETRIC_STRONG or
+                        BiometricManager.Authenticators.BIOMETRIC_WEAK or
+                        BiometricManager.Authenticators.DEVICE_CREDENTIAL,
+                )
+                if (res == BiometricManager.BIOMETRIC_SUCCESS) return true
+            }
+        }
+        val km = getSystemService(Context.KEYGUARD_SERVICE) as? KeyguardManager
+        return km?.isDeviceSecure == true
+    }
+
+    private fun authenticateWithSystem(
+        title: String,
+        subtitle: String,
+        result: MethodChannel.Result,
+    ) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            val builder = BiometricPrompt.Builder(this)
+                .setTitle(title)
+                .setSubtitle(subtitle)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                builder.setAllowedAuthenticators(
+                    BiometricManager.Authenticators.BIOMETRIC_STRONG or
+                        BiometricManager.Authenticators.BIOMETRIC_WEAK or
+                        BiometricManager.Authenticators.DEVICE_CREDENTIAL,
+                )
+            } else if (Build.VERSION.SDK_INT == Build.VERSION_CODES.Q) {
+                @Suppress("DEPRECATION")
+                builder.setDeviceCredentialAllowed(true)
+            } else {
+                builder.setNegativeButton("Batal", mainExecutor) { _, _ -> }
+            }
+
+            var replied = false
+            fun reply(ok: Boolean) {
+                if (replied) return
+                replied = true
+                runOnUiThread { result.success(ok) }
+            }
+
+            val callback = object : BiometricPrompt.AuthenticationCallback() {
+                override fun onAuthenticationSucceeded(authResult: BiometricPrompt.AuthenticationResult?) {
+                    reply(true)
+                }
+
+                override fun onAuthenticationError(errorCode: Int, errString: CharSequence?) {
+                    reply(false)
+                }
+            }
+            runCatching {
+                builder.build().authenticate(CancellationSignal(), mainExecutor, callback)
+            }.onFailure {
+                reply(false)
+            }
+            return
+        }
+
+        // Android 7–8 fallback via KeyguardManager device credential confirmation
+        val km = getSystemService(Context.KEYGUARD_SERVICE) as? KeyguardManager
+        @Suppress("DEPRECATION")
+        val confirmIntent = km?.createConfirmDeviceCredentialIntent(title, subtitle)
+        if (confirmIntent == null) {
+            result.success(false)
+            return
+        }
+        pendingAuthResult?.success(false)
+        pendingAuthResult = result
+        runCatching {
+            @Suppress("DEPRECATION")
+            startActivityForResult(confirmIntent, DEVICE_CREDENTIAL_REQUEST_CODE)
+        }.onFailure {
+            pendingAuthResult = null
+            result.success(false)
+        }
+    }
+
     private fun buildPermissionStatus(): Map<String, Any?> {
         val perms = requiredStoragePermissions()
         val missing = perms.filter { perm ->
@@ -156,6 +273,8 @@ class MainActivity : FlutterActivity() {
         return mapOf(
             "granted" to granted,
             "allFilesGranted" to hasAllFilesAccess(),
+            "notificationGranted" to hasNotificationPermission(),
+            "batteryOptimizationIgnored" to isIgnoringBatteryOptimizations(),
             "permanentlyDenied" to permanentlyDenied,
             "sdkInt" to Build.VERSION.SDK_INT,
             "missing" to missing,
@@ -173,6 +292,10 @@ class MainActivity : FlutterActivity() {
             val result = pendingPermissionResult
             pendingPermissionResult = null
             result?.success(buildPermissionStatus())
+        } else if (requestCode == NOTIFICATION_PERMISSION_REQUEST_CODE) {
+            val result = pendingNotificationPermissionResult
+            pendingNotificationPermissionResult = null
+            result?.success(hasNotificationPermission())
         }
     }
 
@@ -215,6 +338,10 @@ class MainActivity : FlutterActivity() {
                 }.getOrNull()
                 runOnUiThread { res?.success(text) }
             }.start()
+        } else if (requestCode == DEVICE_CREDENTIAL_REQUEST_CODE) {
+            val res = pendingAuthResult
+            pendingAuthResult = null
+            res?.success(resultCode == RESULT_OK)
         }
     }
 
@@ -259,6 +386,23 @@ class MainActivity : FlutterActivity() {
 
                         override fun onCancel(arguments: Any?) {
                             activeShareEventSink = null
+                        }
+                    },
+                )
+
+            EventChannel(flutterEngine.dartExecutor.binaryMessenger, ACTION_CHANNEL)
+                .setStreamHandler(
+                    object : EventChannel.StreamHandler {
+                        override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
+                            activeActionEventSink = events
+                            DownloadForegroundService.onPauseAllRequested = {
+                                mainLooperHandler.post { activeActionEventSink?.success("pause_all") }
+                            }
+                        }
+
+                        override fun onCancel(arguments: Any?) {
+                            activeActionEventSink = null
+                            DownloadForegroundService.onPauseAllRequested = null
                         }
                     },
                 )
@@ -629,6 +773,147 @@ class MainActivity : FlutterActivity() {
                         bridge.deleteMultipleFiles(rawItems) { count ->
                             result.success(count)
                         }
+                    }
+
+                    "moveFilesToTrash" -> {
+                        val rawItems = call.argument<List<Map<String, Any?>>>("items").orEmpty()
+                        bridge.moveFilesToTrash(rawItems) { trashed ->
+                            result.success(trashed)
+                        }
+                    }
+
+                    "listTrashItems" -> {
+                        bridge.listTrashItems { items ->
+                            result.success(items)
+                        }
+                    }
+
+                    "restoreTrashItems" -> {
+                        val ids = call.argument<List<String>>("ids").orEmpty()
+                        bridge.restoreTrashItems(ids) { count ->
+                            result.success(count)
+                        }
+                    }
+
+                    "deleteTrashItemsPermanently" -> {
+                        val ids = call.argument<List<String>>("ids").orEmpty()
+                        bridge.deleteTrashItemsPermanently(ids) { count ->
+                            result.success(count)
+                        }
+                    }
+
+                    "emptyTrash" -> {
+                        bridge.emptyTrash { count ->
+                            result.success(count)
+                        }
+                    }
+
+                    "purgeExpiredTrash" -> {
+                        val maxAgeDays = call.argument<Int>("maxAgeDays") ?: 14
+                        bridge.purgeExpiredTrash(maxAgeDays) { count ->
+                            result.success(count)
+                        }
+                    }
+
+                    "setSecureScreen" -> {
+                        val enabled = call.argument<Boolean>("enabled") ?: false
+                        runOnUiThread {
+                            if (enabled) {
+                                window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+                            } else {
+                                window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+                            }
+                        }
+                        result.success(true)
+                    }
+
+                    "canAuthenticateBiometric" -> {
+                        result.success(canAuthenticateBiometric())
+                    }
+
+                    "authenticateBiometric" -> {
+                        val title = call.argument<String>("title") ?: "Buka Kunci all_download"
+                        val subtitle = call.argument<String>("subtitle") ?: "Verifikasi identitas Anda untuk melanjutkan"
+                        authenticateWithSystem(title, subtitle, result)
+                    }
+
+                    "requestNotificationPermission" -> {
+                        if (hasNotificationPermission()) {
+                            result.success(true)
+                        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                            pendingNotificationPermissionResult?.success(false)
+                            pendingNotificationPermissionResult = result
+                            ActivityCompat.requestPermissions(
+                                this,
+                                arrayOf(Manifest.permission.POST_NOTIFICATIONS),
+                                NOTIFICATION_PERMISSION_REQUEST_CODE,
+                            )
+                        } else {
+                            result.success(true)
+                        }
+                    }
+
+                    "requestIgnoreBatteryOptimizations" -> {
+                        if (isIgnoringBatteryOptimizations()) {
+                            result.success(true)
+                        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                            val opened = runCatching {
+                                val intent = Intent(
+                                    Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                                    Uri.parse("package:$packageName"),
+                                ).apply {
+                                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                }
+                                startActivity(intent)
+                                true
+                            }.getOrElse {
+                                runCatching {
+                                    startActivity(
+                                        Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
+                                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                                    )
+                                    true
+                                }.getOrDefault(false)
+                            }
+                            result.success(opened)
+                        } else {
+                            result.success(true)
+                        }
+                    }
+
+                    "updateDownloadNotification" -> {
+                        val title = call.argument<String>("title") ?: "all_download — Mengunduh..."
+                        val subtitle = call.argument<String>("subtitle") ?: ""
+                        val progress = call.argument<Int>("progress") ?: 0
+                        val indeterminate = call.argument<Boolean>("indeterminate") ?: false
+                        val activeCount = call.argument<Int>("activeCount") ?: 1
+                        DownloadForegroundService.startOrUpdate(
+                            context = applicationContext,
+                            title = title,
+                            subtitle = subtitle,
+                            progress = progress,
+                            indeterminate = indeterminate,
+                            activeCount = activeCount,
+                        )
+                        result.success(true)
+                    }
+
+                    "showDownloadCompleteNotification" -> {
+                        val title = call.argument<String>("title") ?: "Unduhan Selesai"
+                        val body = call.argument<String>("body") ?: ""
+                        val hasErrors = call.argument<Boolean>("hasErrors") ?: false
+                        DownloadForegroundService.showCompletionNotification(
+                            context = applicationContext,
+                            title = title,
+                            body = body,
+                            hasErrors = hasErrors,
+                        )
+                        result.success(true)
+                    }
+
+                    "stopDownloadService" -> {
+                        DownloadForegroundService.stop(applicationContext)
+                        result.success(true)
                     }
 
                     "unlockFiles" -> {

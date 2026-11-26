@@ -12,6 +12,7 @@ import 'package:linkdrop_downloader/screens/downloads_screen.dart';
 import 'package:linkdrop_downloader/screens/files_screen.dart';
 import 'package:linkdrop_downloader/screens/home_shell.dart';
 import 'package:linkdrop_downloader/screens/settings_screen.dart';
+import 'package:linkdrop_downloader/screens/trash_screen.dart';
 import 'package:linkdrop_downloader/services/direct_extractors.dart';
 import 'package:linkdrop_downloader/services/download_manager.dart';
 import 'package:linkdrop_downloader/services/storage_service.dart';
@@ -20,6 +21,7 @@ import 'package:linkdrop_downloader/widgets/app_feedback.dart';
 import 'package:linkdrop_downloader/widgets/file_gallery_viewer.dart';
 import 'package:linkdrop_downloader/widgets/media_preview_card.dart';
 import 'package:linkdrop_downloader/widgets/pixiv_album_viewer.dart';
+import 'package:linkdrop_downloader/widgets/security_lock_screen.dart';
 import 'package:linkdrop_downloader/widgets/sharp_original_image.dart';
 import 'package:linkdrop_downloader/widgets/tag_albums_screen.dart';
 
@@ -50,6 +52,8 @@ class _FakeFilesManager extends DownloadManager {
   final List<ManagedFile> _fakeFiles;
   final Map<String, CreatorProfileRecord> _fakeProfiles;
   final List<DownloadItem> fakeItems;
+  final List<TrashItem> _fakeTrash = [];
+  final Map<String, ManagedFile> _trashedOriginals = {};
 
   _FakeFilesManager(
     List<ManagedFile> fakeFiles,
@@ -62,10 +66,74 @@ class _FakeFilesManager extends DownloadManager {
   List<ManagedFile> get managedFiles => _fakeFiles;
 
   @override
-  Future<bool> deleteManagedFile(ManagedFile file) async {
+  List<TrashItem> get trashItems => List<TrashItem>.unmodifiable(_fakeTrash);
+
+  @override
+  int get trashCount => _fakeTrash.length;
+
+  @override
+  Future<bool> deleteManagedFile(
+    ManagedFile file, {
+    bool permanent = false,
+  }) async {
     _fakeFiles.removeWhere((f) => f.uniqueKey == file.uniqueKey);
     notifyListeners();
     return true;
+  }
+
+  @override
+  Future<List<TrashItem>> moveManagedFilesToTrash(List<ManagedFile> files) async {
+    final created = <TrashItem>[];
+    for (final f in files) {
+      _fakeFiles.removeWhere((x) => x.uniqueKey == f.uniqueKey);
+      final id = 'trash_${_fakeTrash.length + created.length + 1}';
+      final item = TrashItem(
+        id: id,
+        trashPath: f.savedPath,
+        originalPath: f.savedPath,
+        fileName: f.fileName,
+        mimeType: f.mimeType,
+        mediaKind: f.mediaKind.name,
+        fileSize: f.fileSize,
+        isPrivate: f.isPrivate,
+        platformFolder: f.platformFolder,
+        creatorFolder: f.creatorFolder,
+        albumFolder: f.effectiveAlbumName,
+        deletedAt: DateTime.now(),
+      );
+      _trashedOriginals[id] = f;
+      created.add(item);
+    }
+    _fakeTrash.insertAll(0, created);
+    notifyListeners();
+    return created;
+  }
+
+  @override
+  Future<int> restoreTrashItems(List<String> ids) async {
+    int count = 0;
+    for (final id in ids) {
+      final orig = _trashedOriginals.remove(id);
+      _fakeTrash.removeWhere((t) => t.id == id);
+      if (orig != null) {
+        _fakeFiles.add(orig);
+        count++;
+      }
+    }
+    notifyListeners();
+    return count;
+  }
+
+  @override
+  Future<void> refreshTrashItems() async {}
+
+  @override
+  Future<int> emptyTrash() async {
+    final n = _fakeTrash.length;
+    _fakeTrash.clear();
+    _trashedOriginals.clear();
+    notifyListeners();
+    return n;
   }
 
   @override
@@ -1523,17 +1591,17 @@ void main() {
 
     // Bottom sheet confirmation (NOT centered AlertDialog!) — buttons sit in lower thumb zone
     expect(find.byType(AlertDialog), findsNothing);
-    expect(find.text('Hapus Foto?'), findsOneWidget);
+    expect(find.text('Pindahkan ke Sampah?'), findsOneWidget);
     final screenH = tester.view.physicalSize.height / tester.view.devicePixelRatio;
     final confirmBtnY = tester.getCenter(find.text('Batal')).dy;
     expect(confirmBtnY, greaterThan(screenH * 0.6));
 
-    // Cancel leaves all 3 images intact
+    // Cancel leaves all 4 files intact
     await tester.tap(find.text('Batal'));
     await tester.pumpAndSettle();
     expect(manager.managedFiles.length, 4);
 
-    // 3) Check Fast Delete at the top -> tapping Hapus deletes IMMEDIATELY with ZERO confirmation!
+    // 3) Check Fast Delete at the top -> tapping Hapus moves to Trash IMMEDIATELY with ZERO confirmation + top Undo!
     await tester.tap(find.byKey(const ValueKey<String>('fast_delete_toggle')));
     await tester.pumpAndSettle();
     expect(find.text('Fast Delete Aktif (hapus langsung)'), findsOneWidget);
@@ -1541,9 +1609,154 @@ void main() {
     await tester.tap(find.text('Hapus'));
     await tester.pumpAndSettle();
 
-    expect(find.text('Hapus Foto?'), findsNothing);
+    expect(find.text('Pindahkan ke Sampah?'), findsNothing);
     expect(manager.managedFiles.length, 3);
+    expect(manager.trashCount, 1);
     expect(find.text('a2.jpg'), findsOneWidget);
+
+    // Tap Urungkan on the top toast -> restores a1.jpg right back!
+    expect(find.text('Urungkan'), findsOneWidget);
+    await tester.tap(find.text('Urungkan'));
+    await tester.pumpAndSettle();
+    expect(manager.managedFiles.length, 4);
+    expect(manager.trashCount, 0);
+    expect(find.text('a1.jpg'), findsOneWidget);
+
+    manager.dispose();
+  });
+
+  testWidgets(
+      'Global TagExplorerScreen multi-tag AND/Exclude filter, Security PIN lock, and TrashScreen work end-to-end',
+      (WidgetTester tester) async {
+    ManagedFile mkFile(String artist, String album, String name, int minute) =>
+        ManagedFile(
+          fileName: name,
+          mimeType: 'image/jpeg',
+          mediaKind: MediaKind.image,
+          fileSize: 2048,
+          modifiedAt: DateTime(2026, 11, 26, 10, minute),
+          relativePath: 'Pixiv/$artist/$album',
+          savedPath: '/nonexistent/$artist/$album/$name',
+          contentUri: 'content://test/$artist/$album/$name',
+          platformFolder: 'Pixiv',
+          creatorFolder: artist,
+          albumFolder: album,
+          isPrivate: true,
+        );
+
+    final f1 = mkFile('ArtistOne', 'AlbumBoth', 'a1.jpg', 10);
+    final f2 = mkFile('ArtistTwo', 'AlbumFantasyOnly', 'b1.jpg', 11);
+    final f3 = mkFile('ArtistTwo', 'AlbumWithSketch', 'c1.jpg', 12);
+
+    final manager = _FakeFilesManager([f1, f2, f3], const {});
+    await manager.saveAlbumMetadata(
+      platformFolder: 'Pixiv',
+      creatorFolder: 'ArtistOne',
+      albumFolder: 'AlbumBoth',
+      tags: const ['Fantasy', 'Original'],
+    );
+    await manager.saveAlbumMetadata(
+      platformFolder: 'Pixiv',
+      creatorFolder: 'ArtistTwo',
+      albumFolder: 'AlbumFantasyOnly',
+      tags: const ['Fantasy'],
+    );
+    await manager.saveAlbumMetadata(
+      platformFolder: 'Pixiv',
+      creatorFolder: 'ArtistTwo',
+      albumFolder: 'AlbumWithSketch',
+      tags: const ['Fantasy', 'Original', 'Sketch'],
+    );
+
+    // 1) Multi-tag AND + Exclude in DownloadManager & TagExplorerScreen
+    expect(manager.getAllTagSummaries().first.tag, 'Fantasy');
+    expect(manager.getAllTagSummaries().first.albumCount, 3);
+    expect(
+      manager.findAlbumsByTags(
+        includeTags: {'Fantasy', 'Original'},
+        excludeTags: {'Sketch'},
+      ).map((e) => e.albumName).toList(),
+      ['AlbumBoth'],
+    );
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: AppTheme.darkTheme(),
+        home: TagExplorerScreen(manager: manager),
+      ),
+    );
+    await tester.pump();
+    expect(find.text('Penjelajah Tag'), findsOneWidget);
+    expect(find.text('#Fantasy (3)'), findsOneWidget);
+    expect(find.text('#Original (2)'), findsOneWidget);
+
+    // Tap #Fantasy and #Original -> narrows from 3 albums down to 2 (AlbumBoth + AlbumWithSketch)
+    await tester.tap(find.text('#Fantasy (3)'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('#Original (2)'));
+    await tester.pumpAndSettle();
+    expect(find.text('AlbumFantasyOnly'), findsNothing);
+    expect(find.text('AlbumBoth'), findsOneWidget);
+    expect(find.text('AlbumWithSketch'), findsOneWidget);
+
+    // Long-press #Sketch -> excludes AlbumWithSketch -> only AlbumBoth remains!
+    await tester.longPress(find.text('#Sketch (1)'));
+    await tester.pumpAndSettle();
+    expect(find.text('AlbumWithSketch'), findsNothing);
+    expect(find.text('AlbumBoth'), findsOneWidget);
+
+    // 2) Security PIN hashing & SecurityLockScreen unlock
+    final pinHash = AppSettings.hashPin('2468');
+    await manager.updateSettings(
+      manager.settings.copyWith(
+        appLockEnabled: true,
+        appLockPinHash: pinHash,
+        appLockUseBiometric: false,
+      ),
+    );
+    expect(manager.settings.verifyPin('2468'), isTrue);
+    expect(manager.settings.verifyPin('1111'), isFalse);
+
+    bool unlocked = false;
+    await tester.pumpWidget(
+      MaterialApp(
+        key: const ValueKey<String>('security_lock_app'),
+        theme: AppTheme.darkTheme(),
+        home: SecurityLockScreen(
+          manager: manager,
+          autoTriggerBiometric: false,
+          onUnlocked: () => unlocked = true,
+        ),
+      ),
+    );
+    await tester.pump();
+    for (final digit in ['2', '4', '6', '8']) {
+      await tester.tap(find.text(digit));
+      await tester.pump();
+    }
+    expect(unlocked, isTrue);
+
+    // 3) TrashScreen displays trashed items and restores cleanly
+    await manager.moveManagedFilesToTrash([f2]);
+    await tester.pumpWidget(
+      MaterialApp(
+        key: const ValueKey<String>('trash_screen_app'),
+        theme: AppTheme.darkTheme(),
+        home: TrashScreen(manager: manager),
+      ),
+    );
+    await tester.pump();
+    expect(find.text('Tempat Sampah'), findsOneWidget);
+    expect(find.text('b1.jpg'), findsOneWidget);
+
+    await tester.tap(find.text('b1.jpg'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Pulihkan').last);
+    await tester.pumpAndSettle();
+    expect(manager.trashCount, 0);
+    expect(find.text('Tempat Sampah Kosong'), findsOneWidget);
+    dismissTopToast();
+    await tester.pumpAndSettle();
 
     manager.dispose();
   });

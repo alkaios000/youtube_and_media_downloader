@@ -109,6 +109,8 @@ class DownloadManager extends ChangeNotifier {
   int _pausedDownloadCount = 0;
   List<ManagedFile> _managedFiles = const [];
   final Set<String> _pendingDeletedKeys = <String>{};
+  List<TrashItem> _trashItems = const [];
+  bool _isLoadingTrash = false;
   Set<String> _downloadedMarkers = <String>{};
   final Map<String, CreatorProfileRecord> _creatorProfiles = {};
   final Map<String, AlbumMetadata> _albumMetadata = {};
@@ -149,6 +151,7 @@ class DownloadManager extends ChangeNotifier {
   final Set<String> _pausedTaskIds = {};
   StreamSubscription<NativeProgressEvent>? _progressSub;
   StreamSubscription<String>? _shareSub;
+  StreamSubscription<String>? _actionSub;
   Timer? _throttleNotifyTimer;
   bool _hasPendingNotify = false;
   Timer? _postSyncTimer;
@@ -156,6 +159,10 @@ class DownloadManager extends ChangeNotifier {
   Timer? _albumMetaFlushTimer;
   DateTime _lastHistoryFlush = DateTime.fromMillisecondsSinceEpoch(0);
   DateTime _lastManagedFilesRefresh = DateTime.fromMillisecondsSinceEpoch(0);
+  DateTime _lastForegroundNotifUpdate = DateTime.fromMillisecondsSinceEpoch(0);
+  bool _foregroundServiceActive = false;
+  int _batchCompletedCount = 0;
+  int _batchFailedCount = 0;
   int _taskSeq = 0;
 
   void Function(String sharedText)? _onIncomingSharedLink;
@@ -232,6 +239,9 @@ class DownloadManager extends ChangeNotifier {
   int get activeDownloadCount => _activeDownloadCount;
   int get pausedDownloadCount => _pausedDownloadCount;
   List<ManagedFile> get managedFiles => _managedFiles;
+  List<TrashItem> get trashItems => _trashItems;
+  bool get isLoadingTrash => _isLoadingTrash;
+  int get trashCount => _trashItems.length;
   int get albumMetadataRevision => _albumMetadataRevision;
   int get photoRatingsRevision => _photoRatingsRevision;
   Map<String, AlbumMetadata> get albumMetadataMap =>
@@ -342,8 +352,27 @@ class DownloadManager extends ChangeNotifier {
   /// Returns all visible albums (across all artists/platforms) that carry [tag]
   /// (case-insensitive match), sorted by newest modified photo descending.
   List<TaggedAlbumMatch> findAlbumsByTag(String tag) {
-    final needle = tag.trim().toLowerCase();
-    if (needle.isEmpty) return const <TaggedAlbumMatch>[];
+    final clean = tag.trim();
+    if (clean.isEmpty) return const <TaggedAlbumMatch>[];
+    return findAlbumsByTags(includeTags: {clean});
+  }
+
+  /// Multi-tag filter across all visible albums:
+  /// - Every album returned MUST contain ALL tags in [includeTags] (AND logic).
+  /// - Every album returned MUST NOT contain ANY tag in [excludeTags] (NOT logic).
+  /// - If both sets are empty, returns all visible albums that have at least one tag.
+  List<TaggedAlbumMatch> findAlbumsByTags({
+    Set<String> includeTags = const {},
+    Set<String> excludeTags = const {},
+  }) {
+    final includeNeedles = includeTags
+        .map((t) => t.trim().toLowerCase())
+        .where((t) => t.isNotEmpty)
+        .toSet();
+    final excludeNeedles = excludeTags
+        .map((t) => t.trim().toLowerCase())
+        .where((t) => t.isNotEmpty)
+        .toSet();
 
     final grouped = <String, List<ManagedFile>>{};
     for (final f in visibleManagedFiles) {
@@ -360,8 +389,16 @@ class DownloadManager extends ChangeNotifier {
       if (pages.isEmpty) return;
       final meta = _albumMetadata[key];
       if (meta == null || meta.tags.isEmpty) return;
-      final hasTag = meta.tags.any((t) => t.trim().toLowerCase() == needle);
-      if (!hasTag) return;
+      final lowerTags =
+          meta.tags.map((t) => t.trim().toLowerCase()).toSet();
+      if (includeNeedles.isNotEmpty &&
+          !includeNeedles.every(lowerTags.contains)) {
+        return;
+      }
+      if (excludeNeedles.isNotEmpty &&
+          excludeNeedles.any(lowerTags.contains)) {
+        return;
+      }
 
       pages.sort((a, b) => naturalCompareFileNames(a.fileName, b.fileName));
       var latest = pages.first.modifiedAt;
@@ -385,6 +422,51 @@ class DownloadManager extends ChangeNotifier {
 
     matches.sort((a, b) => b.latestModified.compareTo(a.latestModified));
     return matches;
+  }
+
+  /// Returns every tag present across visible albums along with its album count,
+  /// sorted by most albums descending (then alphabetically).
+  List<TagSummary> getAllTagSummaries() {
+    final activeAlbumKeys = <String>{};
+    for (final f in visibleManagedFiles) {
+      activeAlbumKeys.add(
+        AlbumMetadata.buildLookupKey(
+          f.platformFolder,
+          f.creatorFolder,
+          f.effectiveAlbumName,
+        ),
+      );
+    }
+
+    final counts = <String, int>{};
+    final displayNames = <String, String>{};
+    for (final key in activeAlbumKeys) {
+      final meta = _albumMetadata[key];
+      if (meta == null || meta.tags.isEmpty) continue;
+      final seenInAlbum = <String>{};
+      for (final raw in meta.tags) {
+        final clean = raw.trim();
+        final lower = clean.toLowerCase();
+        if (lower.isEmpty || !seenInAlbum.add(lower)) continue;
+        displayNames.putIfAbsent(lower, () => clean);
+        counts[lower] = (counts[lower] ?? 0) + 1;
+      }
+    }
+
+    final out = counts.entries
+        .map(
+          (e) => TagSummary(
+            tag: displayNames[e.key] ?? e.key,
+            albumCount: e.value,
+          ),
+        )
+        .toList();
+    out.sort((a, b) {
+      final cmp = b.albumCount.compareTo(a.albumCount);
+      if (cmp != 0) return cmp;
+      return a.tag.toLowerCase().compareTo(b.tag.toLowerCase());
+    });
+    return out;
   }
 
   Future<void> saveAlbumMetadata({
@@ -765,6 +847,14 @@ class DownloadManager extends ChangeNotifier {
         _dispatchIncomingSharedLink,
         onError: (_) {},
       );
+      _actionSub = _bridge.actionStream.listen(
+        (action) {
+          if (action == 'pause_all') {
+            unawaited(pauseAllDownloads());
+          }
+        },
+        onError: (_) {},
+      );
     } catch (_) {}
 
     unawaited(_checkInitialSharedLink());
@@ -782,6 +872,7 @@ class DownloadManager extends ChangeNotifier {
         await _storage.loadSettings().catchError((_) => const AppSettings());
     themeNotifier.value = _settings.themeMode;
     _applyRateLimitSettings();
+    unawaited(_bridge.setSecureScreen(_settings.secureScreenEnabled));
     _notifyImmediate();
 
     // Phase 2 (background): load history/markers/profiles via off-thread isolate + permissions
@@ -851,6 +942,16 @@ class DownloadManager extends ChangeNotifier {
 
     // Defer yt-dlp/FFmpeg native init so app startup stays completely snappy.
     // Files & Browser sessions load lazily when user opens File / Settings tabs!
+    unawaited(
+      Future<void>.delayed(const Duration(seconds: 2), () {
+        if (_isDisposed) return;
+        if (_settings.trashEnabled && _settings.trashRetentionDays > 0) {
+          unawaited(_purgeExpiredTrashSilently());
+        } else {
+          unawaited(refreshTrashItems());
+        }
+      }),
+    );
     unawaited(
       Future<void>.delayed(const Duration(seconds: 3), () {
         if (_isDisposed) return;
@@ -1025,6 +1126,32 @@ class DownloadManager extends ChangeNotifier {
       return false;
     }
   }
+
+  Future<bool> requestNotificationPermission() async {
+    try {
+      final ok = await _bridge.requestNotificationPermission();
+      await refreshPermissions();
+      return ok;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Future<bool> requestIgnoreBatteryOptimizations() async {
+    try {
+      return await _bridge.requestIgnoreBatteryOptimizations();
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Future<bool> canAuthenticateBiometric() => _bridge.canAuthenticateBiometric();
+
+  Future<bool> authenticateBiometric({
+    String title = 'Buka Kunci all_download',
+    String subtitle = 'Verifikasi sidik jari atau kunci layar HP Anda',
+  }) =>
+      _bridge.authenticateBiometric(title: title, subtitle: subtitle);
 
   Future<bool> openAppSettings() async {
     try {
@@ -2314,7 +2441,9 @@ class DownloadManager extends ChangeNotifier {
           return prevSubs[i];
         }
         final suffix = totalFiles > 1 ? '_${i + 1}' : '';
-        final fileExt = _detectExtFromUrlOrDefault(urlsToDownload[i], option.extension);
+        final fileExt = option.isUgoira
+            ? option.extension
+            : _detectExtFromUrlOrDefault(urlsToDownload[i], option.extension);
         return SubFileTask(
           id: '${taskId}_$i',
           fileName: '$safeBase$suffix.$fileExt',
@@ -2431,9 +2560,12 @@ class DownloadManager extends ChangeNotifier {
           }
 
           final targetUrl = urlsToDownload[i];
-          final fileExt = _detectExtFromUrlOrDefault(targetUrl, option.extension);
+          final fileExt = option.isUgoira
+              ? option.extension
+              : _detectExtFromUrlOrDefault(targetUrl, option.extension);
           final fileName = subTasks[i].fileName;
-          final partPath = p.join(cacheDir.path, 'direct_${taskId}_$i.$fileExt.part');
+          final partExt = option.isUgoira ? 'zip' : fileExt;
+          final partPath = p.join(cacheDir.path, 'direct_${taskId}_$i.$partExt.part');
 
           await _directFilePool.run(() async {
             if (cancelToken.isCancelled || _isTaskStopped(taskId)) {
@@ -3067,9 +3199,16 @@ class DownloadManager extends ChangeNotifier {
   }
 
   /// Removes [file] from in-memory state **immediately** (0ms UI update) and
-  /// performs native storage deletion asynchronously off the UI thread —
-  /// avoiding expensive full MediaStore/filesystem rescans on every delete.
-  Future<bool> deleteManagedFile(ManagedFile file) async {
+  /// either moves it into Recycle Bin (when `settings.trashEnabled`) or deletes
+  /// it permanently off the UI thread.
+  Future<bool> deleteManagedFile(
+    ManagedFile file, {
+    bool permanent = false,
+  }) async {
+    if (!permanent && _settings.trashEnabled) {
+      final trashed = await moveManagedFilesToTrash([file]);
+      return trashed.isNotEmpty;
+    }
     _optimisticallyRemoveManagedFiles([file]);
     try {
       final ok = await _bridge.deleteFile(
@@ -3096,9 +3235,16 @@ class DownloadManager extends ChangeNotifier {
   }
 
   /// Removes [files] from in-memory state **immediately** (0ms UI update) and
-  /// deletes them on disk in a background native IO batch.
-  Future<int> deleteMultipleManagedFiles(List<ManagedFile> files) async {
+  /// either moves them into Recycle Bin or deletes them permanently in background IO.
+  Future<int> deleteMultipleManagedFiles(
+    List<ManagedFile> files, {
+    bool permanent = false,
+  }) async {
     if (files.isEmpty) return 0;
+    if (!permanent && _settings.trashEnabled) {
+      final trashed = await moveManagedFilesToTrash(files);
+      return trashed.length;
+    }
     final batch = List<ManagedFile>.from(files, growable: false);
     _optimisticallyRemoveManagedFiles(batch);
     try {
@@ -3116,6 +3262,100 @@ class DownloadManager extends ChangeNotifier {
       }
       return 0;
     }
+  }
+
+  /// Moves [files] to `.all_download_vault/.trash/` asynchronously while
+  /// removing them from UI immediately (0ms). Returns created [TrashItem]s
+  /// (for instant 1-tap Undo!).
+  Future<List<TrashItem>> moveManagedFilesToTrash(List<ManagedFile> files) async {
+    if (files.isEmpty) return const [];
+    final batch = List<ManagedFile>.from(files, growable: false);
+    _optimisticallyRemoveManagedFiles(batch);
+    try {
+      final trashed = await _bridge.moveFilesToTrash(batch);
+      for (final f in batch) {
+        _pendingDeletedKeys.remove(f.uniqueKey);
+      }
+      if (trashed.isNotEmpty) {
+        _trashItems = List<TrashItem>.unmodifiable([...trashed, ..._trashItems]);
+        _notifyImmediate();
+      } else {
+        unawaited(refreshManagedFiles());
+      }
+      return trashed;
+    } catch (_) {
+      for (final f in batch) {
+        _pendingDeletedKeys.remove(f.uniqueKey);
+      }
+      return const [];
+    }
+  }
+
+  Future<void> refreshTrashItems() async {
+    if (_isLoadingTrash) return;
+    _isLoadingTrash = true;
+    try {
+      _trashItems = List<TrashItem>.unmodifiable(
+        await _bridge.listTrashItems(),
+      );
+    } catch (_) {
+    } finally {
+      _isLoadingTrash = false;
+      _notifyImmediate();
+    }
+  }
+
+  Future<int> restoreTrashItems(List<String> ids) async {
+    if (ids.isEmpty) return 0;
+    final idSet = ids.toSet();
+    _trashItems = List<TrashItem>.unmodifiable(
+      _trashItems.where((t) => !idSet.contains(t.id)),
+    );
+    _notifyImmediate();
+    try {
+      final count = await _bridge.restoreTrashItems(ids);
+      if (count > 0) {
+        unawaited(refreshManagedFiles());
+      }
+      return count;
+    } catch (_) {
+      unawaited(refreshTrashItems());
+      return 0;
+    }
+  }
+
+  Future<int> deleteTrashItemsPermanently(List<String> ids) async {
+    if (ids.isEmpty) return 0;
+    final idSet = ids.toSet();
+    _trashItems = List<TrashItem>.unmodifiable(
+      _trashItems.where((t) => !idSet.contains(t.id)),
+    );
+    _notifyImmediate();
+    try {
+      return await _bridge.deleteTrashItemsPermanently(ids);
+    } catch (_) {
+      unawaited(refreshTrashItems());
+      return 0;
+    }
+  }
+
+  Future<int> emptyTrash() async {
+    final prevCount = _trashItems.length;
+    _trashItems = const [];
+    _notifyImmediate();
+    try {
+      return await _bridge.emptyTrash();
+    } catch (_) {
+      unawaited(refreshTrashItems());
+      return prevCount;
+    }
+  }
+
+  Future<void> _purgeExpiredTrashSilently() async {
+    try {
+      await _bridge.purgeExpiredTrash(_settings.trashRetentionDays);
+    } catch (_) {}
+    await refreshTrashItems();
   }
 
   Future<int> unlockManagedFiles(List<ManagedFile> files) async {
@@ -3174,9 +3414,20 @@ class DownloadManager extends ChangeNotifier {
   }
 
   Future<void> updateSettings(AppSettings updated) async {
+    final secureChanged =
+        updated.secureScreenEnabled != _settings.secureScreenEnabled;
+    final notifTurnedOff =
+        !updated.notificationsEnabled && _settings.notificationsEnabled;
     _settings = updated;
     themeNotifier.value = updated.themeMode;
     _applyRateLimitSettings();
+    if (secureChanged) {
+      unawaited(_bridge.setSecureScreen(updated.secureScreenEnabled));
+    }
+    if (notifTurnedOff && _foregroundServiceActive) {
+      _foregroundServiceActive = false;
+      unawaited(_bridge.stopDownloadService());
+    }
     _notifyImmediate();
     await _storage.saveSettings(updated);
   }
@@ -3243,16 +3494,96 @@ class DownloadManager extends ChangeNotifier {
     if (prev.isActive != next.isActive) {
       _activeDownloadCount += next.isActive ? 1 : -1;
       if (_activeDownloadCount < 0) _activeDownloadCount = 0;
+      if (prev.isActive && !next.isActive) {
+        if (next.status == DownloadStatus.completed) {
+          _batchCompletedCount++;
+        } else if (next.status == DownloadStatus.failed) {
+          _batchFailedCount++;
+        }
+      }
     }
     if (prev.isPaused != next.isPaused) {
       _pausedDownloadCount += next.isPaused ? 1 : -1;
       if (_pausedDownloadCount < 0) _pausedDownloadCount = 0;
     }
     _itemsRevision++;
+    _syncForegroundDownloadService(force: prev.isActive != next.isActive);
     if (throttled) {
       _notifyThrottled();
     } else {
       _notifyImmediate();
+    }
+  }
+
+  /// Keeps Android's anti-kill `DownloadForegroundService` + notification bar
+  /// synchronized with active downloads (throttled to <= 1 update / 800ms).
+  void _syncForegroundDownloadService({bool force = false}) {
+    if (_isDisposed || !_settings.notificationsEnabled) return;
+    if (_activeDownloadCount > 0) {
+      final now = DateTime.now();
+      if (!force &&
+          _foregroundServiceActive &&
+          now.difference(_lastForegroundNotifUpdate) <
+              const Duration(milliseconds: 800)) {
+        return;
+      }
+      _lastForegroundNotifUpdate = now;
+      _foregroundServiceActive = true;
+
+      DownloadItem? primary;
+      double pctSum = 0;
+      int pctCount = 0;
+      for (final it in _items) {
+        if (!it.isActive) continue;
+        primary ??= it;
+        if (it.progress >= 0) {
+          pctSum += it.progress.clamp(0.0, 100.0);
+          pctCount++;
+        }
+      }
+      final avgPct = pctCount > 0 ? (pctSum / pctCount).round() : 0;
+      final title = _activeDownloadCount == 1
+          ? (primary?.title ?? 'Mengunduh media...')
+          : 'Mengunduh $_activeDownloadCount item aktif';
+      final subtitle = _activeDownloadCount == 1
+          ? (primary?.statusText.isNotEmpty == true
+              ? primary!.statusText
+              : '$avgPct%')
+          : '${primary?.title ?? "Antrean aktif"} • $avgPct%';
+
+      unawaited(
+        _bridge.updateDownloadNotification(
+          title: title,
+          subtitle: subtitle,
+          progress: avgPct,
+          indeterminate: pctCount == 0,
+          activeCount: _activeDownloadCount,
+        ),
+      );
+    } else if (_foregroundServiceActive) {
+      _foregroundServiceActive = false;
+      final doneCount = _batchCompletedCount;
+      final failCount = _batchFailedCount;
+      _batchCompletedCount = 0;
+      _batchFailedCount = 0;
+      unawaited(_bridge.stopDownloadService());
+      if (doneCount > 0 || failCount > 0) {
+        final title = failCount > 0 && doneCount == 0
+            ? 'Unduhan Gagal ($failCount item)'
+            : (failCount > 0
+                ? 'Unduhan Selesai ($doneCount berhasil, $failCount gagal)'
+                : 'Unduhan Selesai ($doneCount item)');
+        final body = failCount > 0
+            ? 'Ketuk untuk melihat detail dan ulangi unduhan yang gagal.'
+            : 'Semua media sudah tersimpan aman di all_download.';
+        unawaited(
+          _bridge.showDownloadCompleteNotification(
+            title: title,
+            body: body,
+            hasErrors: failCount > 0,
+          ),
+        );
+      }
     }
   }
 
@@ -3365,6 +3696,11 @@ class DownloadManager extends ChangeNotifier {
     _albumMetaFlushTimer?.cancel();
     _progressSub?.cancel();
     _shareSub?.cancel();
+    _actionSub?.cancel();
+    if (_foregroundServiceActive) {
+      _foregroundServiceActive = false;
+      unawaited(_bridge.stopDownloadService());
+    }
     for (final token in _directCancelTokens.values) {
       if (!token.isCancelled) token.cancel();
     }

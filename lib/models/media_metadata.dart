@@ -181,3 +181,75 @@ class TaggedAlbumMatch {
         albumName: albumName,
       );
 }
+
+/// Summary of a tag across all visible albums (for Global Tag Explorer).
+class TagSummary {
+  final String tag;
+  final int albumCount;
+
+  const TagSummary({
+    required this.tag,
+    required this.albumCount,
+  });
+}
+
+/// A media item currently sitting in the app's Recycle Bin / Trash
+/// (`Documents/.all_download_vault/.trash/`) ready to be restored or purged.
+class TrashItem {
+  final String id;
+  final String trashPath;
+  final String originalPath;
+  final String fileName;
+  final String mimeType;
+  final String mediaKind;
+  final int fileSize;
+  final bool isPrivate;
+  final String platformFolder;
+  final String creatorFolder;
+  final String albumFolder;
+  final DateTime deletedAt;
+
+  const TrashItem({
+    required this.id,
+    required this.trashPath,
+    required this.originalPath,
+    required this.fileName,
+    required this.mimeType,
+    required this.mediaKind,
+    required this.fileSize,
+    required this.isPrivate,
+    required this.platformFolder,
+    required this.creatorFolder,
+    required this.albumFolder,
+    required this.deletedAt,
+  });
+
+  bool get isVideo => mediaKind == 'video' || mimeType.startsWith('video/');
+  bool get isAudio => mediaKind == 'audio' || mimeType.startsWith('audio/');
+  bool get isImage => !isVideo && !isAudio;
+
+  int remainingDays(int retentionDays) {
+    if (retentionDays <= 0) return -1;
+    final ageDays = DateTime.now().difference(deletedAt).inDays;
+    return (retentionDays - ageDays).clamp(0, retentionDays);
+  }
+
+  factory TrashItem.fromMap(Map<dynamic, dynamic> map) {
+    final deletedMs = (map['deletedAtMs'] as num?)?.toInt() ??
+        DateTime.now().millisecondsSinceEpoch;
+    return TrashItem(
+      id: map['id']?.toString() ?? '',
+      trashPath: map['trashPath']?.toString() ?? '',
+      originalPath: map['originalPath']?.toString() ?? '',
+      fileName: map['fileName']?.toString() ?? 'media',
+      mimeType: map['mimeType']?.toString() ?? 'image/jpeg',
+      mediaKind: map['mediaKind']?.toString() ?? 'image',
+      fileSize: (map['fileSize'] as num?)?.toInt() ?? 0,
+      isPrivate: map['isPrivate'] as bool? ?? true,
+      platformFolder: map['platformFolder']?.toString() ?? 'Pixiv',
+      creatorFolder: map['creatorFolder']?.toString() ?? 'Umum',
+      albumFolder: map['albumFolder']?.toString() ?? '',
+      deletedAt: DateTime.fromMillisecondsSinceEpoch(deletedMs),
+    );
+  }
+}

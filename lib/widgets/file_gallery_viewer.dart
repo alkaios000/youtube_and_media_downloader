@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
@@ -9,6 +10,7 @@ import '../models/media_info.dart';
 import '../models/media_metadata.dart';
 import '../services/download_manager.dart';
 import 'app_feedback.dart';
+import 'in_app_video_player.dart';
 import 'sharp_original_image.dart';
 import 'wallpaper_sheet.dart';
 
@@ -228,6 +230,7 @@ class _FileGalleryViewerState extends State<FileGalleryViewer> {
   bool _isZoomed = false;
   bool _togglingPrivacy = false;
   bool _fastDeleteEnabled = false;
+  final Set<String> _prewarmedPaths = <String>{};
 
   @override
   void initState() {
@@ -235,6 +238,48 @@ class _FileGalleryViewerState extends State<FileGalleryViewer> {
     _images = List<ManagedFile>.from(widget.images);
     _currentIndex = widget.initialIndex.clamp(0, _images.length - 1);
     _pageController = PageController(initialPage: _currentIndex);
+    WidgetsBinding.instance.addPostFrameCallback((_) => _prewarmNeighbors());
+  }
+
+  /// Pre-decodes the immediate next photo (at exact screen physical width, NOT
+  /// full 20MP raw bitmap) so swiping or rapidly tapping Fast Delete transitions
+  /// cleanly in 0ms with ZERO blank frame flicker.
+  void _prewarmNeighbors() {
+    if (!mounted || _images.length <= 1) return;
+    final indicesToWarm = <int>[
+      if (_currentIndex + 1 < _images.length) _currentIndex + 1,
+      if (_fastDeleteEnabled && _currentIndex + 2 < _images.length)
+        _currentIndex + 2,
+      if (_currentIndex + 1 >= _images.length && _currentIndex - 1 >= 0)
+        _currentIndex - 1,
+    ];
+    final mq = MediaQuery.maybeOf(context);
+    final screenPxWidth = mq != null
+        ? (mq.size.width * mq.devicePixelRatio).round().clamp(480, 1440)
+        : 1080;
+
+    for (final idx in indicesToWarm) {
+      final candidate = _images[idx];
+      if (candidate.mediaKind != MediaKind.image ||
+          candidate.savedPath.isEmpty) {
+        continue;
+      }
+      if (!_prewarmedPaths.add(candidate.savedPath)) continue;
+      if (_prewarmedPaths.length > 16) {
+        _prewarmedPaths.remove(_prewarmedPaths.first);
+      }
+      final file = File(candidate.savedPath);
+      if (!file.existsSync()) continue;
+      final provider = ResizeImage(
+        FileImage(file),
+        width: screenPxWidth,
+        policy: ResizeImagePolicy.fit,
+        allowUpscaling: false,
+      );
+      unawaited(
+        precacheImage(provider, context, onError: (_, _) {}),
+      );
+    }
   }
 
   @override
@@ -299,9 +344,25 @@ class _FileGalleryViewerState extends State<FileGalleryViewer> {
                   _currentIndex = idx;
                   _isZoomed = false;
                 });
+                _prewarmNeighbors();
               },
               itemBuilder: (context, index) {
                 final img = _images[index];
+                if (img.mediaKind == MediaKind.video) {
+                  return RepaintBoundary(
+                    key: ValueKey(img.uniqueKey),
+                    child: InAppVideoPlayer(
+                      filePath: img.savedPath,
+                      inlineLoop: false,
+                      autoLoop: img.platformFolder.toLowerCase() == 'pixiv',
+                      showControls: _showChrome,
+                      onTapSurface: () =>
+                          setState(() => _showChrome = !_showChrome),
+                      onOpenExternal: () =>
+                          widget.manager.openManagedFile(img),
+                    ),
+                  );
+                }
                 return RepaintBoundary(
                   key: ValueKey(img.uniqueKey),
                   child: _ZoomablePhotoPage(
@@ -426,6 +487,9 @@ class _FileGalleryViewerState extends State<FileGalleryViewer> {
                               setState(() {
                                 _fastDeleteEnabled = !_fastDeleteEnabled;
                               });
+                              if (_fastDeleteEnabled) {
+                                _prewarmNeighbors();
+                              }
                             },
                             child: Container(
                               padding: const EdgeInsets.symmetric(
@@ -524,17 +588,18 @@ class _FileGalleryViewerState extends State<FileGalleryViewer> {
                                   : _togglePrivacyCurrent,
                             ),
                           ),
-                          Expanded(
-                            child: _ViewerActionBtn(
-                              icon: Icons.wallpaper_rounded,
-                              label: 'Wallpaper',
-                              onTap: () => showSetWallpaperSheet(
-                                context,
-                                manager: widget.manager,
-                                file: _current,
+                          if (_current.mediaKind == MediaKind.image)
+                            Expanded(
+                              child: _ViewerActionBtn(
+                                icon: Icons.wallpaper_rounded,
+                                label: 'Wallpaper',
+                                onTap: () => showSetWallpaperSheet(
+                                  context,
+                                  manager: widget.manager,
+                                  file: _current,
+                                ),
                               ),
                             ),
-                          ),
                           Expanded(
                             child: _ViewerActionBtn(
                               icon: Icons.share_rounded,
@@ -621,11 +686,15 @@ class _FileGalleryViewerState extends State<FileGalleryViewer> {
   Future<void> _confirmDeleteCurrent() async {
     if (_images.isEmpty) return;
     final target = _current;
+    final useTrash = widget.manager.settings.trashEnabled;
     if (!_fastDeleteEnabled) {
       final ok = await showBottomDeleteConfirm(
         context,
-        title: 'Hapus Foto?',
-        message: 'Hapus permanen "${target.fileName}" dari perangkat?',
+        title: useTrash ? 'Pindahkan ke Sampah?' : 'Hapus Foto?',
+        message: useTrash
+            ? 'Pindahkan "${target.fileName}" ke Tempat Sampah? Anda bisa memulihkannya lagi nanti.'
+            : 'Hapus permanen "${target.fileName}" dari perangkat?',
+        confirmLabel: useTrash ? 'Ke Sampah' : 'Hapus',
       );
       if (!ok || !mounted) return;
     } else {
@@ -647,13 +716,18 @@ class _FileGalleryViewerState extends State<FileGalleryViewer> {
       }
     });
 
-    // DownloadManager updates managedFiles synchronously then deletes on background IO.
-    unawaited(widget.manager.deleteManagedFile(target));
+    if (useTrash) {
+      unawaited(_trashWithUndo(target, idx));
+    } else {
+      // DownloadManager updates managedFiles synchronously then deletes on background IO.
+      unawaited(widget.manager.deleteManagedFile(target, permanent: true));
+    }
 
     if (_images.isEmpty) {
       Navigator.pop(context);
       return;
     }
+    _prewarmNeighbors();
     if (wasAtEnd && _pageController.hasClients) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted && _pageController.hasClients && _images.isNotEmpty) {
@@ -663,6 +737,32 @@ class _FileGalleryViewerState extends State<FileGalleryViewer> {
         }
       });
     }
+  }
+
+  Future<void> _trashWithUndo(ManagedFile target, int originalIdx) async {
+    final trashed = await widget.manager.moveManagedFilesToTrash([target]);
+    if (trashed.isEmpty || !mounted) return;
+    final trashId = trashed.first.id;
+    showTopToast(
+      context,
+      'Dipindah ke Sampah',
+      duration: const Duration(seconds: 3),
+      icon: Icons.delete_outline_rounded,
+      actionLabel: 'Urungkan',
+      onAction: () {
+        unawaited(widget.manager.restoreTrashItems([trashId]));
+        if (mounted) {
+          setState(() {
+            final insertAt = originalIdx.clamp(0, _images.length);
+            _images.insert(insertAt, target);
+            _currentIndex = insertAt;
+          });
+          if (_pageController.hasClients) {
+            _pageController.jumpToPage(_currentIndex);
+          }
+        }
+      },
+    );
   }
 
   void _showInfoSheet() {

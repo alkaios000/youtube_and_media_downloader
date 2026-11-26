@@ -7,6 +7,8 @@ import '../models/media_metadata.dart';
 import '../services/download_manager.dart';
 import '../services/storage_service.dart';
 import '../widgets/app_feedback.dart';
+import '../widgets/security_lock_screen.dart';
+import 'trash_screen.dart';
 
 /// Main Settings hub organized into clean categories that navigate to focused
 /// submenu pages so every option is quick to find and uncluttered.
@@ -94,9 +96,40 @@ class SettingsScreen extends StatelessWidget {
                       title: 'Visibilitas Konten',
                       badgeLabel: 'BARU',
                       subtitle: settings.contentVisibilitySummary,
+                      onTap: () async {
+                        if (settings.isSecurityLockActive) {
+                          final ok = await verifySecurityGate(
+                            context,
+                            manager,
+                            title: 'Verifikasi Visibilitas Konten',
+                            subtitle:
+                                'Masukkan PIN atau sidik jari untuk mengubah filter konten',
+                          );
+                          if (!ok || !context.mounted) return;
+                        }
+                        _openSubmenu(
+                          context,
+                          _ContentVisibilitySubmenu(manager: manager),
+                        );
+                      },
+                    ),
+                    const Divider(height: 1, indent: 68),
+                    _SettingsMenuTile(
+                      icon: Icons.security_rounded,
+                      iconColor: settings.isSecurityLockActive ||
+                              settings.secureScreenEnabled
+                          ? const Color(0xFF22C55E)
+                          : const Color(0xFF6366F1),
+                      title: 'Keamanan & Privasi',
+                      badgeLabel: 'BARU',
+                      subtitle: settings.isSecurityLockActive
+                          ? 'Kunci aktif (${settings.appLockScope == 'vault' ? 'Brankas File' : 'Seluruh App'})${settings.secureScreenEnabled ? ' • Anti-Preview' : ''}'
+                          : (settings.secureScreenEnabled
+                              ? 'Anti-Preview Recent Apps aktif'
+                              : 'PIN, Sidik Jari, Anti-Preview Recent Apps & Mode Aman'),
                       onTap: () => _openSubmenu(
                         context,
-                        _ContentVisibilitySubmenu(manager: manager),
+                        _SecurityPrivacySubmenu(manager: manager),
                       ),
                     ),
                   ],
@@ -421,6 +454,83 @@ class _DownloadRateLimitSubmenu extends StatelessWidget {
                         settings.copyWith(useAria2c: v),
                       ),
                     ),
+                  ],
+                ),
+              ),
+
+              const SizedBox(height: 14),
+
+              // Recycle Bin / Trash Card (protects Fast Delete!)
+              Card(
+                clipBehavior: Clip.antiAlias,
+                child: Column(
+                  children: [
+                    SwitchListTile(
+                      secondary: const Icon(Icons.delete_outline_rounded),
+                      title: const Text('Tempat Sampah (Trash) & Undo'),
+                      subtitle: const Text(
+                        'Foto/video yang dihapus (termasuk Fast Delete) dipindah sementara ke Sampah agar bisa di-Urungkan',
+                      ),
+                      value: settings.trashEnabled,
+                      onChanged: (v) => manager.updateSettings(
+                        settings.copyWith(trashEnabled: v),
+                      ),
+                    ),
+                    if (settings.trashEnabled) ...[
+                      const Divider(height: 1),
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(16, 12, 16, 14),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              'Auto-Hapus Sampah: ${settings.trashRetentionLabel}',
+                              style: theme.textTheme.labelMedium?.copyWith(
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                            const SizedBox(height: 8),
+                            Wrap(
+                              spacing: 8,
+                              runSpacing: 6,
+                              children: [
+                                for (final days in const [7, 14, 30, 0])
+                                  ChoiceChip(
+                                    label: Text(
+                                      days == 0 ? 'Manual' : '$days hari',
+                                    ),
+                                    selected:
+                                        settings.trashRetentionDays == days,
+                                    showCheckmark: false,
+                                    visualDensity: VisualDensity.compact,
+                                    onSelected: (_) => manager.updateSettings(
+                                      settings.copyWith(
+                                        trashRetentionDays: days,
+                                      ),
+                                    ),
+                                  ),
+                              ],
+                            ),
+                          ],
+                        ),
+                      ),
+                      const Divider(height: 1),
+                      ListTile(
+                        leading: const Icon(Icons.restore_from_trash_rounded),
+                        title: const Text('Buka Tempat Sampah'),
+                        subtitle: Text(
+                          manager.trashCount > 0
+                              ? '${manager.trashCount} item menunggu di Sampah'
+                              : 'Tempat Sampah kosong',
+                        ),
+                        trailing: const Icon(Icons.chevron_right_rounded),
+                        onTap: () => Navigator.of(context).push(
+                          MaterialPageRoute<void>(
+                            builder: (_) => TrashScreen(manager: manager),
+                          ),
+                        ),
+                      ),
+                    ],
                   ],
                 ),
               ),
@@ -1197,6 +1307,305 @@ class _EngineSystemSubmenu extends StatelessWidget {
                               ? 'Aktif'
                               : 'Aktifkan',
                         ),
+                      ),
+                    ),
+                    const Divider(height: 1),
+                    SwitchListTile(
+                      secondary: Icon(
+                        Icons.notifications_active_outlined,
+                        color: (settings.notificationsEnabled &&
+                                manager.permissionStatus.notificationGranted)
+                            ? const Color(0xFF22C55E)
+                            : const Color(0xFFF59E0B),
+                      ),
+                      title: const Text('Notifikasi & Layanan Latar Belakang'),
+                      subtitle: Text(
+                        !manager.permissionStatus.notificationGranted
+                            ? 'Izin notifikasi belum aktif — nyalakan agar progres unduhan & Foreground Service tetap berjalan saat layar mati'
+                            : (settings.notificationsEnabled
+                                ? 'Aktif — tampilkan progres unduhan, tombol Jeda Semua, dan notifikasi saat selesai'
+                                : 'Nonaktif — progres unduhan tidak ditampilkan di bar notifikasi'),
+                      ),
+                      value: settings.notificationsEnabled &&
+                          manager.permissionStatus.notificationGranted,
+                      onChanged: (v) async {
+                        if (v && !manager.permissionStatus.notificationGranted) {
+                          final ok =
+                              await manager.requestNotificationPermission();
+                          if (!ok && context.mounted) {
+                            showTopToast(
+                              context,
+                              'Izinkan Notifikasi di pengaturan sistem agar layanan anti-kill aktif.',
+                              isError: true,
+                            );
+                            return;
+                          }
+                        }
+                        await manager.updateSettings(
+                          settings.copyWith(notificationsEnabled: v),
+                        );
+                      },
+                    ),
+                    const Divider(height: 1),
+                    ListTile(
+                      leading: Icon(
+                        manager.permissionStatus.batteryOptimizationIgnored
+                            ? Icons.battery_charging_full_rounded
+                            : Icons.battery_alert_rounded,
+                        color: manager.permissionStatus.batteryOptimizationIgnored
+                            ? const Color(0xFF22C55E)
+                            : const Color(0xFFF59E0B),
+                      ),
+                      title: const Text('Anti-Kill Baterai (MIUI / HyperOS)'),
+                      subtitle: Text(
+                        manager.permissionStatus.batteryOptimizationIgnored
+                            ? 'Aktif — aplikasi dikecualikan dari penghemat baterai agar unduhan massal ratusan album tidak terputus di latar belakang'
+                            : 'Disarankan aktifkan di HP Xiaomi/MIUI agar sistem tidak mematikan proses unduhan saat layar terkunci',
+                      ),
+                      trailing: FilledButton.tonal(
+                        onPressed: () async {
+                          await manager.requestIgnoreBatteryOptimizations();
+                        },
+                        child: Text(
+                          manager.permissionStatus.batteryOptimizationIgnored
+                              ? 'Aktif'
+                              : 'Bebaskan',
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+}
+
+// =============================================================================
+// SUBMENU: Keamanan & Privasi (PIN, Biometrik, FLAG_SECURE, Stealth)
+// =============================================================================
+class _SecurityPrivacySubmenu extends StatelessWidget {
+  final DownloadManager manager;
+
+  const _SecurityPrivacySubmenu({required this.manager});
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Scaffold(
+      appBar: AppBar(title: const Text('Keamanan & Privasi')),
+      body: ListenableBuilder(
+        listenable: manager,
+        builder: (context, _) {
+          final settings = manager.settings;
+          return ListView(
+            padding: const EdgeInsets.fromLTRB(16, 8, 16, 32),
+            children: [
+              Card(
+                clipBehavior: Clip.antiAlias,
+                child: Column(
+                  children: [
+                    SwitchListTile(
+                      secondary: Icon(
+                        settings.isSecurityLockActive
+                            ? Icons.lock_rounded
+                            : Icons.lock_open_rounded,
+                        color: settings.isSecurityLockActive
+                            ? const Color(0xFF22C55E)
+                            : theme.colorScheme.onSurfaceVariant,
+                      ),
+                      title: const Text('Kunci Keamanan Aplikasi / Brankas'),
+                      subtitle: Text(
+                        settings.isSecurityLockActive
+                            ? 'Aktif — melindungi koleksi & pengaturan dengan ${settings.hasPinConfigured ? 'PIN' : ''}${settings.hasPinConfigured && settings.appLockUseBiometric ? ' + ' : ''}${settings.appLockUseBiometric ? 'Sidik Jari / Kunci HP' : ''}'
+                            : 'Aktifkan PIN dan/atau Sidik Jari agar koleksi tetap aman',
+                      ),
+                      value: settings.appLockEnabled,
+                      onChanged: (enable) async {
+                        if (enable) {
+                          var nextPinHash = settings.appLockPinHash;
+                          final canBio =
+                              await manager.canAuthenticateBiometric();
+                          if (!context.mounted) return;
+                          if (nextPinHash.isEmpty && !canBio) {
+                            final pinHash = await showPinSetupSheet(context);
+                            if (pinHash == null || !context.mounted) return;
+                            nextPinHash = pinHash;
+                          } else if (nextPinHash.isEmpty) {
+                            final pinHash = await showPinSetupSheet(context);
+                            if (pinHash != null) nextPinHash = pinHash;
+                          }
+                          await manager.updateSettings(
+                            settings.copyWith(
+                              appLockEnabled: true,
+                              appLockPinHash: nextPinHash,
+                              appLockUseBiometric: canBio,
+                            ),
+                          );
+                          if (context.mounted) {
+                            showTopToast(
+                              context,
+                              'Kunci keamanan aktif!',
+                              icon: Icons.lock_rounded,
+                            );
+                          }
+                        } else {
+                          final ok = await verifySecurityGate(
+                            context,
+                            manager,
+                            title: 'Nonaktifkan Kunci',
+                            subtitle:
+                                'Verifikasi terlebih dahulu untuk mematikan kunci',
+                          );
+                          if (!ok || !context.mounted) return;
+                          await manager.updateSettings(
+                            settings.copyWith(appLockEnabled: false),
+                          );
+                          if (context.mounted) {
+                            showTopToast(
+                              context,
+                              'Kunci keamanan dinonaktifkan.',
+                              icon: Icons.lock_open_rounded,
+                            );
+                          }
+                        }
+                      },
+                    ),
+                    const Divider(height: 1),
+                    ListTile(
+                      leading: const Icon(Icons.pin_outlined),
+                      title: Text(
+                        settings.hasPinConfigured
+                            ? 'Ubah PIN Keamanan'
+                            : 'Atur PIN (4–6 Digit)',
+                      ),
+                      subtitle: Text(
+                        settings.hasPinConfigured
+                            ? 'PIN sudah terpasang (tersimpan aman di backup anti-hilang)'
+                            : 'Buat PIN cadangan jika sidik jari tidak tersedia',
+                      ),
+                      trailing: const Icon(Icons.chevron_right_rounded),
+                      onTap: () async {
+                        if (settings.hasPinConfigured &&
+                            settings.isSecurityLockActive) {
+                          final ok = await verifySecurityGate(
+                            context,
+                            manager,
+                            title: 'Verifikasi PIN Lama',
+                            subtitle: 'Masukkan PIN lama sebelum mengganti PIN',
+                          );
+                          if (!ok || !context.mounted) return;
+                        }
+                        final pinHash = await showPinSetupSheet(
+                          context,
+                          isChange: settings.hasPinConfigured,
+                        );
+                        if (pinHash == null || !context.mounted) return;
+                        await manager.updateSettings(
+                          settings.copyWith(
+                            appLockPinHash: pinHash,
+                            appLockEnabled: true,
+                          ),
+                        );
+                        if (context.mounted) {
+                          showTopToast(
+                            context,
+                            'PIN keamanan berhasil disimpan.',
+                            icon: Icons.verified_user_rounded,
+                          );
+                        }
+                      },
+                    ),
+                    const Divider(height: 1),
+                    SwitchListTile(
+                      secondary: const Icon(Icons.fingerprint_rounded),
+                      title: const Text('Gunakan Sidik Jari / Kunci Layar HP'),
+                      subtitle: const Text(
+                        'Buka kunci cepat menggunakan sensor sidik jari atau pola/PIN perangkat',
+                      ),
+                      value: settings.appLockUseBiometric,
+                      onChanged: (v) async {
+                        if (v) {
+                          final canBio =
+                              await manager.canAuthenticateBiometric();
+                          if (!canBio && context.mounted) {
+                            showTopToast(
+                              context,
+                              'Perangkat belum mengaktifkan sidik jari / kunci layar sistem.',
+                              isError: true,
+                            );
+                            return;
+                          }
+                        }
+                        await manager.updateSettings(
+                          settings.copyWith(appLockUseBiometric: v),
+                        );
+                      },
+                    ),
+                    const Divider(height: 1),
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(16, 12, 16, 14),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            'Cakupan Kunci',
+                            style: theme.textTheme.labelMedium?.copyWith(
+                              fontWeight: FontWeight.w800,
+                            ),
+                          ),
+                          const SizedBox(height: 8),
+                          Wrap(
+                            spacing: 8,
+                            runSpacing: 6,
+                            children: [
+                              ChoiceChip(
+                                label: const Text('Seluruh Aplikasi'),
+                                selected: settings.appLockScope == 'app',
+                                onSelected: (_) => manager.updateSettings(
+                                  settings.copyWith(appLockScope: 'app'),
+                                ),
+                              ),
+                              ChoiceChip(
+                                label: const Text('Tab File & Visibilitas Saja'),
+                                selected: settings.appLockScope == 'vault',
+                                onSelected: (_) => manager.updateSettings(
+                                  settings.copyWith(appLockScope: 'vault'),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 14),
+              Card(
+                clipBehavior: Clip.antiAlias,
+                child: Column(
+                  children: [
+                    SwitchListTile(
+                      secondary: const Icon(Icons.phonelink_lock_rounded),
+                      title: const Text('Sembunyikan Preview Recent Apps'),
+                      subtitle: const Text(
+                        'Aktifkan FLAG_SECURE Android agar layar aplikasi tampil kosong di Recent Apps dan mencegah tangkapan layar tidak sengaja',
+                      ),
+                      value: settings.secureScreenEnabled,
+                      onChanged: (v) => manager.updateSettings(
+                        settings.copyWith(secureScreenEnabled: v),
+                      ),
+                    ),
+                    const Divider(height: 1),
+                    ListTile(
+                      leading: const Icon(Icons.visibility_off_outlined),
+                      title: const Text('Tips Mode Aman Cepat (Stealth)'),
+                      subtitle: const Text(
+                        'Tekan tahan ikon tab "File" di navigasi bawah kapan saja untuk langsung menyembunyikan seluruh konten Ecchi & NSFW seketika.',
                       ),
                     ),
                   ],

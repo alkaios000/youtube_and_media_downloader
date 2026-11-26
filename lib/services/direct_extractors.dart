@@ -261,8 +261,9 @@ class DirectExtractors {
       final userId = meta['userId']?.toString().trim() ?? '';
       final profileUrl =
           userId.isNotEmpty ? 'https://www.pixiv.net/users/$userId' : null;
-      final illustType = (meta['illustType'] as num?)?.toInt() ?? 0;
-      final xRestrict = (meta['xRestrict'] as num?)?.toInt() ?? 0;
+      final illustType =
+          int.tryParse(meta['illustType']?.toString() ?? '') ?? 0;
+      final xRestrict = int.tryParse(meta['xRestrict']?.toString() ?? '') ?? 0;
       final isR18 = xRestrict > 0;
       final r18Tag = xRestrict == 2 ? 'R-18G' : (xRestrict == 1 ? 'R-18' : '');
       final artworkTags = parsePixivTags(meta['tags']);
@@ -284,7 +285,10 @@ class DirectExtractors {
         if ((headers['Cookie'] ?? '').isNotEmpty) 'Cookie': headers['Cookie']!,
       };
 
-      if (illustType == 2) {
+      final isUgoiraArtwork = illustType == 2 ||
+          metaOrig.toLowerCase().contains('_ugoira') ||
+          metaReg.toLowerCase().contains('_ugoira');
+      if (isUgoiraArtwork) {
         final ugoira = await _fetchPixivUgoiraMetaWithHeaders(illustId, headers);
         if (ugoira == null) {
           if (isR18 && !hasSession) {
@@ -559,10 +563,12 @@ class DirectExtractors {
         final workTitle =
             (work?['title']?.toString() ?? 'Pixiv_$id').trim();
         final thumb = work?['url']?.toString() ?? '';
-        final pageCount = (work?['pageCount'] as num?)?.toInt() ?? 0;
-        final illustType = (work?['illustType'] as num?)?.toInt() ?? 0;
-        final xRestrict = (work?['xRestrict'] as num?)?.toInt() ?? 0;
-        final isUgoira = illustType == 2;
+        final pageCount = int.tryParse(work?['pageCount']?.toString() ?? '') ?? 0;
+        final illustType =
+            int.tryParse(work?['illustType']?.toString() ?? '') ?? 0;
+        final xRestrict = int.tryParse(work?['xRestrict']?.toString() ?? '') ?? 0;
+        final isUgoira = illustType == 2 ||
+            thumb.toLowerCase().contains('_ugoira');
         final isR18 = xRestrict > 0;
         final workTags = parsePixivTags(work?['tags']);
 
@@ -751,10 +757,12 @@ class DirectExtractors {
           final title = (w['title']?.toString() ?? 'Pixiv_$id').trim();
           final artist = (w['userName']?.toString() ?? 'Pixiv').trim();
           final thumb = w['url']?.toString() ?? '';
-          final pageCount = (w['pageCount'] as num?)?.toInt() ?? 1;
-          final illustType = (w['illustType'] as num?)?.toInt() ?? 0;
-          final xRestrict = (w['xRestrict'] as num?)?.toInt() ?? 0;
-          final isUgoira = illustType == 2;
+          final pageCount = int.tryParse(w['pageCount']?.toString() ?? '') ?? 1;
+          final illustType =
+              int.tryParse(w['illustType']?.toString() ?? '') ?? 0;
+          final xRestrict = int.tryParse(w['xRestrict']?.toString() ?? '') ?? 0;
+          final isUgoira =
+              illustType == 2 || thumb.toLowerCase().contains('_ugoira');
           final isR18 = xRestrict > 0;
           final workTags = parsePixivTags(w['tags']);
 

@@ -21,6 +21,8 @@ void showTopToast(
   IconData? icon,
   Color? accentColor,
   bool isError = false,
+  String? actionLabel,
+  VoidCallback? onAction,
 }) {
   final overlay = Overlay.maybeOf(context, rootOverlay: true);
   if (overlay == null) return;
@@ -38,6 +40,8 @@ void showTopToast(
       icon: icon,
       accentColor: accentColor,
       isError: isError,
+      actionLabel: actionLabel,
+      onAction: onAction,
       onRemove: () {
         if (_activeTopToastEntry == entry) {
           _activeTopToastEntry = null;
@@ -65,6 +69,8 @@ class _TopToastBanner extends StatefulWidget {
   final IconData? icon;
   final Color? accentColor;
   final bool isError;
+  final String? actionLabel;
+  final VoidCallback? onAction;
   final VoidCallback onRemove;
   final ValueChanged<VoidCallback> onRegisterDismiss;
 
@@ -76,6 +82,8 @@ class _TopToastBanner extends StatefulWidget {
     this.icon,
     this.accentColor,
     this.isError = false,
+    this.actionLabel,
+    this.onAction,
   });
 
   @override
@@ -214,6 +222,37 @@ class _TopToastBannerState extends State<_TopToastBanner>
                               ),
                             ),
                           ),
+                          if (widget.actionLabel != null &&
+                              widget.onAction != null) ...[
+                            const SizedBox(width: 10),
+                            TextButton(
+                              onPressed: () {
+                                final cb = widget.onAction;
+                                _dismiss();
+                                cb?.call();
+                              },
+                              style: TextButton.styleFrom(
+                                foregroundColor: accent,
+                                backgroundColor: accent.withValues(alpha: 0.16),
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 10,
+                                  vertical: 4,
+                                ),
+                                minimumSize: Size.zero,
+                                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                                shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(8),
+                                ),
+                              ),
+                              child: Text(
+                                widget.actionLabel!,
+                                style: const TextStyle(
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w800,
+                                ),
+                              ),
+                            ),
+                          ],
                         ],
                       ),
                     ),

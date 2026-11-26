@@ -1,6 +1,7 @@
 import 'package:flutter/services.dart';
 
 import '../models/managed_file.dart';
+import '../models/media_metadata.dart';
 
 class EngineStatus {
   final bool initialized;
@@ -119,6 +120,8 @@ class EngineUpdateResult {
 class PermissionStatusInfo {
   final bool granted;
   final bool allFilesGranted;
+  final bool notificationGranted;
+  final bool batteryOptimizationIgnored;
   final bool permanentlyDenied;
   final int sdkInt;
   final List<String> missing;
@@ -126,6 +129,8 @@ class PermissionStatusInfo {
   const PermissionStatusInfo({
     required this.granted,
     this.allFilesGranted = true,
+    this.notificationGranted = true,
+    this.batteryOptimizationIgnored = false,
     required this.permanentlyDenied,
     required this.sdkInt,
     required this.missing,
@@ -134,6 +139,8 @@ class PermissionStatusInfo {
   factory PermissionStatusInfo.unknown() => const PermissionStatusInfo(
         granted: true,
         allFilesGranted: true,
+        notificationGranted: true,
+        batteryOptimizationIgnored: false,
         permanentlyDenied: false,
         sdkInt: 33,
         missing: [],
@@ -143,6 +150,9 @@ class PermissionStatusInfo {
     return PermissionStatusInfo(
       granted: map['granted'] as bool? ?? false,
       allFilesGranted: map['allFilesGranted'] as bool? ?? true,
+      notificationGranted: map['notificationGranted'] as bool? ?? true,
+      batteryOptimizationIgnored:
+          map['batteryOptimizationIgnored'] as bool? ?? false,
       permanentlyDenied: map['permanentlyDenied'] as bool? ?? false,
       sdkInt: (map['sdkInt'] as num?)?.toInt() ?? 33,
       missing: (map['missing'] as List?)
@@ -262,9 +272,12 @@ class NativeBridge {
       EventChannel('com.linkdrop.downloader/progress');
   static const EventChannel _shareChannel =
       EventChannel('com.linkdrop.downloader/share');
+  static const EventChannel _actionChannel =
+      EventChannel('com.linkdrop.downloader/actions');
 
   Stream<NativeProgressEvent>? _progressStream;
   Stream<String>? _shareStream;
+  Stream<String>? _actionStream;
 
   Stream<NativeProgressEvent> get progressStream {
     _progressStream ??= _progressChannel
@@ -280,6 +293,14 @@ class NativeBridge {
         .map((event) => event?.toString() ?? '')
         .where((text) => text.isNotEmpty);
     return _shareStream!;
+  }
+
+  Stream<String> get actionStream {
+    _actionStream ??= _actionChannel
+        .receiveBroadcastStream()
+        .map((event) => event?.toString() ?? '')
+        .where((text) => text.isNotEmpty);
+    return _actionStream!;
   }
 
   Future<EngineStatus> initEngine() async {
@@ -630,6 +651,157 @@ class NativeBridge {
       'items': payload,
     });
     return count ?? 0;
+  }
+
+  Future<List<TrashItem>> moveFilesToTrash(List<ManagedFile> files) async {
+    if (files.isEmpty) return const [];
+    final payload = files
+        .map((f) => <String, dynamic>{
+              'filePath': f.savedPath,
+              'contentUri': f.contentUri,
+              'fileName': f.fileName,
+              'mimeType': f.mimeType,
+              'mediaKind': f.mediaKind.name,
+              'isPrivate': f.isPrivate,
+              'platformFolder': f.platformFolder,
+              'creatorFolder': f.creatorFolder,
+              'albumFolder': f.effectiveAlbumName,
+            })
+        .toList(growable: false);
+    final res = await _channel.invokeMethod<List<dynamic>>('moveFilesToTrash', {
+      'items': payload,
+    });
+    if (res == null) return const [];
+    return res.whereType<Map>().map(TrashItem.fromMap).toList(growable: false);
+  }
+
+  Future<List<TrashItem>> listTrashItems() async {
+    final res = await _channel.invokeMethod<List<dynamic>>('listTrashItems');
+    if (res == null) return const [];
+    return res.whereType<Map>().map(TrashItem.fromMap).toList(growable: false);
+  }
+
+  Future<int> restoreTrashItems(List<String> ids) async {
+    if (ids.isEmpty) return 0;
+    final count = await _channel.invokeMethod<int>('restoreTrashItems', {
+      'ids': ids,
+    });
+    return count ?? 0;
+  }
+
+  Future<int> deleteTrashItemsPermanently(List<String> ids) async {
+    if (ids.isEmpty) return 0;
+    final count =
+        await _channel.invokeMethod<int>('deleteTrashItemsPermanently', {
+      'ids': ids,
+    });
+    return count ?? 0;
+  }
+
+  Future<int> emptyTrash() async {
+    final count = await _channel.invokeMethod<int>('emptyTrash');
+    return count ?? 0;
+  }
+
+  Future<int> purgeExpiredTrash(int maxAgeDays) async {
+    final count = await _channel.invokeMethod<int>('purgeExpiredTrash', {
+      'maxAgeDays': maxAgeDays,
+    });
+    return count ?? 0;
+  }
+
+  Future<bool> setSecureScreen(bool enabled) async {
+    try {
+      final ok = await _channel.invokeMethod<bool>('setSecureScreen', {
+        'enabled': enabled,
+      });
+      return ok ?? false;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Future<bool> canAuthenticateBiometric() async {
+    try {
+      final ok =
+          await _channel.invokeMethod<bool>('canAuthenticateBiometric');
+      return ok ?? false;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Future<bool> authenticateBiometric({
+    String title = 'Buka Kunci all_download',
+    String subtitle = 'Verifikasi sidik jari atau kunci layar HP Anda',
+  }) async {
+    try {
+      final ok = await _channel.invokeMethod<bool>('authenticateBiometric', {
+        'title': title,
+        'subtitle': subtitle,
+      });
+      return ok ?? false;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Future<bool> requestNotificationPermission() async {
+    try {
+      final ok =
+          await _channel.invokeMethod<bool>('requestNotificationPermission');
+      return ok ?? false;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Future<bool> requestIgnoreBatteryOptimizations() async {
+    try {
+      final ok = await _channel
+          .invokeMethod<bool>('requestIgnoreBatteryOptimizations');
+      return ok ?? false;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Future<void> updateDownloadNotification({
+    required String title,
+    required String subtitle,
+    required int progress,
+    required bool indeterminate,
+    required int activeCount,
+  }) async {
+    try {
+      await _channel.invokeMethod<bool>('updateDownloadNotification', {
+        'title': title,
+        'subtitle': subtitle,
+        'progress': progress,
+        'indeterminate': indeterminate,
+        'activeCount': activeCount,
+      });
+    } catch (_) {}
+  }
+
+  Future<void> showDownloadCompleteNotification({
+    required String title,
+    required String body,
+    bool hasErrors = false,
+  }) async {
+    try {
+      await _channel.invokeMethod<bool>('showDownloadCompleteNotification', {
+        'title': title,
+        'body': body,
+        'hasErrors': hasErrors,
+      });
+    } catch (_) {}
+  }
+
+  Future<void> stopDownloadService() async {
+    try {
+      await _channel.invokeMethod<bool>('stopDownloadService');
+    } catch (_) {}
   }
 
   Future<int> unlockFiles(List<ManagedFile> files) async {
