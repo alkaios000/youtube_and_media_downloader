@@ -31,6 +31,7 @@ class _FileGalleryViewerState extends State<FileGalleryViewer> {
   late int _currentIndex;
   bool _showChrome = true;
   bool _isZoomed = false;
+  bool _togglingPrivacy = false;
 
   @override
   void initState() {
@@ -176,13 +177,15 @@ class _FileGalleryViewerState extends State<FileGalleryViewer> {
                     children: [
                       _ViewerActionBtn(
                         icon: _current.isPrivate
-                            ? Icons.lock_open_rounded
-                            : Icons.lock_outline_rounded,
-                        label: _current.isPrivate ? 'Unlock' : 'Kunci',
+                            ? Icons.lock_rounded
+                            : Icons.lock_open_rounded,
+                        label: _current.isPrivate ? 'Privat' : 'Galeri',
                         color: _current.isPrivate
-                            ? const Color(0xFF4ADE80)
-                            : const Color(0xFFFBBF24),
-                        onTap: _togglePrivacyCurrent,
+                            ? const Color(0xFFFBBF24)
+                            : const Color(0xFF4ADE80),
+                        activePill: true,
+                        loading: _togglingPrivacy,
+                        onTap: _togglingPrivacy ? () {} : _togglePrivacyCurrent,
                       ),
                       _ViewerActionBtn(
                         icon: Icons.share_rounded,
@@ -212,24 +215,30 @@ class _FileGalleryViewerState extends State<FileGalleryViewer> {
   }
 
   Future<void> _togglePrivacyCurrent() async {
-    final target = _current;
-    final wasPrivate = target.isPrivate;
-    final count = wasPrivate
-        ? await widget.manager.unlockManagedFiles([target])
-        : await widget.manager.lockManagedFiles([target]);
-    if (!mounted || count == 0) return;
+    if (_togglingPrivacy) return;
+    setState(() => _togglingPrivacy = true);
+    try {
+      final target = _current;
+      final wasPrivate = target.isPrivate;
+      final count = wasPrivate
+          ? await widget.manager.unlockManagedFiles([target])
+          : await widget.manager.lockManagedFiles([target]);
+      if (!mounted || count == 0) return;
 
-    final updated = widget.manager.managedFiles
-        .where((f) =>
-            f.platformFolder == target.platformFolder &&
-            f.creatorFolder == target.creatorFolder &&
-            f.fileName == target.fileName)
-        .firstOrNull;
-    setState(() {
-      if (updated != null) {
-        _images[_currentIndex] = updated;
-      }
-    });
+      final updated = widget.manager.managedFiles
+          .where((f) =>
+              f.platformFolder == target.platformFolder &&
+              f.creatorFolder == target.creatorFolder &&
+              f.fileName == target.fileName)
+          .firstOrNull;
+      setState(() {
+        if (updated != null) {
+          _images[_currentIndex] = updated;
+        }
+      });
+    } finally {
+      if (mounted) setState(() => _togglingPrivacy = false);
+    }
   }
 
   Future<void> _confirmDeleteCurrent() async {
@@ -471,6 +480,8 @@ class _ViewerActionBtn extends StatelessWidget {
   final IconData icon;
   final String label;
   final Color color;
+  final bool activePill;
+  final bool loading;
   final VoidCallback onTap;
 
   const _ViewerActionBtn({
@@ -478,26 +489,49 @@ class _ViewerActionBtn extends StatelessWidget {
     required this.label,
     required this.onTap,
     this.color = Colors.white,
+    this.activePill = false,
+    this.loading = false,
   });
 
   @override
   Widget build(BuildContext context) {
     return InkWell(
       onTap: onTap,
-      borderRadius: BorderRadius.circular(12),
-      child: Padding(
+      borderRadius: BorderRadius.circular(14),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 160),
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+        decoration: activePill
+            ? BoxDecoration(
+                color: color.withValues(alpha: 0.18),
+                borderRadius: BorderRadius.circular(14),
+                border: Border.all(color: color.withValues(alpha: 0.5)),
+              )
+            : null,
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(icon, color: color, size: 24),
+            if (loading)
+              SizedBox(
+                width: 24,
+                height: 24,
+                child: Padding(
+                  padding: const EdgeInsets.all(3),
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2,
+                    color: color,
+                  ),
+                ),
+              )
+            else
+              Icon(icon, color: color, size: 24),
             const SizedBox(height: 4),
             Text(
               label,
               style: TextStyle(
                 color: color,
                 fontSize: 12,
-                fontWeight: FontWeight.w600,
+                fontWeight: FontWeight.w700,
               ),
             ),
           ],
