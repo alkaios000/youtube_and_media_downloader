@@ -11,6 +11,7 @@ import '../models/download_item.dart';
 class StorageService {
   static const String _historyKey = 'linkdrop_download_history_v1';
   static const String _settingsKey = 'linkdrop_settings_v1';
+  static const String _downloadedMarkersKey = 'all_download_markers_v1';
 
   Future<List<DownloadItem>> loadHistory() async {
     final prefs = await SharedPreferences.getInstance();
@@ -29,12 +30,25 @@ class StorageService {
 
   Future<void> saveHistory(List<DownloadItem> items) async {
     final prefs = await SharedPreferences.getInstance();
-    // Persist all completed/terminal history items without artificial cap.
     final toSave = items
         .where((item) => !item.isActive)
         .map((e) => e.toJson())
         .toList();
     await prefs.setString(_historyKey, jsonEncode(toSave));
+  }
+
+  /// Returns null when markers have never been saved yet (first run / upgrade).
+  Future<Set<String>?> loadDownloadedMarkers() async {
+    final prefs = await SharedPreferences.getInstance();
+    if (!prefs.containsKey(_downloadedMarkersKey)) return null;
+    final list = prefs.getStringList(_downloadedMarkersKey);
+    if (list == null) return <String>{};
+    return list.where((e) => e.isNotEmpty).toSet();
+  }
+
+  Future<void> saveDownloadedMarkers(Set<String> markers) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setStringList(_downloadedMarkersKey, markers.toList(growable: false));
   }
 
   Future<AppSettings> loadSettings() async {

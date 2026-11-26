@@ -10,9 +10,108 @@ enum DownloadStatus {
   cancelled,
 }
 
+/// Tracks live download progress & saved location of each individual file
+/// inside a single-file or multi-file (album/carousel/Pixiv) download task.
+class SubFileTask {
+  final String id;
+  final String fileName;
+  final DownloadStatus status;
+  final double progress; // 0..100, negative = indeterminate
+  final int downloadedBytes;
+  final int totalBytes;
+  final String speedText;
+  final String? savedPath;
+  final String? contentUri;
+  final String? mimeType;
+  final String? errorMessage;
+
+  const SubFileTask({
+    required this.id,
+    required this.fileName,
+    required this.status,
+    this.progress = 0,
+    this.downloadedBytes = 0,
+    this.totalBytes = 0,
+    this.speedText = '',
+    this.savedPath,
+    this.contentUri,
+    this.mimeType,
+    this.errorMessage,
+  });
+
+  bool get isActive =>
+      status == DownloadStatus.queued ||
+      status == DownloadStatus.downloading ||
+      status == DownloadStatus.saving;
+
+  SubFileTask copyWith({
+    String? fileName,
+    DownloadStatus? status,
+    double? progress,
+    int? downloadedBytes,
+    int? totalBytes,
+    String? speedText,
+    String? savedPath,
+    String? contentUri,
+    String? mimeType,
+    String? errorMessage,
+  }) {
+    return SubFileTask(
+      id: id,
+      fileName: fileName ?? this.fileName,
+      status: status ?? this.status,
+      progress: progress ?? this.progress,
+      downloadedBytes: downloadedBytes ?? this.downloadedBytes,
+      totalBytes: totalBytes ?? this.totalBytes,
+      speedText: speedText ?? this.speedText,
+      savedPath: savedPath ?? this.savedPath,
+      contentUri: contentUri ?? this.contentUri,
+      mimeType: mimeType ?? this.mimeType,
+      errorMessage: errorMessage ?? this.errorMessage,
+    );
+  }
+
+  Map<String, dynamic> toJson() {
+    return {
+      'id': id,
+      'fileName': fileName,
+      'status': status.name,
+      'progress': progress,
+      'downloadedBytes': downloadedBytes,
+      'totalBytes': totalBytes,
+      'speedText': speedText,
+      'savedPath': savedPath,
+      'contentUri': contentUri,
+      'mimeType': mimeType,
+      'errorMessage': errorMessage,
+    };
+  }
+
+  factory SubFileTask.fromJson(Map<String, dynamic> json) {
+    final parsedStatus = DownloadStatus.values.firstWhere(
+      (s) => s.name == json['status'],
+      orElse: () => DownloadStatus.completed,
+    );
+    return SubFileTask(
+      id: json['id']?.toString() ?? '',
+      fileName: json['fileName']?.toString() ?? 'file',
+      status: parsedStatus,
+      progress: (json['progress'] as num?)?.toDouble() ?? 100,
+      downloadedBytes: (json['downloadedBytes'] as num?)?.toInt() ?? 0,
+      totalBytes: (json['totalBytes'] as num?)?.toInt() ?? 0,
+      speedText: json['speedText']?.toString() ?? '',
+      savedPath: json['savedPath']?.toString(),
+      contentUri: json['contentUri']?.toString(),
+      mimeType: json['mimeType']?.toString(),
+      errorMessage: json['errorMessage']?.toString(),
+    );
+  }
+}
+
 class DownloadItem {
   final String id;
   final String sourceUrl;
+  final String markerKey;
   final MediaPlatform platform;
   final String title;
   final String author;
@@ -31,6 +130,7 @@ class DownloadItem {
   final String? mimeType;
   final String? errorMessage;
   final DateTime createdAt;
+  final List<SubFileTask> subFiles;
 
   const DownloadItem({
     required this.id,
@@ -43,6 +143,7 @@ class DownloadItem {
     required this.mediaKind,
     required this.status,
     required this.createdAt,
+    this.markerKey = '',
     this.thumbnailUrl,
     this.progress = 0,
     this.statusText = 'Menyiapkan...',
@@ -53,12 +154,16 @@ class DownloadItem {
     this.fileSize,
     this.mimeType,
     this.errorMessage,
+    this.subFiles = const [],
   });
 
   bool get isActive =>
       status == DownloadStatus.queued ||
       status == DownloadStatus.downloading ||
       status == DownloadStatus.saving;
+
+  int get completedSubFilesCount =>
+      subFiles.where((f) => f.status == DownloadStatus.completed).length;
 
   DownloadItem copyWith({
     DownloadStatus? status,
@@ -71,10 +176,12 @@ class DownloadItem {
     int? fileSize,
     String? mimeType,
     String? errorMessage,
+    List<SubFileTask>? subFiles,
   }) {
     return DownloadItem(
       id: id,
       sourceUrl: sourceUrl,
+      markerKey: markerKey,
       platform: platform,
       title: title,
       author: author,
@@ -93,6 +200,7 @@ class DownloadItem {
       mimeType: mimeType ?? this.mimeType,
       errorMessage: errorMessage ?? this.errorMessage,
       createdAt: createdAt,
+      subFiles: subFiles ?? this.subFiles,
     );
   }
 
@@ -100,6 +208,7 @@ class DownloadItem {
     return {
       'id': id,
       'sourceUrl': sourceUrl,
+      'markerKey': markerKey,
       'platform': platform.name,
       'title': title,
       'author': author,
@@ -117,6 +226,7 @@ class DownloadItem {
       'mimeType': mimeType,
       'errorMessage': errorMessage,
       'createdAt': createdAt.toIso8601String(),
+      'subFiles': subFiles.map((e) => e.toJson()).toList(),
     };
   }
 
@@ -129,10 +239,17 @@ class DownloadItem {
       (k) => k.name == json['mediaKind'],
       orElse: () => MediaKind.video,
     );
+    final rawSubs = json['subFiles'] as List?;
+    final parsedSubs = rawSubs
+            ?.whereType<Map>()
+            .map((e) => SubFileTask.fromJson(Map<String, dynamic>.from(e)))
+            .toList(growable: false) ??
+        const <SubFileTask>[];
 
     return DownloadItem(
       id: json['id']?.toString() ?? '',
       sourceUrl: json['sourceUrl']?.toString() ?? '',
+      markerKey: json['markerKey']?.toString() ?? '',
       platform: MediaPlatformMeta.fromKey(json['platform']?.toString()),
       title: json['title']?.toString() ?? 'Media',
       author: json['author']?.toString() ?? '',
@@ -151,6 +268,7 @@ class DownloadItem {
       errorMessage: json['errorMessage']?.toString(),
       createdAt: DateTime.tryParse(json['createdAt']?.toString() ?? '') ??
           DateTime.now(),
+      subFiles: parsedSubs,
     );
   }
 }

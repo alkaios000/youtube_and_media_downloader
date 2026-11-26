@@ -91,44 +91,59 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
 
   @override
   Widget build(BuildContext context) {
-    return ListenableBuilder(
-      listenable: widget.manager,
-      builder: (context, _) {
-        final activeCount = widget.manager.activeDownloads.length;
-
-        return Scaffold(
-          body: SafeArea(
-            child: IndexedStack(
-              index: _tabIndex,
-              children: [
-                DownloaderScreen(
-                  manager: widget.manager,
-                  urlController: _urlController,
-                  clipboardUrl: _detectedClipboardUrl,
-                  onUseClipboard: () {
-                    final url = _detectedClipboardUrl;
-                    if (url == null) return;
-                    setState(() {
-                      _urlController.text = url;
-                      _detectedClipboardUrl = null;
-                    });
-                    widget.manager.analyzeLink(url);
-                  },
-                  onDismissClipboard: () {
-                    setState(() {
-                      _lastDismissedClipboardUrl = _detectedClipboardUrl;
-                      _detectedClipboardUrl = null;
-                    });
-                  },
-                  onOpenHistoryTab: () => setState(() => _tabIndex = 2),
-                ),
-                FilesScreen(manager: widget.manager),
-                DownloadsScreen(manager: widget.manager),
-                SettingsScreen(manager: widget.manager),
-              ],
+    return Scaffold(
+      body: SafeArea(
+        child: IndexedStack(
+          index: _tabIndex,
+          children: [
+            _ActiveTabListener(
+              active: _tabIndex == 0,
+              listenable: widget.manager,
+              builder: (_) => DownloaderScreen(
+                manager: widget.manager,
+                urlController: _urlController,
+                clipboardUrl: _detectedClipboardUrl,
+                onUseClipboard: () {
+                  final url = _detectedClipboardUrl;
+                  if (url == null) return;
+                  setState(() {
+                    _urlController.text = url;
+                    _detectedClipboardUrl = null;
+                  });
+                  widget.manager.analyzeLink(url);
+                },
+                onDismissClipboard: () {
+                  setState(() {
+                    _lastDismissedClipboardUrl = _detectedClipboardUrl;
+                    _detectedClipboardUrl = null;
+                  });
+                },
+                onOpenHistoryTab: () => setState(() => _tabIndex = 2),
+              ),
             ),
-          ),
-          bottomNavigationBar: NavigationBar(
+            _ActiveTabListener(
+              active: _tabIndex == 1,
+              listenable: widget.manager,
+              builder: (_) => FilesScreen(manager: widget.manager),
+            ),
+            _ActiveTabListener(
+              active: _tabIndex == 2,
+              listenable: widget.manager,
+              builder: (_) => DownloadsScreen(manager: widget.manager),
+            ),
+            _ActiveTabListener(
+              active: _tabIndex == 3,
+              listenable: widget.manager,
+              builder: (_) => SettingsScreen(manager: widget.manager),
+            ),
+          ],
+        ),
+      ),
+      bottomNavigationBar: ListenableBuilder(
+        listenable: widget.manager,
+        builder: (context, _) {
+          final activeCount = widget.manager.activeDownloads.length;
+          return NavigationBar(
             selectedIndex: _tabIndex,
             onDestinationSelected: (index) {
               setState(() => _tabIndex = index);
@@ -168,9 +183,59 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
                 label: 'Pengaturan',
               ),
             ],
-          ),
-        );
-      },
+          );
+        },
+      ),
     );
   }
+}
+
+/// Only rebuilds the currently visible tab when [listenable] notifies,
+/// keeping background tabs completely idle (0% CPU) during heavy bulk downloads
+/// while preserving each tab's full scroll & navigation State.
+class _ActiveTabListener extends StatefulWidget {
+  final bool active;
+  final Listenable listenable;
+  final WidgetBuilder builder;
+
+  const _ActiveTabListener({
+    required this.active,
+    required this.listenable,
+    required this.builder,
+  });
+
+  @override
+  State<_ActiveTabListener> createState() => _ActiveTabListenerState();
+}
+
+class _ActiveTabListenerState extends State<_ActiveTabListener> {
+  @override
+  void initState() {
+    super.initState();
+    widget.listenable.addListener(_onChanged);
+  }
+
+  @override
+  void didUpdateWidget(covariant _ActiveTabListener oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.listenable != widget.listenable) {
+      oldWidget.listenable.removeListener(_onChanged);
+      widget.listenable.addListener(_onChanged);
+    }
+  }
+
+  void _onChanged() {
+    if (widget.active && mounted) {
+      setState(() {});
+    }
+  }
+
+  @override
+  void dispose() {
+    widget.listenable.removeListener(_onChanged);
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => widget.builder(context);
 }

@@ -165,4 +165,37 @@ void main() {
       );
     });
   });
+
+  group('canonicalMarkerKey', () {
+    test('produces identical keys across URL variants for downloaded markers', () {
+      expect(
+        canonicalMarkerKey('https://www.pixiv.net/en/artworks/123456789?ref=profile'),
+        'pixiv:123456789',
+      );
+      expect(
+        canonicalMarkerKey('https://www.pixiv.net/artworks/123456789'),
+        'pixiv:123456789',
+      );
+      expect(
+        canonicalMarkerKey('https://youtu.be/dQw4w9WgXcQ?si=xyz'),
+        'yt:dQw4w9WgXcQ',
+      );
+      expect(
+        canonicalMarkerKey('https://www.youtube.com/watch?v=dQw4w9WgXcQ'),
+        'yt:dQw4w9WgXcQ',
+      );
+      expect(
+        canonicalMarkerKey('https://www.instagram.com/reel/C9xYz123AbC/?igsh=123'),
+        'ig:C9xYz123AbC',
+      );
+      expect(
+        canonicalMarkerKey('https://x.com/user/status/1800000000000000000'),
+        'x:1800000000000000000',
+      );
+      expect(
+        canonicalMarkerKey('https://www.tiktok.com/@creator/video/7345678901234567890'),
+        'tt:7345678901234567890',
+      );
+    });
+  });
 }

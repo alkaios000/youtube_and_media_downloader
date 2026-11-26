@@ -43,18 +43,20 @@ class _LinkDropAppState extends State<LinkDropApp> {
 
   @override
   Widget build(BuildContext context) {
-    return ListenableBuilder(
-      listenable: _manager,
-      builder: (context, _) {
+    // Only listen to themeNotifier so MaterialApp NEVER rebuilds during downloads!
+    return ValueListenableBuilder<ThemeMode>(
+      valueListenable: _manager.themeNotifier,
+      builder: (context, themeMode, child) {
         return MaterialApp(
           title: 'all_download',
           debugShowCheckedModeBanner: false,
-          themeMode: _manager.settings.themeMode,
+          themeMode: themeMode,
           theme: AppTheme.lightTheme(),
           darkTheme: AppTheme.darkTheme(),
-          home: HomeShell(manager: _manager),
+          home: child,
         );
       },
+      child: HomeShell(manager: _manager),
     );
   }
 }

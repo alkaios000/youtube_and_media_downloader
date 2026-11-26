@@ -29,6 +29,14 @@ class SelectableMediaItem {
   /// If non-null, downloading this item resolves all full-resolution pages of the Pixiv illust ID.
   final String? pixivIllustId;
 
+  /// Stable canonical key used to remember & display "Sudah diunduh" badges across sessions.
+  String get markerKey {
+    if (pixivIllustId != null && pixivIllustId!.isNotEmpty) {
+      return 'pixiv:$pixivIllustId';
+    }
+    return canonicalMarkerKey(sourcePostUrl ?? directUrl ?? id);
+  }
+
   const SelectableMediaItem({
     required this.id,
     required this.title,
@@ -170,6 +178,8 @@ class MediaInfo {
 
   bool get hasSelectableGallery => selectableItems.length > 1 || isBulkProfile;
 
+  String get markerKey => canonicalMarkerKey(originalUrl);
+
   String get formattedDuration {
     final d = duration;
     if (d == null || d.inSeconds <= 0) return '';
@@ -181,6 +191,40 @@ class MediaInfo {
     }
     return '${minutes.toString().padLeft(2, '0')}:${seconds.toString().padLeft(2, '0')}';
   }
+}
+
+String canonicalMarkerKey(String rawUrl) {
+  final trimmed = rawUrl.trim();
+  if (trimmed.isEmpty) return '';
+
+  final pixivArt = RegExp(r'pixiv\.net/(?:en/)?artworks/(\d+)').firstMatch(trimmed);
+  if (pixivArt != null) return 'pixiv:${pixivArt.group(1)}';
+
+  final ytWatch = RegExp(r'(?:youtu\.be/|youtube\.com/(?:watch\?v=|shorts/))([A-Za-z0-9_-]{6,20})')
+      .firstMatch(trimmed);
+  if (ytWatch != null) return 'yt:${ytWatch.group(1)}';
+
+  final igCode = RegExp(r'instagram\.com/(?:reel|reels|p|tv)/([A-Za-z0-9_-]{5,30})')
+      .firstMatch(trimmed);
+  if (igCode != null) return 'ig:${igCode.group(1)}';
+
+  final xTweet = RegExp(r'(?:x\.com|twitter\.com)/[^/]+/status/(\d+)').firstMatch(trimmed);
+  if (xTweet != null) return 'x:${xTweet.group(1)}';
+
+  final ttVideo = RegExp(r'tiktok\.com/[^/]+/(?:video|photo)/(\d+)').firstMatch(trimmed);
+  if (ttVideo != null) return 'tt:${ttVideo.group(1)}';
+
+  final dyVideo = RegExp(r'(?:douyin|iesdouyin)\.com/(?:share/)?(?:video|note)/(\d+)')
+      .firstMatch(trimmed);
+  if (dyVideo != null) return 'dy:${dyVideo.group(1)}';
+
+  // Fallback: strip query params & trailing slashes for stable matching
+  final uri = Uri.tryParse(trimmed);
+  if (uri != null && uri.host.isNotEmpty) {
+    final cleanPath = uri.path.replaceAll(RegExp(r'/+$'), '');
+    return 'url:${uri.host.toLowerCase()}$cleanPath';
+  }
+  return 'raw:${trimmed.toLowerCase()}';
 }
 
 String formatBytes(int? bytes) {

@@ -1,8 +1,10 @@
 import 'dart:async';
+import 'dart:collection';
 import 'dart:io';
 
 import 'package:dio/dio.dart';
-import 'package:flutter/foundation.dart';
+import 'package:dio/io.dart';
+import 'package:flutter/material.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
@@ -15,17 +17,67 @@ import 'media_extractor_service.dart';
 import 'native_bridge.dart';
 import 'storage_service.dart';
 
+/// Lightweight async semaphore to load-balance network & CPU-heavy downloads.
+class _AsyncSemaphore {
+  final int maxConcurrent;
+  int _current = 0;
+  final Queue<Completer<void>> _waiters = Queue<Completer<void>>();
+
+  _AsyncSemaphore(this.maxConcurrent);
+
+  Future<void> acquire() {
+    if (_current < maxConcurrent) {
+      _current++;
+      return Future.value();
+    }
+    final completer = Completer<void>();
+    _waiters.addLast(completer);
+    return completer.future;
+  }
+
+  void release() {
+    if (_waiters.isNotEmpty) {
+      final next = _waiters.removeFirst();
+      if (!next.isCompleted) {
+        next.complete();
+      }
+    } else if (_current > 0) {
+      _current--;
+    }
+  }
+
+  Future<T> run<T>(Future<T> Function() action) async {
+    await acquire();
+    try {
+      return await action();
+    } finally {
+      release();
+    }
+  }
+}
+
 class DownloadManager extends ChangeNotifier {
+  static const int _directFileMaxConcurrency = 4;
+  static const int _ytDlpMaxConcurrency = 1;
+  static const int _bulkDirectTaskConcurrency = 3;
+
   final NativeBridge _bridge;
   final StorageService _storage;
   final MediaExtractorService _extractor;
   final Dio _dio;
+
+  /// Separate notifier for theme so MaterialApp never rebuilds during downloads.
+  final ValueNotifier<ThemeMode> themeNotifier = ValueNotifier<ThemeMode>(ThemeMode.dark);
+
+  final _AsyncSemaphore _directFilePool = _AsyncSemaphore(_directFileMaxConcurrency);
+  final _AsyncSemaphore _ytDlpPool = _AsyncSemaphore(_ytDlpMaxConcurrency);
 
   EngineStatus _engineStatus = EngineStatus.initial();
   PermissionStatusInfo _permissionStatus = PermissionStatusInfo.unknown();
   AppSettings _settings = const AppSettings();
   List<DownloadItem> _items = [];
   List<ManagedFile> _managedFiles = [];
+  Set<String> _downloadedMarkers = <String>{};
 
   bool _isInitializing = true;
   bool _isAnalyzing = false;
@@ -36,14 +88,22 @@ class DownloadManager extends ChangeNotifier {
   bool _douyinLoggedIn = false;
   bool _facebookLoggedIn = false;
   bool _pixivLoggedIn = false;
+  bool _isDisposed = false;
   String? _engineError;
   String? _analyzeError;
   MediaInfo? _currentPreview;
   int _cacheBytes = 0;
 
   final Map<String, CancelToken> _directCancelTokens = {};
+  final Set<String> _cancelledTaskIds = {};
   StreamSubscription<NativeProgressEvent>? _progressSub;
   StreamSubscription<String>? _shareSub;
+  Timer? _throttleNotifyTimer;
+  bool _hasPendingNotify = false;
+  Timer? _postSyncTimer;
+  DateTime _lastHistoryFlush = DateTime.fromMillisecondsSinceEpoch(0);
+  int _taskSeq = 0;
+
   void Function(String sharedText)? onIncomingSharedLink;
 
   DownloadManager({
@@ -52,16 +112,33 @@ class DownloadManager extends ChangeNotifier {
     Dio? dio,
   })  : _bridge = bridge ?? NativeBridge(),
         _storage = storage ?? StorageService(),
-        _dio = dio ??
-            Dio(
-              BaseOptions(
-                connectTimeout: const Duration(seconds: 25),
-                receiveTimeout: const Duration(minutes: 10),
-              ),
-            ),
+        _dio = dio ?? _createOptimizedDio(),
         _extractor = MediaExtractorService(
           bridge: bridge ?? NativeBridge(),
         );
+
+  static Dio _createOptimizedDio() {
+    final dio = Dio(
+      BaseOptions(
+        connectTimeout: const Duration(seconds: 20),
+        receiveTimeout: const Duration(minutes: 10),
+        persistentConnection: true,
+      ),
+    );
+    final adapter = dio.httpClientAdapter;
+    if (adapter is IOHttpClientAdapter) {
+      adapter.createHttpClient = () {
+        final client = HttpClient();
+        client.maxConnectionsPerHost = 6;
+        client.idleTimeout = const Duration(seconds: 25);
+        // Binary media streams (JPEG/PNG/MP4/MP3) are already compressed;
+        // skipping gzip inspection reduces CPU overhead on mobile.
+        client.autoUncompress = false;
+        return client;
+      };
+    }
+    return dio;
+  }
 
   EngineStatus get engineStatus => _engineStatus;
   PermissionStatusInfo get permissionStatus => _permissionStatus;
@@ -69,6 +146,7 @@ class DownloadManager extends ChangeNotifier {
   AppSettings get settings => _settings;
   List<DownloadItem> get items => List.unmodifiable(_items);
   List<ManagedFile> get managedFiles => List.unmodifiable(_managedFiles);
+  Set<String> get downloadedMarkers => Set.unmodifiable(_downloadedMarkers);
   List<DownloadItem> get activeDownloads =>
       _items.where((i) => i.isActive).toList(growable: false);
   List<DownloadItem> get historyItems =>
@@ -86,18 +164,107 @@ class DownloadManager extends ChangeNotifier {
   MediaInfo? get currentPreview => _currentPreview;
   int get cacheBytes => _cacheBytes;
 
+  DownloadItem? findItemById(String id) {
+    for (final item in _items) {
+      if (item.id == id) return item;
+    }
+    return null;
+  }
+
+  bool isMarkedDownloaded(String markerKey) {
+    return markerKey.isNotEmpty && _downloadedMarkers.contains(markerKey);
+  }
+
+  Future<void> markDownloaded(String markerKey) async {
+    final key = markerKey.trim();
+    if (key.isEmpty || _downloadedMarkers.contains(key)) return;
+    _downloadedMarkers = {..._downloadedMarkers, key};
+    _notifyImmediate();
+    try {
+      await _storage.saveDownloadedMarkers(_downloadedMarkers);
+    } catch (_) {}
+  }
+
+  Future<void> markManyDownloaded(Iterable<String> keys) async {
+    final cleaned = keys.map((k) => k.trim()).where((k) => k.isNotEmpty);
+    final next = {..._downloadedMarkers, ...cleaned};
+    if (next.length == _downloadedMarkers.length) return;
+    _downloadedMarkers = next;
+    _notifyImmediate();
+    try {
+      await _storage.saveDownloadedMarkers(_downloadedMarkers);
+    } catch (_) {}
+  }
+
+  Future<void> unmarkDownloaded(String markerKey) async {
+    final key = markerKey.trim();
+    if (key.isEmpty || !_downloadedMarkers.contains(key)) return;
+    final next = Set<String>.from(_downloadedMarkers)..remove(key);
+    _downloadedMarkers = next;
+    _notifyImmediate();
+    try {
+      await _storage.saveDownloadedMarkers(_downloadedMarkers);
+    } catch (_) {}
+  }
+
+  Future<void> unmarkMany(Iterable<String> keys) async {
+    final toRemove = keys.map((k) => k.trim()).where((k) => k.isNotEmpty).toSet();
+    if (toRemove.isEmpty) return;
+    final next = Set<String>.from(_downloadedMarkers)..removeAll(toRemove);
+    if (next.length == _downloadedMarkers.length) return;
+    _downloadedMarkers = next;
+    _notifyImmediate();
+    try {
+      await _storage.saveDownloadedMarkers(_downloadedMarkers);
+    } catch (_) {}
+  }
+
+  Future<void> clearAllDownloadedMarkers() async {
+    if (_downloadedMarkers.isEmpty) return;
+    _downloadedMarkers = <String>{};
+    _notifyImmediate();
+    try {
+      await _storage.saveDownloadedMarkers(_downloadedMarkers);
+    } catch (_) {}
+  }
+
   Future<void> bootstrap() async {
     try {
       _settings = await _storage.loadSettings();
     } catch (_) {
       _settings = const AppSettings();
     }
+    themeNotifier.value = _settings.themeMode;
+
     try {
       _items = await _storage.loadHistory();
     } catch (_) {
       _items = [];
     }
-    notifyListeners();
+
+    try {
+      final savedMarkers = await _storage.loadDownloadedMarkers();
+      if (savedMarkers != null) {
+        _downloadedMarkers = savedMarkers;
+      } else {
+        // First run after upgrade: seed markers from existing completed history once.
+        final seeded = <String>{};
+        for (final it in _items) {
+          if (it.status == DownloadStatus.completed) {
+            final key = it.markerKey.isNotEmpty
+                ? it.markerKey
+                : canonicalMarkerKey(it.sourceUrl);
+            if (key.isNotEmpty) seeded.add(key);
+          }
+        }
+        _downloadedMarkers = seeded;
+        await _storage.saveDownloadedMarkers(_downloadedMarkers);
+      }
+    } catch (_) {
+      _downloadedMarkers = <String>{};
+    }
+
+    _notifyImmediate();
 
     try {
       _progressSub = _bridge.progressStream.listen(
@@ -124,7 +291,7 @@ class DownloadManager extends ChangeNotifier {
       _engineError = e.toString();
     } finally {
       _isInitializing = false;
-      notifyListeners();
+      _notifyImmediate();
     }
 
     try {
@@ -139,7 +306,7 @@ class DownloadManager extends ChangeNotifier {
     try {
       _permissionStatus = await _bridge.checkPermissions();
       _permissionChecked = true;
-      notifyListeners();
+      _notifyImmediate();
     } catch (_) {}
     return _permissionStatus;
   }
@@ -148,7 +315,7 @@ class DownloadManager extends ChangeNotifier {
     try {
       _permissionStatus = await _bridge.requestPermissions();
       _permissionChecked = true;
-      notifyListeners();
+      _notifyImmediate();
       unawaited(refreshManagedFiles());
     } catch (_) {}
     return _permissionStatus;
@@ -169,7 +336,7 @@ class DownloadManager extends ChangeNotifier {
       _douyinLoggedIn = status['douyin'] ?? false;
       _facebookLoggedIn = status['facebook'] ?? false;
       _pixivLoggedIn = status['pixiv'] ?? false;
-      notifyListeners();
+      _notifyImmediate();
     } catch (_) {}
   }
 
@@ -190,27 +357,28 @@ class DownloadManager extends ChangeNotifier {
       _douyinLoggedIn = false;
       _facebookLoggedIn = false;
       _pixivLoggedIn = false;
-      notifyListeners();
+      _notifyImmediate();
     } catch (_) {}
   }
 
   Future<void> refreshManagedFiles() async {
+    if (_isLoadingFiles) return;
     _isLoadingFiles = true;
-    notifyListeners();
+    _notifyImmediate();
     try {
       _managedFiles = await _bridge.listManagedFiles();
     } catch (_) {
       // Keep previous list if plugin unavailable (e.g. unit tests)
     } finally {
       _isLoadingFiles = false;
-      notifyListeners();
+      _notifyImmediate();
     }
   }
 
   void clearPreview() {
     _currentPreview = null;
     _analyzeError = null;
-    notifyListeners();
+    _notifyImmediate();
   }
 
   Future<MediaInfo?> analyzeLink(String rawInput) async {
@@ -219,14 +387,14 @@ class DownloadManager extends ChangeNotifier {
       _analyzeError =
           'Tautan tidak valid. Tempel link dari YouTube, TikTok, Douyin, Instagram, X, Pixiv, atau Facebook.';
       _currentPreview = null;
-      notifyListeners();
+      _notifyImmediate();
       return null;
     }
 
     _isAnalyzing = true;
     _analyzeError = null;
     _currentPreview = null;
-    notifyListeners();
+    _notifyImmediate();
 
     try {
       final cookiesPath = await _storage.getCookiesFilePath(_settings.customCookies);
@@ -243,7 +411,7 @@ class DownloadManager extends ChangeNotifier {
       return null;
     } finally {
       _isAnalyzing = false;
-      notifyListeners();
+      _notifyImmediate();
     }
   }
 
@@ -286,14 +454,27 @@ class DownloadManager extends ChangeNotifier {
     return videos.first;
   }
 
-  Future<DownloadItem> startDownload(MediaInfo info, MediaFormatOption option) async {
+  String _nextTaskId(String prefix) {
+    _taskSeq++;
+    return '${DateTime.now().millisecondsSinceEpoch}_${prefix}_$_taskSeq';
+  }
+
+  Future<DownloadItem> startDownload(
+    MediaInfo info,
+    MediaFormatOption option, {
+    List<String> extraMarkerKeys = const [],
+  }) async {
     if (_permissionChecked && !_permissionStatus.granted && _permissionStatus.sdkInt <= 28) {
       await requestStoragePermissions();
     }
-    final taskId = '${DateTime.now().millisecondsSinceEpoch}_${_items.length}';
+    final taskId = _nextTaskId('dl');
+    final markerKey = info.markerKey;
+    final initialSubFiles = _buildInitialSubFiles(taskId, info, option);
+
     final initialItem = DownloadItem(
       id: taskId,
       sourceUrl: info.originalUrl,
+      markerKey: markerKey,
       platform: info.platform,
       title: info.title,
       author: info.author,
@@ -301,22 +482,70 @@ class DownloadManager extends ChangeNotifier {
       formatLabel: option.label,
       extension: option.extension,
       mediaKind: option.kind,
-      status: DownloadStatus.downloading,
+      status: DownloadStatus.queued,
       progress: 0,
-      statusText: 'Memulai unduhan...',
+      statusText: initialSubFiles.length > 1
+          ? 'Menyiapkan ${initialSubFiles.length} file...'
+          : 'Menyiapkan unduhan...',
       createdAt: DateTime.now(),
+      subFiles: initialSubFiles,
     );
 
     _items = [initialItem, ..._items];
-    notifyListeners();
+    _notifyImmediate();
 
     if (option.engine == DownloadEngine.directHttp) {
-      unawaited(_runDirectHttpDownload(taskId, info, option));
+      unawaited(
+        _runDirectHttpDownload(
+          taskId,
+          info,
+          option,
+          extraMarkerKeys: extraMarkerKeys,
+        ),
+      );
     } else {
-      unawaited(_runYtDlpDownload(taskId, info, option));
+      unawaited(
+        _runYtDlpDownload(
+          taskId,
+          info,
+          option,
+          extraMarkerKeys: extraMarkerKeys,
+        ),
+      );
     }
 
     return initialItem;
+  }
+
+  List<SubFileTask> _buildInitialSubFiles(
+    String taskId,
+    MediaInfo info,
+    MediaFormatOption option,
+  ) {
+    final safeBase = _sanitizeBaseName(info.title);
+    if (option.engine == DownloadEngine.directHttp) {
+      final urls = option.isMultiImage
+          ? option.galleryUrls
+          : [if (option.directUrl != null) option.directUrl!];
+      if (urls.isNotEmpty) {
+        return List<SubFileTask>.generate(urls.length, (i) {
+          final suffix = urls.length > 1 ? '_${i + 1}' : '';
+          final ext = _detectExtFromUrlOrDefault(urls[i], option.extension);
+          return SubFileTask(
+            id: '${taskId}_$i',
+            fileName: '$safeBase$suffix.$ext',
+            status: DownloadStatus.queued,
+          );
+        }, growable: false);
+      }
+    }
+    return [
+      SubFileTask(
+        id: '${taskId}_0',
+        fileName: '$safeBase.${option.extension}',
+        status: DownloadStatus.queued,
+      ),
+    ];
   }
 
   /// Downloads ONLY the user-selected photos from a multi-photo post (Pixiv, X, IG, TikTok, Douyin).
@@ -329,11 +558,15 @@ class DownloadManager extends ChangeNotifier {
       await requestStoragePermissions();
     }
 
-    final urls = selected
-        .map((e) => e.directUrl)
-        .whereType<String>()
-        .where((u) => u.startsWith('http'))
-        .toList();
+    final urls = <String>[];
+    final extraKeys = <String>[];
+    for (final item in selected) {
+      final u = item.directUrl;
+      if (u != null && u.startsWith('http')) {
+        urls.add(u);
+        if (item.markerKey.isNotEmpty) extraKeys.add(item.markerKey);
+      }
+    }
     if (urls.isEmpty) return;
 
     final first = selected.first;
@@ -351,11 +584,13 @@ class DownloadManager extends ChangeNotifier {
       headers: first.headers,
     );
 
-    await startDownload(info, customOption);
+    await startDownload(info, customOption, extraMarkerKeys: extraKeys);
   }
 
   /// Bulk downloads selected items from a Profile or Playlist URL (Pixiv, YouTube, TikTok, IG, X, FB, Douyin).
-  /// Runs items sequentially so memory & bandwidth stay stable and every file lands in `<Platform>/<Username>/`.
+  /// Uses a load-balanced worker pool:
+  /// - Direct HTTP / Pixiv artworks run up to 3 tasks concurrently sharing 4 HTTP file streams (fast & lightweight!)
+  /// - Native yt-dlp / FFmpeg jobs run 1 at a time so CPU/RAM never lag.
   Future<void> startBulkDownloads(
     MediaInfo collectionInfo,
     List<SelectableMediaItem> selected, {
@@ -366,21 +601,26 @@ class DownloadManager extends ChangeNotifier {
       await requestStoragePermissions();
     }
 
-    final queuedPairs = <(String, SelectableMediaItem)>[];
-    final nowMs = DateTime.now().millisecondsSinceEpoch;
+    final directQueue = <(String, SelectableMediaItem)>[];
+    final ytDlpQueue = <(String, SelectableMediaItem)>[];
     final newItems = <DownloadItem>[];
 
     for (int i = 0; i < selected.length; i++) {
       final sel = selected[i];
-      final taskId = '${nowMs}_bulk_$i';
+      final taskId = _nextTaskId('bulk');
       final isAudio = audioOnly && sel.kind == MediaKind.video;
       final ext = isAudio ? 'mp3' : sel.extension;
       final kind = isAudio ? MediaKind.audio : sel.kind;
+      final isDirect = (sel.pixivIllustId != null && sel.pixivIllustId!.isNotEmpty) ||
+          (sel.engine == DownloadEngine.directHttp &&
+              sel.directUrl != null &&
+              sel.directUrl!.startsWith('http'));
 
       newItems.add(
         DownloadItem(
           id: taskId,
           sourceUrl: sel.sourcePostUrl ?? sel.directUrl ?? collectionInfo.originalUrl,
+          markerKey: sel.markerKey,
           platform: collectionInfo.platform,
           title: sel.title,
           author: sel.author ?? collectionInfo.author,
@@ -390,41 +630,159 @@ class DownloadManager extends ChangeNotifier {
           mediaKind: kind,
           status: DownloadStatus.queued,
           progress: 0,
-          statusText: 'Dalam antrean massal (${i + 1}/${selected.length})...',
+          statusText: 'Dalam antrean (${i + 1}/${selected.length})...',
           createdAt: DateTime.now(),
+          subFiles: [
+            SubFileTask(
+              id: '${taskId}_0',
+              fileName: '${_sanitizeBaseName(sel.title)}.$ext',
+              status: DownloadStatus.queued,
+            ),
+          ],
         ),
       );
-      queuedPairs.add((taskId, sel));
+
+      if (isDirect) {
+        directQueue.add((taskId, sel));
+      } else {
+        ytDlpQueue.add((taskId, sel));
+      }
     }
 
     _items = [...newItems.reversed, ..._items];
-    notifyListeners();
+    _notifyImmediate();
 
-    unawaited(_processBulkQueue(collectionInfo, queuedPairs, audioOnly: audioOnly));
+    if (directQueue.isNotEmpty) {
+      unawaited(_processDirectBulkPool(collectionInfo, directQueue));
+    }
+    if (ytDlpQueue.isNotEmpty) {
+      unawaited(_processYtDlpBulkQueue(collectionInfo, ytDlpQueue, audioOnly: audioOnly));
+    }
   }
 
-  Future<void> _processBulkQueue(
+  /// Concurrent worker pool (3 workers) for fast Pixiv & Direct HTTP bulk tasks.
+  Future<void> _processDirectBulkPool(
     MediaInfo collectionInfo,
-    List<(String, SelectableMediaItem)> queue, {
-    required bool audioOnly,
-  }) async {
+    List<(String, SelectableMediaItem)> queue,
+  ) async {
     final pixivCookie = collectionInfo.platform == MediaPlatform.pixiv
         ? await _safeCookieHeader('https://www.pixiv.net/')
         : '';
 
-    for (final (taskId, sel) in queue) {
-      final existing = _items.where((it) => it.id == taskId).firstOrNull;
-      if (existing == null || existing.status == DownloadStatus.cancelled) {
-        continue;
-      }
+    int cursor = 0;
+    final workerCount = queue.length < _bulkDirectTaskConcurrency
+        ? queue.length
+        : _bulkDirectTaskConcurrency;
 
-      _updateItem(
-        taskId,
-        (item) => item.copyWith(
-          status: DownloadStatus.downloading,
-          statusText: 'Memulai unduhan...',
-        ),
-      );
+    Future<void> worker() async {
+      while (true) {
+        if (_isDisposed || cursor >= queue.length) return;
+        final (taskId, sel) = queue[cursor++];
+
+        if (_isTaskCancelled(taskId)) continue;
+
+        final itemAuthor = sel.author ?? collectionInfo.author;
+        final singleInfo = MediaInfo(
+          originalUrl: sel.sourcePostUrl ?? sel.directUrl ?? collectionInfo.originalUrl,
+          platform: collectionInfo.platform,
+          title: sel.title,
+          author: itemAuthor,
+          thumbnailUrl: sel.thumbnailUrl,
+          extractorLabel: collectionInfo.extractorLabel,
+          options: const [],
+        );
+
+        // Pixiv artwork inside a profile: expand ALL original full-resolution pages!
+        if (sel.pixivIllustId != null && sel.pixivIllustId!.isNotEmpty) {
+          _updateItem(
+            taskId,
+            (item) => item.copyWith(
+              status: DownloadStatus.downloading,
+              statusText: 'Memuat daftar halaman Pixiv...',
+            ),
+          );
+
+          final origUrls = await _extractor.directExtractors.fetchPixivIllustOriginalUrls(
+            sel.pixivIllustId!,
+            cookieHeader: pixivCookie,
+          );
+          if (_isTaskCancelled(taskId)) continue;
+
+          if (origUrls.isEmpty) {
+            _updateItem(
+              taskId,
+              (item) => item.copyWith(
+                status: DownloadStatus.failed,
+                statusText: 'Gagal mengambil halaman Pixiv',
+                errorMessage:
+                    'Karya mungkin khusus member/R-18 (login Pixiv di Pengaturan).',
+                subFiles: item.subFiles
+                    .map((s) => s.copyWith(
+                          status: DownloadStatus.failed,
+                          errorMessage: 'Halaman Pixiv tidak dapat diakses',
+                        ))
+                    .toList(growable: false),
+              ),
+            );
+            _schedulePostDownloadSync(includeMediaRefresh: false);
+            continue;
+          }
+
+          final ext = _detectExtFromUrlOrDefault(origUrls.first, 'jpg');
+          final opt = MediaFormatOption(
+            id: 'px_bulk_${sel.pixivIllustId}',
+            label: origUrls.length > 1 ? '${origUrls.length} Halaman' : 'Original HD',
+            subtitle: 'Pixiv',
+            extension: ext,
+            kind: MediaKind.image,
+            engine: DownloadEngine.directHttp,
+            directUrl: origUrls.first,
+            galleryUrls: origUrls,
+            headers: sel.headers,
+          );
+          await _runDirectHttpDownload(
+            taskId,
+            singleInfo,
+            opt,
+            extraMarkerKeys: [sel.markerKey],
+          );
+          continue;
+        }
+
+        if (sel.directUrl != null && sel.directUrl!.startsWith('http')) {
+          final opt = MediaFormatOption(
+            id: 'bulk_direct_${sel.id}',
+            label: sel.extension.toUpperCase(),
+            subtitle: 'Direct',
+            extension: sel.extension,
+            kind: sel.kind,
+            engine: DownloadEngine.directHttp,
+            directUrl: sel.directUrl,
+            galleryUrls: sel.kind == MediaKind.image ? [sel.directUrl!] : const [],
+            headers: sel.headers,
+          );
+          await _runDirectHttpDownload(
+            taskId,
+            singleInfo,
+            opt,
+            extraMarkerKeys: [sel.markerKey],
+          );
+        }
+      }
+    }
+
+    await Future.wait(List.generate(workerCount, (_) => worker()));
+  }
+
+  /// Controlled sequential queue for heavy native yt-dlp/FFmpeg bulk items.
+  Future<void> _processYtDlpBulkQueue(
+    MediaInfo collectionInfo,
+    List<(String, SelectableMediaItem)> queue, {
+    required bool audioOnly,
+  }) async {
+    for (final (taskId, sel) in queue) {
+      if (_isDisposed) return;
+      if (_isTaskCancelled(taskId)) continue;
 
       final itemAuthor = sel.author ?? collectionInfo.author;
       final singleInfo = MediaInfo(
@@ -437,71 +795,31 @@ class DownloadManager extends ChangeNotifier {
         options: const [],
       );
 
-      // Pixiv artwork inside a profile: expand ALL original full-resolution pages!
-      if (sel.pixivIllustId != null && sel.pixivIllustId!.isNotEmpty) {
-        final origUrls = await _extractor.directExtractors.fetchPixivIllustOriginalUrls(
-          sel.pixivIllustId!,
-          cookieHeader: pixivCookie,
-        );
-        if (origUrls.isEmpty) {
-          _updateItem(
-            taskId,
-            (item) => item.copyWith(
-              status: DownloadStatus.failed,
-              statusText: 'Gagal mengambil halaman Pixiv',
-              errorMessage: 'Karya mungkin khusus member/R-18 (login Pixiv di Pengaturan).',
-            ),
-          );
-          await _storage.saveHistory(_items);
-          continue;
-        }
-        final ext = origUrls.first.toLowerCase().contains('.png') ? 'png' : 'jpg';
-        final opt = MediaFormatOption(
-          id: 'px_bulk_${sel.pixivIllustId}',
-          label: origUrls.length > 1 ? '${origUrls.length} Halaman' : 'Original HD',
-          subtitle: 'Pixiv',
-          extension: ext,
-          kind: MediaKind.image,
-          engine: DownloadEngine.directHttp,
-          directUrl: origUrls.first,
-          galleryUrls: origUrls,
-          headers: sel.headers,
-        );
-        await _runDirectHttpDownload(taskId, singleInfo, opt);
-        continue;
-      }
-
-      if (sel.engine == DownloadEngine.directHttp &&
-          sel.directUrl != null &&
-          sel.directUrl!.startsWith('http')) {
-        final opt = MediaFormatOption(
-          id: 'bulk_direct_${sel.id}',
-          label: sel.extension.toUpperCase(),
-          subtitle: 'Direct',
-          extension: sel.extension,
-          kind: sel.kind,
-          engine: DownloadEngine.directHttp,
-          directUrl: sel.directUrl,
-          galleryUrls: sel.kind == MediaKind.image ? [sel.directUrl!] : const [],
-          headers: sel.headers,
-        );
-        await _runDirectHttpDownload(taskId, singleInfo, opt);
-      } else {
-        final isAudio = audioOnly && sel.kind == MediaKind.video;
-        final opt = MediaFormatOption(
-          id: 'bulk_ytdlp_${sel.id}',
-          label: isAudio ? 'Audio MP3' : 'Video HD MP4',
-          subtitle: 'yt-dlp',
-          extension: isAudio ? 'mp3' : 'mp4',
-          kind: isAudio ? MediaKind.audio : MediaKind.video,
-          engine: DownloadEngine.ytDlp,
-          ytDlpFormatSelector: isAudio
-              ? null
-              : 'bestvideo[vcodec^=avc1][ext=mp4]+bestaudio[ext=m4a]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
-        );
-        await _runYtDlpDownload(taskId, singleInfo, opt);
-      }
+      final isAudio = audioOnly && sel.kind == MediaKind.video;
+      final opt = MediaFormatOption(
+        id: 'bulk_ytdlp_${sel.id}',
+        label: isAudio ? 'Audio MP3' : 'Video HD MP4',
+        subtitle: 'yt-dlp',
+        extension: isAudio ? 'mp3' : 'mp4',
+        kind: isAudio ? MediaKind.audio : MediaKind.video,
+        engine: DownloadEngine.ytDlp,
+        ytDlpFormatSelector: isAudio
+            ? null
+            : 'bestvideo[vcodec^=avc1][ext=mp4]+bestaudio[ext=m4a]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+      );
+      await _runYtDlpDownload(
+        taskId,
+        singleInfo,
+        opt,
+        extraMarkerKeys: [sel.markerKey],
+      );
     }
+  }
+
+  bool _isTaskCancelled(String taskId) {
+    if (_cancelledTaskIds.contains(taskId)) return true;
+    final item = findItemById(taskId);
+    return item == null || item.status == DownloadStatus.cancelled;
   }
 
   Future<String> _safeCookieHeader(String url) async {
@@ -515,60 +833,111 @@ class DownloadManager extends ChangeNotifier {
   Future<void> _runYtDlpDownload(
     String taskId,
     MediaInfo info,
-    MediaFormatOption option,
-  ) async {
-    try {
-      final cookiesPath = await _storage.getCookiesFilePath(_settings.customCookies);
-      final saved = await _bridge.downloadWithYtDlp(
-        taskId: taskId,
-        url: info.originalUrl,
-        formatSelector: option.ytDlpFormatSelector,
-        audioOnly: option.isAudio,
-        audioFormat: option.extension,
-        cookiesPath: cookiesPath,
-        useAria2c: _settings.useAria2c,
-        platformFolder: info.platform.folderName,
-        creatorFolder: info.author,
-      );
+    MediaFormatOption option, {
+    List<String> extraMarkerKeys = const [],
+  }) async {
+    await _ytDlpPool.run(() async {
+      if (_isDisposed || _isTaskCancelled(taskId)) return;
 
       _updateItem(
         taskId,
         (item) => item.copyWith(
+          status: DownloadStatus.downloading,
+          statusText: 'Memulai engine unduhan...',
+          subFiles: item.subFiles.isEmpty
+              ? [
+                  SubFileTask(
+                    id: '${taskId}_0',
+                    fileName: '${_sanitizeBaseName(info.title)}.${option.extension}',
+                    status: DownloadStatus.downloading,
+                  ),
+                ]
+              : [
+                  item.subFiles.first.copyWith(status: DownloadStatus.downloading),
+                  ...item.subFiles.skip(1),
+                ],
+        ),
+      );
+
+      try {
+        final cookiesPath = await _storage.getCookiesFilePath(_settings.customCookies);
+        final saved = await _bridge.downloadWithYtDlp(
+          taskId: taskId,
+          url: info.originalUrl,
+          formatSelector: option.ytDlpFormatSelector,
+          audioOnly: option.isAudio,
+          audioFormat: option.extension,
+          cookiesPath: cookiesPath,
+          useAria2c: _settings.useAria2c,
+          platformFolder: info.platform.folderName,
+          creatorFolder: info.author,
+        );
+
+        final completedSub = SubFileTask(
+          id: '${taskId}_0',
+          fileName: saved.fileName,
           status: DownloadStatus.completed,
           progress: 100,
-          statusText: 'Tersimpan di ${saved.folderLabel}',
+          downloadedBytes: saved.fileSize,
+          totalBytes: saved.fileSize,
           savedPath: saved.savedPath,
           contentUri: saved.contentUri,
-          fileName: saved.fileName,
-          fileSize: saved.fileSize,
           mimeType: saved.mimeType,
-        ),
-      );
-      await _storage.saveHistory(_items);
-      await refreshStorageInfo();
-      unawaited(refreshManagedFiles());
-    } catch (e) {
-      final rawMsg = e.toString();
-      final isCancelled = rawMsg.contains('CANCELLED');
-      _updateItem(
-        taskId,
-        (item) => item.copyWith(
-          status: isCancelled ? DownloadStatus.cancelled : DownloadStatus.failed,
-          statusText: isCancelled ? 'Dibatalkan' : 'Unduhan gagal',
-          errorMessage: isCancelled
-              ? null
-              : rawMsg.replaceFirst('Exception: ', '').trim(),
-        ),
-      );
-      await _storage.saveHistory(_items);
-    }
+        );
+
+        _updateItem(
+          taskId,
+          (item) => item.copyWith(
+            status: DownloadStatus.completed,
+            progress: 100,
+            statusText: 'Tersimpan di ${saved.folderLabel}',
+            savedPath: saved.savedPath,
+            contentUri: saved.contentUri,
+            fileName: saved.fileName,
+            fileSize: saved.fileSize,
+            mimeType: saved.mimeType,
+            subFiles: [completedSub],
+          ),
+        );
+
+        await markManyDownloaded([info.markerKey, ...extraMarkerKeys]);
+        _schedulePostDownloadSync();
+      } catch (e) {
+        final rawMsg = e.toString();
+        final isCancelled = rawMsg.contains('CANCELLED') || _isTaskCancelled(taskId);
+        final cleanErr = rawMsg.replaceFirst('Exception: ', '').trim();
+        _updateItem(
+          taskId,
+          (item) => item.copyWith(
+            status: isCancelled ? DownloadStatus.cancelled : DownloadStatus.failed,
+            statusText: isCancelled ? 'Dibatalkan' : 'Unduhan gagal',
+            errorMessage: isCancelled ? null : cleanErr,
+            subFiles: item.subFiles
+                .map((s) => s.copyWith(
+                      status: isCancelled
+                          ? DownloadStatus.cancelled
+                          : DownloadStatus.failed,
+                      speedText: '',
+                      errorMessage: isCancelled ? null : cleanErr,
+                    ))
+                .toList(growable: false),
+          ),
+        );
+        _schedulePostDownloadSync(includeMediaRefresh: false);
+      }
+    });
   }
 
+  /// High-speed concurrent Direct HTTP downloader with per-file live progress,
+  /// rolling speed calculation, lightweight throttling, and automatic retry.
   Future<void> _runDirectHttpDownload(
     String taskId,
     MediaInfo info,
-    MediaFormatOption option,
-  ) async {
+    MediaFormatOption option, {
+    List<String> extraMarkerKeys = const [],
+  }) async {
+    if (_isDisposed || _isTaskCancelled(taskId)) return;
+
     final cancelToken = CancelToken();
     _directCancelTokens[taskId] = cancelToken;
 
@@ -582,108 +951,319 @@ class DownloadManager extends ChangeNotifier {
         throw Exception('URL unduhan langsung tidak tersedia.');
       }
 
+      final safeBase = _sanitizeBaseName(info.title);
+      final totalFiles = urlsToDownload.length;
+
+      // Initialize every individual SubFileTask upfront so Riwayat detail shows all files immediately!
+      final subTasks = List<SubFileTask>.generate(totalFiles, (i) {
+        final suffix = totalFiles > 1 ? '_${i + 1}' : '';
+        final fileExt = _detectExtFromUrlOrDefault(urlsToDownload[i], option.extension);
+        return SubFileTask(
+          id: '${taskId}_$i',
+          fileName: '$safeBase$suffix.$fileExt',
+          status: DownloadStatus.queued,
+        );
+      });
+
+      final fileSpeedBps = List<double>.filled(totalFiles, 0.0);
+      SavedFileResult? firstSaved;
       SavedFileResult? lastSaved;
-      int totalBytesSaved = 0;
 
-      for (int i = 0; i < urlsToDownload.length; i++) {
-        final targetUrl = urlsToDownload[i];
-        final suffix = urlsToDownload.length > 1 ? '_${i + 1}' : '';
-        final safeBase = _sanitizeBaseName(info.title);
-        final fileExt = _detectExtFromUrlOrDefault(targetUrl, option.extension);
-        final fileName = '$safeBase$suffix.$fileExt';
-        final tempPath = p.join(cacheDir.path, 'direct_${taskId}_$i.$fileExt');
+      _updateItem(
+        taskId,
+        (item) => item.copyWith(
+          status: DownloadStatus.downloading,
+          progress: 0,
+          statusText: totalFiles > 1
+              ? 'Mengunduh 0/$totalFiles file...'
+              : 'Menghubungkan...',
+          subFiles: List<SubFileTask>.unmodifiable(subTasks),
+        ),
+      );
 
-        await _dio.download(
-          targetUrl,
-          tempPath,
-          cancelToken: cancelToken,
-          options: Options(
-            headers: option.headers,
-            followRedirects: true,
-            maxRedirects: 8,
-          ),
-          onReceiveProgress: (received, total) {
-            double pct;
-            if (total > 0) {
-              final singlePct = (received / total) * 100.0;
-              pct = ((i + (singlePct / 100.0)) / urlsToDownload.length) * 100.0;
-            } else {
-              pct = -1;
-            }
-            final label = urlsToDownload.length > 1
-                ? 'Mengunduh ${i + 1}/${urlsToDownload.length} (${formatBytes(received)})'
-                : (total > 0
-                    ? '${formatBytes(received)} / ${formatBytes(total)}'
-                    : 'Mengunduh ${formatBytes(received)}...');
-            _updateItem(
-              taskId,
-              (item) => item.copyWith(
-                progress: pct,
-                statusText: label,
-              ),
+      void syncParent({bool immediate = false}) {
+        double progressSum = 0;
+        int completedCount = 0;
+        int savingCount = 0;
+        int downloadingCount = 0;
+        double combinedSpeedBps = 0;
+        int totalDownloadedBytes = 0;
+
+        for (int idx = 0; idx < subTasks.length; idx++) {
+          final st = subTasks[idx];
+          totalDownloadedBytes += st.downloadedBytes;
+          if (st.status == DownloadStatus.completed) {
+            completedCount++;
+            progressSum += 100.0;
+          } else if (st.status == DownloadStatus.saving) {
+            savingCount++;
+            progressSum += 98.0;
+          } else if (st.status == DownloadStatus.downloading) {
+            downloadingCount++;
+            combinedSpeedBps += fileSpeedBps[idx];
+            progressSum += st.progress > 0 ? st.progress.clamp(0.0, 96.0) : 5.0;
+          }
+        }
+
+        final overallPct = totalFiles > 0 ? (progressSum / totalFiles) : 0.0;
+        final speedLabel = combinedSpeedBps > 512
+            ? ' • ${_formatSpeed(combinedSpeedBps)}'
+            : '';
+
+        String statusLabel;
+        if (totalFiles > 1) {
+          statusLabel = '$completedCount/$totalFiles file selesai$speedLabel';
+        } else {
+          final single = subTasks.first;
+          if (single.status == DownloadStatus.saving) {
+            statusLabel = 'Menyimpan ke folder ${info.platform.folderName}...';
+          } else if (single.totalBytes > 0) {
+            statusLabel =
+                '${formatBytes(single.downloadedBytes)} / ${formatBytes(single.totalBytes)}$speedLabel';
+          } else if (single.downloadedBytes > 0) {
+            statusLabel = 'Mengunduh ${formatBytes(single.downloadedBytes)}$speedLabel';
+          } else {
+            statusLabel = 'Mengunduh...';
+          }
+        }
+
+        _updateItem(
+          taskId,
+          (item) {
+            if (!item.isActive) return item;
+            return item.copyWith(
+              status: (downloadingCount == 0 && savingCount > 0)
+                  ? DownloadStatus.saving
+                  : DownloadStatus.downloading,
+              progress: overallPct.clamp(0.0, 99.5),
+              statusText: statusLabel,
+              fileSize: totalDownloadedBytes > 0 ? totalDownloadedBytes : item.fileSize,
+              subFiles: List<SubFileTask>.unmodifiable(subTasks),
             );
           },
+          throttled: !immediate,
         );
+      }
+
+      // Download files concurrently through the shared global HTTP worker pool (max 4 streams)
+      await Future.wait(
+        List<Future<void>>.generate(totalFiles, (i) async {
+          final targetUrl = urlsToDownload[i];
+          final fileExt = _detectExtFromUrlOrDefault(targetUrl, option.extension);
+          final fileName = subTasks[i].fileName;
+          final tempPath = p.join(cacheDir.path, 'direct_${taskId}_$i.$fileExt');
+
+          await _directFilePool.run(() async {
+            if (cancelToken.isCancelled || _isTaskCancelled(taskId)) {
+              subTasks[i] = subTasks[i].copyWith(
+                status: DownloadStatus.cancelled,
+                speedText: '',
+              );
+              return;
+            }
+
+            subTasks[i] = subTasks[i].copyWith(
+              status: DownloadStatus.downloading,
+              progress: 0,
+            );
+            syncParent();
+
+            int lastTickMs = DateTime.now().millisecondsSinceEpoch;
+            int lastTickBytes = 0;
+
+            Future<void> performDownload() async {
+              await _dio.download(
+                targetUrl,
+                tempPath,
+                cancelToken: cancelToken,
+                options: Options(
+                  headers: option.headers,
+                  followRedirects: true,
+                  maxRedirects: 8,
+                ),
+                onReceiveProgress: (received, total) {
+                  final nowMs = DateTime.now().millisecondsSinceEpoch;
+                  final elapsedMs = nowMs - lastTickMs;
+                  final isDone = total > 0 && received >= total;
+
+                  // Only recompute & propagate at most every 220ms per file (huge CPU win!)
+                  if (!isDone && elapsedMs < 220) return;
+
+                  if (elapsedMs > 0) {
+                    final deltaBytes = received - lastTickBytes;
+                    if (deltaBytes >= 0) {
+                      fileSpeedBps[i] = (deltaBytes * 1000.0) / elapsedMs;
+                    }
+                    lastTickMs = nowMs;
+                    lastTickBytes = received;
+                  }
+
+                  final pct = total > 0 ? ((received / total) * 100.0).clamp(0.0, 100.0) : -1.0;
+                  subTasks[i] = subTasks[i].copyWith(
+                    status: DownloadStatus.downloading,
+                    progress: pct,
+                    downloadedBytes: received,
+                    totalBytes: total > 0 ? total : subTasks[i].totalBytes,
+                    speedText: fileSpeedBps[i] > 512 ? _formatSpeed(fileSpeedBps[i]) : '',
+                  );
+                  syncParent();
+                },
+              );
+            }
+
+            try {
+              try {
+                await performDownload();
+              } on DioException catch (firstErr) {
+                if (CancelToken.isCancel(firstErr) || cancelToken.isCancelled) {
+                  rethrow;
+                }
+                // Automatic 1-time retry on transient network/429 glitches
+                await Future<void>.delayed(const Duration(milliseconds: 700));
+                if (cancelToken.isCancelled || _isTaskCancelled(taskId)) {
+                  throw DioException.requestCancelled(
+                    requestOptions: firstErr.requestOptions,
+                    reason: 'Dibatalkan',
+                  );
+                }
+                lastTickMs = DateTime.now().millisecondsSinceEpoch;
+                lastTickBytes = 0;
+                await performDownload();
+              }
+
+              if (cancelToken.isCancelled || _isTaskCancelled(taskId)) {
+                subTasks[i] = subTasks[i].copyWith(
+                  status: DownloadStatus.cancelled,
+                  speedText: '',
+                );
+                return;
+              }
+
+              fileSpeedBps[i] = 0;
+              subTasks[i] = subTasks[i].copyWith(
+                status: DownloadStatus.saving,
+                progress: 99,
+                speedText: '',
+              );
+              syncParent();
+
+              final saved = await _bridge.saveFileToDownloads(
+                sourcePath: tempPath,
+                fileName: fileName,
+                mimeType: _mimeForExtension(fileExt, option.kind),
+                platformFolder: info.platform.folderName,
+                creatorFolder: info.author,
+              );
+
+              firstSaved ??= saved;
+              lastSaved = saved;
+
+              subTasks[i] = subTasks[i].copyWith(
+                fileName: saved.fileName,
+                status: DownloadStatus.completed,
+                progress: 100,
+                downloadedBytes: saved.fileSize,
+                totalBytes: saved.fileSize,
+                speedText: '',
+                savedPath: saved.savedPath,
+                contentUri: saved.contentUri,
+                mimeType: saved.mimeType,
+              );
+              syncParent(immediate: true);
+            } on DioException catch (e) {
+              fileSpeedBps[i] = 0;
+              final cancelled = CancelToken.isCancel(e) || cancelToken.isCancelled;
+              subTasks[i] = subTasks[i].copyWith(
+                status: cancelled ? DownloadStatus.cancelled : DownloadStatus.failed,
+                speedText: '',
+                errorMessage: cancelled ? null : (e.message ?? 'Koneksi terputus'),
+              );
+              syncParent(immediate: true);
+            } catch (e) {
+              fileSpeedBps[i] = 0;
+              subTasks[i] = subTasks[i].copyWith(
+                status: DownloadStatus.failed,
+                speedText: '',
+                errorMessage: e.toString().replaceFirst('Exception: ', ''),
+              );
+              syncParent(immediate: true);
+            } finally {
+              final tempFile = File(tempPath);
+              if (await tempFile.exists()) {
+                await tempFile.delete().catchError((_) => tempFile);
+              }
+            }
+          });
+        }),
+      );
+
+      // Finalize overall DownloadItem state
+      if (cancelToken.isCancelled || _isTaskCancelled(taskId)) {
+        final cancelledSubs = subTasks
+            .map((s) => s.isActive
+                ? s.copyWith(status: DownloadStatus.cancelled, speedText: '')
+                : s)
+            .toList(growable: false);
+        _updateItem(
+          taskId,
+          (item) => item.copyWith(
+            status: DownloadStatus.cancelled,
+            statusText: 'Dibatalkan',
+            subFiles: cancelledSubs,
+          ),
+        );
+        _schedulePostDownloadSync(includeMediaRefresh: false);
+        return;
+      }
+
+      final completedSubs = subTasks.where((s) => s.status == DownloadStatus.completed).toList();
+      final failedSubs = subTasks.where((s) => s.status == DownloadStatus.failed).toList();
+      final totalSavedBytes = completedSubs.fold<int>(0, (acc, s) => acc + s.downloadedBytes);
+      final representative = firstSaved ?? lastSaved;
+
+      if (completedSubs.isNotEmpty && representative != null) {
+        final String doneText;
+        if (totalFiles == 1) {
+          doneText = 'Tersimpan di ${representative.folderLabel}';
+        } else if (failedSubs.isEmpty) {
+          doneText = '${completedSubs.length} file tersimpan di ${representative.folderLabel}';
+        } else {
+          doneText =
+              '${completedSubs.length}/$totalFiles file tersimpan (${failedSubs.length} gagal)';
+        }
 
         _updateItem(
           taskId,
           (item) => item.copyWith(
-            status: DownloadStatus.saving,
-            statusText: urlsToDownload.length > 1
-                ? 'Menyimpan file ${i + 1}/${urlsToDownload.length}...'
-                : 'Menyimpan ke folder ${info.platform.folderName}...',
+            status: DownloadStatus.completed,
+            progress: 100,
+            statusText: doneText,
+            savedPath: representative.savedPath,
+            contentUri: representative.contentUri,
+            fileName: representative.fileName,
+            fileSize: totalSavedBytes,
+            mimeType: representative.mimeType,
+            subFiles: List<SubFileTask>.unmodifiable(subTasks),
           ),
         );
 
-        lastSaved = await _bridge.saveFileToDownloads(
-          sourcePath: tempPath,
-          fileName: fileName,
-          mimeType: option.mimeType,
-          platformFolder: info.platform.folderName,
-          creatorFolder: info.author,
+        await markManyDownloaded([info.markerKey, ...extraMarkerKeys]);
+        _schedulePostDownloadSync();
+      } else {
+        final firstErr = failedSubs.isNotEmpty
+            ? (failedSubs.first.errorMessage ?? 'Gagal mengunduh file')
+            : 'Gagal menyimpan file.';
+        _updateItem(
+          taskId,
+          (item) => item.copyWith(
+            status: DownloadStatus.failed,
+            statusText: 'Unduhan gagal',
+            errorMessage: firstErr,
+            subFiles: List<SubFileTask>.unmodifiable(subTasks),
+          ),
         );
-        totalBytesSaved += lastSaved.fileSize;
-
-        final tempFile = File(tempPath);
-        if (await tempFile.exists()) {
-          await tempFile.delete().catchError((_) => tempFile);
-        }
+        _schedulePostDownloadSync(includeMediaRefresh: false);
       }
-
-      final finalSaved = lastSaved;
-      if (finalSaved == null) {
-        throw Exception('Gagal menyimpan file.');
-      }
-
-      _updateItem(
-        taskId,
-        (item) => item.copyWith(
-          status: DownloadStatus.completed,
-          progress: 100,
-          statusText: urlsToDownload.length > 1
-              ? '${urlsToDownload.length} file tersimpan di ${finalSaved.folderLabel}'
-              : 'Tersimpan di ${finalSaved.folderLabel}',
-          savedPath: finalSaved.savedPath,
-          contentUri: finalSaved.contentUri,
-          fileName: finalSaved.fileName,
-          fileSize: totalBytesSaved,
-          mimeType: finalSaved.mimeType,
-        ),
-      );
-      await _storage.saveHistory(_items);
-      await refreshStorageInfo();
-      unawaited(refreshManagedFiles());
-    } on DioException catch (e) {
-      final cancelled = CancelToken.isCancel(e);
-      _updateItem(
-        taskId,
-        (item) => item.copyWith(
-          status: cancelled ? DownloadStatus.cancelled : DownloadStatus.failed,
-          statusText: cancelled ? 'Dibatalkan' : 'Gagal mengunduh file',
-          errorMessage: cancelled ? null : (e.message ?? 'Koneksi terputus'),
-        ),
-      );
-      await _storage.saveHistory(_items);
     } catch (e) {
       _updateItem(
         taskId,
@@ -693,9 +1273,10 @@ class DownloadManager extends ChangeNotifier {
           errorMessage: e.toString().replaceFirst('Exception: ', ''),
         ),
       );
-      await _storage.saveHistory(_items);
+      _schedulePostDownloadSync(includeMediaRefresh: false);
     } finally {
       _directCancelTokens.remove(taskId);
+      _cancelledTaskIds.remove(taskId);
     }
   }
 
@@ -710,6 +1291,45 @@ class DownloadManager extends ChangeNotifier {
     return fallback;
   }
 
+  String _mimeForExtension(String ext, MediaKind kind) {
+    switch (ext.toLowerCase()) {
+      case 'mp4':
+      case 'm4v':
+        return 'video/mp4';
+      case 'webm':
+        return 'video/webm';
+      case 'mkv':
+        return 'video/x-matroska';
+      case 'mp3':
+        return 'audio/mpeg';
+      case 'm4a':
+        return 'audio/mp4';
+      case 'jpg':
+      case 'jpeg':
+        return 'image/jpeg';
+      case 'png':
+        return 'image/png';
+      case 'webp':
+        return 'image/webp';
+      case 'gif':
+        return 'image/gif';
+      default:
+        return kind == MediaKind.audio
+            ? 'audio/mpeg'
+            : (kind == MediaKind.image ? 'image/jpeg' : 'video/mp4');
+    }
+  }
+
+  String _formatSpeed(double bytesPerSecond) {
+    if (bytesPerSecond >= 1024 * 1024) {
+      return '${(bytesPerSecond / (1024 * 1024)).toStringAsFixed(1)} MB/s';
+    }
+    if (bytesPerSecond >= 1024) {
+      return '${(bytesPerSecond / 1024).toStringAsFixed(0)} KB/s';
+    }
+    return '${bytesPerSecond.toStringAsFixed(0)} B/s';
+  }
+
   void _handleNativeProgress(NativeProgressEvent event) {
     final idx = _items.indexWhere((i) => i.id == event.taskId);
     if (idx == -1) return;
@@ -717,13 +1337,39 @@ class DownloadManager extends ChangeNotifier {
     if (!current.isActive) return;
 
     final statusLine = _prettifyYtDlpLine(event.line, event.progress, event.etaSeconds);
+    final speedMatch = RegExp(r'at\s+([0-9.]+[KMG]i?B/s)', caseSensitive: false)
+        .firstMatch(event.line);
+    final speedText = speedMatch?.group(1) ?? '';
+
+    final nextProgress =
+        event.progress >= 0 ? event.progress.clamp(0.0, 100.0) : current.progress;
+    final isMerging = event.line.toLowerCase().contains('[merger]') ||
+        event.line.toLowerCase().contains('[extractaudio]');
+
     _updateItem(
       event.taskId,
-      (item) => item.copyWith(
-        progress: event.progress >= 0 ? event.progress.clamp(0, 100) : item.progress,
-        etaSeconds: event.etaSeconds >= 0 ? event.etaSeconds : item.etaSeconds,
-        statusText: statusLine,
-      ),
+      (item) {
+        final updatedSubs = item.subFiles.isEmpty
+            ? item.subFiles
+            : [
+                item.subFiles.first.copyWith(
+                  status: isMerging ? DownloadStatus.saving : DownloadStatus.downloading,
+                  progress: nextProgress,
+                  speedText: speedText.isNotEmpty
+                      ? speedText
+                      : item.subFiles.first.speedText,
+                ),
+                ...item.subFiles.skip(1),
+              ];
+        return item.copyWith(
+          status: isMerging ? DownloadStatus.saving : DownloadStatus.downloading,
+          progress: nextProgress,
+          etaSeconds: event.etaSeconds >= 0 ? event.etaSeconds : item.etaSeconds,
+          statusText: statusLine,
+          subFiles: updatedSubs,
+        );
+      },
+      throttled: true,
     );
   }
 
@@ -757,20 +1403,28 @@ class DownloadManager extends ChangeNotifier {
   }
 
   Future<void> cancelDownload(String taskId) async {
+    _cancelledTaskIds.add(taskId);
     final directToken = _directCancelTokens[taskId];
     if (directToken != null && !directToken.isCancelled) {
       directToken.cancel('Dibatalkan oleh pengguna');
     } else {
-      await _bridge.cancelDownload(taskId);
+      try {
+        await _bridge.cancelDownload(taskId);
+      } catch (_) {}
     }
     _updateItem(
       taskId,
       (item) => item.copyWith(
         status: DownloadStatus.cancelled,
         statusText: 'Dibatalkan',
+        subFiles: item.subFiles
+            .map((s) => s.isActive
+                ? s.copyWith(status: DownloadStatus.cancelled, speedText: '')
+                : s)
+            .toList(growable: false),
       ),
     );
-    await _storage.saveHistory(_items);
+    _schedulePostDownloadSync(includeMediaRefresh: false);
   }
 
   Future<bool> openDownloadedItem(DownloadItem item) async {
@@ -787,6 +1441,23 @@ class DownloadManager extends ChangeNotifier {
       contentUri: item.contentUri,
       mimeType: item.mimeType,
       title: item.title,
+    );
+  }
+
+  Future<bool> openSubFile(SubFileTask file) async {
+    return _bridge.openFile(
+      filePath: file.savedPath,
+      contentUri: file.contentUri,
+      mimeType: file.mimeType,
+    );
+  }
+
+  Future<bool> shareSubFile(SubFileTask file, {required String title}) async {
+    return _bridge.shareFile(
+      filePath: file.savedPath,
+      contentUri: file.contentUri,
+      mimeType: file.mimeType,
+      title: title,
     );
   }
 
@@ -818,32 +1489,45 @@ class DownloadManager extends ChangeNotifier {
 
   Future<void> removeHistoryItem(DownloadItem item, {bool deleteFromDevice = false}) async {
     if (deleteFromDevice) {
-      await _bridge.deleteFile(
-        filePath: item.savedPath,
-        contentUri: item.contentUri,
-      );
+      if (item.subFiles.isNotEmpty) {
+        for (final sub in item.subFiles) {
+          if ((sub.savedPath != null && sub.savedPath!.isNotEmpty) ||
+              (sub.contentUri != null && sub.contentUri!.isNotEmpty)) {
+            await _bridge.deleteFile(
+              filePath: sub.savedPath,
+              contentUri: sub.contentUri,
+            );
+          }
+        }
+      } else {
+        await _bridge.deleteFile(
+          filePath: item.savedPath,
+          contentUri: item.contentUri,
+        );
+      }
       unawaited(refreshManagedFiles());
     }
     _items = _items.where((i) => i.id != item.id).toList();
-    notifyListeners();
+    _notifyImmediate();
     await _storage.saveHistory(_items);
   }
 
   Future<void> clearAllHistory() async {
     _items = _items.where((i) => i.isActive).toList();
-    notifyListeners();
+    _notifyImmediate();
     await _storage.saveHistory(_items);
   }
 
   Future<void> updateSettings(AppSettings updated) async {
     _settings = updated;
-    notifyListeners();
+    themeNotifier.value = updated.themeMode;
+    _notifyImmediate();
     await _storage.saveSettings(updated);
   }
 
   Future<EngineUpdateResult> updateYtDlpEngine() async {
     _isUpdatingEngine = true;
-    notifyListeners();
+    _notifyImmediate();
     try {
       final result = await _bridge.updateEngine(_settings.updateChannel);
       _engineStatus = EngineStatus(
@@ -856,7 +1540,7 @@ class DownloadManager extends ChangeNotifier {
       return result;
     } finally {
       _isUpdatingEngine = false;
-      notifyListeners();
+      _notifyImmediate();
     }
   }
 
@@ -864,7 +1548,7 @@ class DownloadManager extends ChangeNotifier {
     try {
       final info = await _bridge.getStorageInfo();
       _cacheBytes = (info['cacheBytes'] as num?)?.toInt() ?? 0;
-      notifyListeners();
+      _notifyImmediate();
     } catch (_) {}
   }
 
@@ -874,13 +1558,76 @@ class DownloadManager extends ChangeNotifier {
     return freed;
   }
 
-  void _updateItem(String id, DownloadItem Function(DownloadItem) updater) {
+  void _updateItem(
+    String id,
+    DownloadItem Function(DownloadItem) updater, {
+    bool throttled = false,
+  }) {
+    if (_isDisposed) return;
     final index = _items.indexWhere((i) => i.id == id);
     if (index == -1) return;
-    final copy = List<DownloadItem>.from(_items);
-    copy[index] = updater(copy[index]);
-    _items = copy;
+    _items[index] = updater(_items[index]);
+    if (throttled) {
+      _notifyThrottled();
+    } else {
+      _notifyImmediate();
+    }
+  }
+
+  void _notifyImmediate() {
+    if (_isDisposed) return;
+    _throttleNotifyTimer?.cancel();
+    _throttleNotifyTimer = null;
+    _hasPendingNotify = false;
     notifyListeners();
+  }
+
+  void _notifyThrottled() {
+    if (_isDisposed) return;
+    if (_throttleNotifyTimer != null && _throttleNotifyTimer!.isActive) {
+      _hasPendingNotify = true;
+      return;
+    }
+    notifyListeners();
+    _throttleNotifyTimer = Timer(const Duration(milliseconds: 250), () {
+      _throttleNotifyTimer = null;
+      if (_hasPendingNotify && !_isDisposed) {
+        _hasPendingNotify = false;
+        notifyListeners();
+      }
+    });
+  }
+
+  void _schedulePostDownloadSync({bool includeMediaRefresh = true}) {
+    if (_isDisposed) return;
+    _postSyncTimer?.cancel();
+
+    final hasActive = _items.any((i) => i.isActive);
+    if (!hasActive) {
+      unawaited(_runPostDownloadSync(includeMediaRefresh: includeMediaRefresh));
+      return;
+    }
+
+    if (DateTime.now().difference(_lastHistoryFlush) > const Duration(seconds: 8)) {
+      _lastHistoryFlush = DateTime.now();
+      unawaited(_storage.saveHistory(_items));
+    }
+
+    _postSyncTimer = Timer(const Duration(milliseconds: 1800), () {
+      if (_isDisposed) return;
+      unawaited(_runPostDownloadSync(includeMediaRefresh: includeMediaRefresh));
+    });
+  }
+
+  Future<void> _runPostDownloadSync({bool includeMediaRefresh = true}) async {
+    _lastHistoryFlush = DateTime.now();
+    try {
+      await _storage.saveHistory(_items);
+    } catch (_) {}
+    if (includeMediaRefresh && !_isDisposed) {
+      unawaited(refreshStorageInfo());
+      unawaited(refreshManagedFiles());
+    }
   }
 
   String _sanitizeBaseName(String title) {
@@ -894,11 +1641,15 @@ class DownloadManager extends ChangeNotifier {
 
   @override
   void dispose() {
+    _isDisposed = true;
+    _throttleNotifyTimer?.cancel();
+    _postSyncTimer?.cancel();
     _progressSub?.cancel();
     _shareSub?.cancel();
     for (final token in _directCancelTokens.values) {
       if (!token.isCancelled) token.cancel();
     }
+    themeNotifier.dispose();
     super.dispose();
   }
 }

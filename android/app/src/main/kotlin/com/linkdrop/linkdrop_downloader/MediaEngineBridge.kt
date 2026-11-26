@@ -773,7 +773,10 @@ class MediaEngineBridge(private val context: Context) {
                     resolver.update(uri, refreshValues, null, null)
                 }
 
-                if (!realFilePath.isNullOrBlank()) {
+                // On Android 10+, MediaStore IS_PENDING=0 already indexes images instantaneously.
+                // Run explicit MediaScanner only for video/audio (to broadcast fresh MP4 mvhd timestamps)
+                // so bulk 100-photo downloads (e.g. Pixiv) stay super fast & never flood Binder IPC.
+                if (!isImage && !realFilePath.isNullOrBlank()) {
                     runCatching {
                         MediaScannerConnection.scanFile(
                             context,

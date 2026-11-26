@@ -17,8 +17,8 @@ void main() {
     );
     await tester.pump();
 
-    // Brand & simplified screen checks (removed clutter must stay gone)
-    expect(find.text('all_download'), findsOneWidget);
+    // Ultra-clean screen checks (title, icon, and removed clutter must stay gone)
+    expect(find.text('all_download'), findsNothing);
     expect(find.text('Engine Siap'), findsNothing);
     expect(find.text('Unduh Cepat (Kualitas Default)'), findsNothing);
     expect(find.text('Cara Tercepat Mengunduh'), findsNothing);

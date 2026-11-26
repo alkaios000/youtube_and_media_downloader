@@ -115,33 +115,6 @@ class _DownloaderScreenState extends State<DownloaderScreen> {
                   : MainAxisAlignment.start,
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                // Minimal Brand Header (no "Engine Siap", no subtitle, no platform icon bar)
-                Row(
-                  mainAxisAlignment: isCenteredIdle
-                      ? MainAxisAlignment.center
-                      : MainAxisAlignment.start,
-                  children: [
-                    ClipRRect(
-                      borderRadius: BorderRadius.circular(12),
-                      child: Image.asset(
-                        'assets/icon/app_icon.png',
-                        width: isCenteredIdle ? 44 : 34,
-                        height: isCenteredIdle ? 44 : 34,
-                        fit: BoxFit.cover,
-                      ),
-                    ),
-                    const SizedBox(width: 10),
-                    Text(
-                      'all_download',
-                      style: theme.textTheme.headlineSmall?.copyWith(
-                        fontWeight: FontWeight.w800,
-                        letterSpacing: -0.5,
-                      ),
-                    ),
-                  ],
-                ),
-                SizedBox(height: isCenteredIdle ? 24 : 14),
-
                 if (manager.permissionChecked &&
                     !manager.permissionStatus.granted) ...[
                   _PermissionBanner(
@@ -370,6 +343,15 @@ class _DownloaderScreenState extends State<DownloaderScreen> {
                     initialOption: preview.options.isNotEmpty
                         ? manager.pickDefaultOption(preview)
                         : null,
+                    isDownloaded: manager.isMarkedDownloaded,
+                    onUnmarkKey: (key) async {
+                      await manager.unmarkDownloaded(key);
+                      _showSnack('Penandaan "Sudah diunduh" dihapus.');
+                    },
+                    onUnmarkKeys: (keys) async {
+                      await manager.unmarkMany(keys);
+                      _showSnack('Penandaan album pada daftar ini dihapus.');
+                    },
                     onDismiss: manager.clearPreview,
                     onDownloadOption: (selected) async {
                       await manager.startDownload(preview, selected);

@@ -323,6 +323,8 @@ class _FilesScreenState extends State<FilesScreen> {
                   child: sampleImage != null && File(sampleImage.savedPath).existsSync()
                       ? Image.file(
                           File(sampleImage.savedPath),
+                          cacheWidth: 160,
+                          filterQuality: FilterQuality.low,
                           fit: BoxFit.cover,
                           errorBuilder: (_, _, _) => _creatorIconBox(platform),
                         )
@@ -501,6 +503,8 @@ class _FileThumb extends StatelessWidget {
         child: isLocalImg
             ? Image.file(
                 File(file.savedPath),
+                cacheWidth: 160,
+                filterQuality: FilterQuality.low,
                 fit: BoxFit.cover,
                 errorBuilder: (_, _, _) => _fallback(context, icon),
               )

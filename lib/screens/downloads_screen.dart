@@ -4,6 +4,7 @@ import '../models/download_item.dart';
 import '../models/media_info.dart';
 import '../models/media_platform.dart';
 import '../services/download_manager.dart';
+import '../widgets/download_detail_sheet.dart';
 import '../widgets/download_tile.dart';
 
 enum _LibraryFilter { all, video, audio, image }
@@ -149,8 +150,17 @@ class _DownloadsScreenState extends State<DownloadsScreen> {
               separatorBuilder: (_, _) => const SizedBox(height: 10),
               itemBuilder: (context, index) {
                 final item = filtered[index];
+                final markerKey = item.markerKey.isNotEmpty
+                    ? item.markerKey
+                    : canonicalMarkerKey(item.sourceUrl);
                 return DownloadTile(
                   item: item,
+                  isMarkedDownloaded: widget.manager.isMarkedDownloaded(markerKey),
+                  onTapDetail: () => showDownloadDetailSheet(
+                    context,
+                    manager: widget.manager,
+                    itemId: item.id,
+                  ),
                   onCancel: item.isActive
                       ? () => widget.manager.cancelDownload(item.id)
                       : null,

@@ -2,10 +2,13 @@ import 'package:flutter/material.dart';
 
 import '../models/download_item.dart';
 import '../models/media_info.dart';
+import '../models/media_platform.dart';
 import 'platform_badge.dart';
 
 class DownloadTile extends StatelessWidget {
   final DownloadItem item;
+  final bool isMarkedDownloaded;
+  final VoidCallback? onTapDetail;
   final VoidCallback? onCancel;
   final VoidCallback? onOpen;
   final VoidCallback? onShare;
@@ -14,6 +17,8 @@ class DownloadTile extends StatelessWidget {
   const DownloadTile({
     super.key,
     required this.item,
+    this.isMarkedDownloaded = false,
+    this.onTapDetail,
     this.onCancel,
     this.onOpen,
     this.onShare,
@@ -25,11 +30,12 @@ class DownloadTile extends StatelessWidget {
     final theme = Theme.of(context);
     final isDark = theme.brightness == Brightness.dark;
     final canOpen = item.status == DownloadStatus.completed;
+    final fileCount = item.subFiles.length;
 
     return Card(
       clipBehavior: Clip.antiAlias,
       child: InkWell(
-        onTap: canOpen ? onOpen : null,
+        onTap: onTapDetail ?? (canOpen ? onOpen : null),
         child: Padding(
           padding: const EdgeInsets.all(13),
           child: Column(
@@ -70,6 +76,14 @@ class DownloadTile extends StatelessWidget {
                                 ),
                               ),
                             ),
+                            if (isMarkedDownloaded) ...[
+                              const SizedBox(width: 5),
+                              const Icon(
+                                Icons.bookmark_added_rounded,
+                                size: 15,
+                                color: Color(0xFF22C55E),
+                              ),
+                            ],
                             const Spacer(),
                             _StatusChip(status: item.status),
                           ],
@@ -148,11 +162,26 @@ class DownloadTile extends StatelessWidget {
                         ),
                       ),
                     ),
+                    if (onTapDetail != null)
+                      TextButton.icon(
+                        onPressed: onTapDetail,
+                        style: TextButton.styleFrom(
+                          visualDensity: VisualDensity.compact,
+                          padding: const EdgeInsets.symmetric(horizontal: 8),
+                        ),
+                        icon: const Icon(Icons.list_alt_rounded, size: 16),
+                        label: Text(
+                          fileCount > 1
+                              ? '${item.completedSubFilesCount}/$fileCount'
+                              : 'Detail',
+                        ),
+                      ),
                     TextButton.icon(
                       onPressed: onCancel,
                       style: TextButton.styleFrom(
                         foregroundColor: theme.colorScheme.error,
                         visualDensity: VisualDensity.compact,
+                        padding: const EdgeInsets.symmetric(horizontal: 8),
                       ),
                       icon: const Icon(Icons.stop_circle_outlined, size: 17),
                       label: const Text('Batal'),
@@ -192,23 +221,35 @@ class DownloadTile extends StatelessWidget {
                         onPressed: onOpen,
                         style: FilledButton.styleFrom(
                           visualDensity: VisualDensity.compact,
-                          padding: const EdgeInsets.symmetric(horizontal: 12),
+                          padding: const EdgeInsets.symmetric(horizontal: 11),
                         ),
                         icon: const Icon(Icons.play_arrow_rounded, size: 18),
                         label: const Text('Buka'),
                       ),
-                      const SizedBox(width: 8),
+                      const SizedBox(width: 6),
                       OutlinedButton.icon(
                         onPressed: onShare,
                         style: OutlinedButton.styleFrom(
                           visualDensity: VisualDensity.compact,
-                          padding: const EdgeInsets.symmetric(horizontal: 12),
+                          padding: const EdgeInsets.symmetric(horizontal: 10),
                         ),
-                        icon: const Icon(Icons.share_rounded, size: 16),
+                        icon: const Icon(Icons.share_rounded, size: 15),
                         label: const Text('Bagikan'),
                       ),
                     ],
                     const Spacer(),
+                    if (onTapDetail != null)
+                      TextButton.icon(
+                        onPressed: onTapDetail,
+                        style: TextButton.styleFrom(
+                          visualDensity: VisualDensity.compact,
+                          padding: const EdgeInsets.symmetric(horizontal: 8),
+                        ),
+                        icon: const Icon(Icons.list_alt_rounded, size: 16),
+                        label: Text(
+                          fileCount > 1 ? '$fileCount file' : 'Detail',
+                        ),
+                      ),
                     IconButton(
                       onPressed: onDelete,
                       icon: Icon(
@@ -232,7 +273,10 @@ class DownloadTile extends StatelessWidget {
     final parts = <String>[
       if (item.fileSize != null && item.fileSize! > 0)
         formatBytes(item.fileSize),
-      item.formatLabel,
+      if (item.subFiles.length > 1)
+        '${item.completedSubFilesCount}/${item.subFiles.length} file'
+      else
+        item.formatLabel,
       _formatDate(item.createdAt),
     ];
     return parts.join(' • ');
@@ -260,6 +304,10 @@ class _MiniThumb extends StatelessWidget {
             ? Icons.image_rounded
             : Icons.videocam_rounded);
 
+    final headers = item.platform == MediaPlatform.pixiv
+        ? const {'Referer': 'https://www.pixiv.net/'}
+        : null;
+
     return ClipRRect(
       borderRadius: BorderRadius.circular(12),
       child: SizedBox(
@@ -268,6 +316,9 @@ class _MiniThumb extends StatelessWidget {
         child: item.thumbnailUrl != null && item.thumbnailUrl!.isNotEmpty
             ? Image.network(
                 item.thumbnailUrl!,
+                headers: headers,
+                cacheWidth: 160,
+                filterQuality: FilterQuality.low,
                 fit: BoxFit.cover,
                 errorBuilder: (_, _, _) => _ThumbPlaceholder(icon: fallbackIcon),
               )
@@ -306,6 +357,9 @@ class _StatusChip extends StatelessWidget {
     late final String text;
     switch (status) {
       case DownloadStatus.queued:
+        color = const Color(0xFF94A3B8);
+        text = 'Antrean';
+        break;
       case DownloadStatus.downloading:
         color = const Color(0xFF38BDF8);
         text = 'Mengunduh';

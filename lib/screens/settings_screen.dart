@@ -340,6 +340,22 @@ class SettingsScreen extends StatelessWidget {
                     ),
                     const Divider(height: 1),
                     ListTile(
+                      leading: const Icon(Icons.bookmark_added_outlined),
+                      title: const Text('Penandaan Sudah Diunduh'),
+                      subtitle: Text(
+                        manager.downloadedMarkers.isNotEmpty
+                            ? '${manager.downloadedMarkers.length} album/media ditandai sudah diunduh'
+                            : 'Belum ada penandaan tersimpan',
+                      ),
+                      trailing: TextButton(
+                        onPressed: manager.downloadedMarkers.isEmpty
+                            ? null
+                            : () => _confirmResetMarkers(context),
+                        child: const Text('Reset Semua'),
+                      ),
+                    ),
+                    const Divider(height: 1),
+                    ListTile(
                       leading: const Icon(Icons.cleaning_services_outlined),
                       title: const Text('Bersihkan Cache Sementara'),
                       subtitle: Text(
@@ -401,6 +417,38 @@ class SettingsScreen extends StatelessWidget {
         ? 'Berhasil membersihkan ${formatBytes(freed)} cache sementara.'
         : 'Tidak ada cache sementara untuk dibersihkan.';
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
+  }
+
+  Future<void> _confirmResetMarkers(BuildContext context) async {
+    final count = manager.downloadedMarkers.length;
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Reset Semua Penandaan?'),
+        content: Text(
+          'Hapus semua $count tanda "Sudah diunduh"? File yang tersimpan di penyimpanan perangkat tetap aman.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Batal'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Reset Semua'),
+          ),
+        ],
+      ),
+    );
+    if (ok == true) {
+      await manager.clearAllDownloadedMarkers();
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Semua penandaan "Sudah diunduh" telah dihapus.'),
+        ),
+      );
+    }
   }
 
   Future<void> _pickDefaultQuality(BuildContext context) async {
