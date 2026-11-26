@@ -131,6 +131,7 @@ class DownloadItem {
   final String? mimeType;
   final String? errorMessage;
   final DateTime createdAt;
+  final DateTime? completedAt;
   final List<SubFileTask> subFiles;
 
   /// Persisted parameters enabling full Pause/Resume & Retry even after app restarts.
@@ -147,6 +148,7 @@ class DownloadItem {
     required this.mediaKind,
     required this.status,
     required this.createdAt,
+    this.completedAt,
     this.markerKey = '',
     this.thumbnailUrl,
     this.progress = 0,
@@ -193,6 +195,7 @@ class DownloadItem {
     String? mimeType,
     String? errorMessage,
     bool clearError = false,
+    DateTime? completedAt,
     List<SubFileTask>? subFiles,
     Map<String, dynamic>? resumePayload,
     bool clearResumePayload = false,
@@ -219,6 +222,7 @@ class DownloadItem {
       mimeType: mimeType ?? this.mimeType,
       errorMessage: clearError ? null : (errorMessage ?? this.errorMessage),
       createdAt: createdAt,
+      completedAt: completedAt ?? this.completedAt,
       subFiles: subFiles ?? this.subFiles,
       resumePayload: clearResumePayload
           ? null
@@ -253,6 +257,7 @@ class DownloadItem {
       'mimeType': mimeType,
       'errorMessage': errorMessage,
       'createdAt': createdAt.toIso8601String(),
+      if (completedAt != null) 'completedAt': completedAt!.toIso8601String(),
       'subFiles': subFiles.map((e) => e.toJson()).toList(),
       if (keepResumePayload) 'resumePayload': resumePayload,
     };
@@ -297,6 +302,7 @@ class DownloadItem {
       errorMessage: json['errorMessage']?.toString(),
       createdAt: DateTime.tryParse(json['createdAt']?.toString() ?? '') ??
           DateTime.now(),
+      completedAt: DateTime.tryParse(json['completedAt']?.toString() ?? ''),
       subFiles: parsedSubs,
       resumePayload: rawResume is Map
           ? Map<String, dynamic>.from(rawResume)

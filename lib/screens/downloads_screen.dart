@@ -47,6 +47,20 @@ List<DownloadItem> sortLoadingDownloads(List<DownloadItem> items) {
   return indexed.map((e) => e.value).toList(growable: false);
 }
 
+/// Orders finished items so the most recently completed download ALWAYS sits at
+/// the very top of the "Selesai" tab (falling back to `createdAt` for legacy items).
+List<DownloadItem> sortFinishedDownloads(List<DownloadItem> items) {
+  final indexed = items.asMap().entries.toList(growable: false);
+  indexed.sort((a, b) {
+    final ta = a.value.completedAt ?? a.value.createdAt;
+    final tb = b.value.completedAt ?? b.value.createdAt;
+    final cmp = tb.compareTo(ta);
+    if (cmp != 0) return cmp;
+    return a.key.compareTo(b.key);
+  });
+  return indexed.map((e) => e.value).toList(growable: false);
+}
+
 class DownloadsScreen extends StatefulWidget {
   final DownloadManager manager;
 
@@ -281,6 +295,7 @@ class _DownloadsScreenState extends State<DownloadsScreen> {
     final processing = saving.isEmpty
         ? downloading
         : (downloading.isEmpty ? saving : [...saving, ...downloading]);
+    final sortedFinished = sortFinishedDownloads(finished);
 
     final snap = _HistoryBucketSnapshot(
       totalLoadingCount: totalLoading,
@@ -289,7 +304,7 @@ class _DownloadsScreenState extends State<DownloadsScreen> {
       queued: queued,
       paused: paused,
       failed: failed,
-      finished: finished,
+      finished: sortedFinished,
     );
     _cachedRevision = rev;
     _cachedItemsLength = allItems.length;

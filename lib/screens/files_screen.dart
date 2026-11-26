@@ -18,6 +18,15 @@ import 'platform_all_photos_screen.dart';
 
 enum _FileViewMode { gallery, list }
 
+enum _CreatorSortMode {
+  newest,
+  sizeDesc,
+  sizeAsc,
+  photosDesc,
+  albumsDesc,
+  nameAsc,
+}
+
 enum _FileMenuAction {
   view,
   setWallpaper,
@@ -89,6 +98,7 @@ class _FilesScreenState extends State<FilesScreen> {
   String? _selectedCreatorFolder;
   String _searchQuery = '';
   _FileViewMode _viewMode = _FileViewMode.gallery;
+  _CreatorSortMode _creatorSortMode = _CreatorSortMode.newest;
   bool _pixivShowAllPhotos = false;
   bool _shuffleEnabled = false;
   int _shuffleSeed = 0;
@@ -610,6 +620,53 @@ class _FilesScreenState extends State<FilesScreen> {
                                       : null,
                                 ),
                               ),
+                              const SizedBox(height: 8),
+                              SingleChildScrollView(
+                                scrollDirection: Axis.horizontal,
+                                child: Row(
+                                  children: [
+                                    _buildCreatorSortChip(
+                                      mode: _CreatorSortMode.newest,
+                                      icon: Icons.schedule_rounded,
+                                      label: 'Terbaru',
+                                    ),
+                                    const SizedBox(width: 6),
+                                    _buildCreatorSortChip(
+                                      mode: _CreatorSortMode.sizeDesc,
+                                      icon: Icons.arrow_downward_rounded,
+                                      label: 'Terbesar',
+                                    ),
+                                    const SizedBox(width: 6),
+                                    _buildCreatorSortChip(
+                                      mode: _CreatorSortMode.sizeAsc,
+                                      icon: Icons.arrow_upward_rounded,
+                                      label: 'Terkecil',
+                                    ),
+                                    const SizedBox(width: 6),
+                                    _buildCreatorSortChip(
+                                      mode: _CreatorSortMode.photosDesc,
+                                      icon: Icons.photo_library_outlined,
+                                      label: _isPixivPlatform
+                                          ? 'Foto Terbanyak'
+                                          : 'File Terbanyak',
+                                    ),
+                                    if (_isPixivPlatform) ...[
+                                      const SizedBox(width: 6),
+                                      _buildCreatorSortChip(
+                                        mode: _CreatorSortMode.albumsDesc,
+                                        icon: Icons.collections_bookmark_outlined,
+                                        label: 'Album Terbanyak',
+                                      ),
+                                    ],
+                                    const SizedBox(width: 6),
+                                    _buildCreatorSortChip(
+                                      mode: _CreatorSortMode.nameAsc,
+                                      icon: Icons.sort_by_alpha_rounded,
+                                      label: 'A–Z',
+                                    ),
+                                  ],
+                                ),
+                              ),
                             ],
                           ],
                         ),
@@ -1099,6 +1156,27 @@ class _FilesScreenState extends State<FilesScreen> {
     );
   }
 
+  Widget _buildCreatorSortChip({
+    required _CreatorSortMode mode,
+    required IconData icon,
+    required String label,
+  }) {
+    final selected = _creatorSortMode == mode;
+    return ChoiceChip(
+      avatar: Icon(icon, size: 15),
+      label: Text(label),
+      selected: selected,
+      showCheckmark: false,
+      materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+      visualDensity: VisualDensity.compact,
+      onSelected: (_) {
+        if (_creatorSortMode == mode) return;
+        HapticFeedback.selectionClick();
+        setState(() => _creatorSortMode = mode);
+      },
+    );
+  }
+
   // ===========================================================================
   // LEVEL 1: Folders by Username / Creator inside Platform
   // ===========================================================================
@@ -1107,18 +1185,70 @@ class _FilesScreenState extends State<FilesScreen> {
     Map<String, List<ManagedFile>> byCreator,
   ) {
     final q = _searchQuery.trim().toLowerCase();
-    final creators = byCreator.keys
-        .where((c) => q.isEmpty || c.toLowerCase().contains(q))
-        .toList()
-      ..sort((a, b) {
-        final aLatest = byCreator[a]!.first.modifiedAt;
-        final bLatest = byCreator[b]!.first.modifiedAt;
-        return bLatest.compareTo(aLatest);
-      });
     final platform = MediaPlatformMeta.fromKey(platformFolder);
     final isPixiv = platform == MediaPlatform.pixiv;
+    final effectiveSort = (!isPixiv && _creatorSortMode == _CreatorSortMode.albumsDesc)
+        ? _CreatorSortMode.photosDesc
+        : _creatorSortMode;
 
-    if (creators.isEmpty) {
+    final entries = <_CreatorEntry>[];
+    for (final entry in byCreator.entries) {
+      final creator = entry.key;
+      if (q.isNotEmpty && !creator.toLowerCase().contains(q)) continue;
+      final files = entry.value;
+      var totalSize = 0;
+      var photoCount = 0;
+      var privateCount = 0;
+      ManagedFile? sampleImage;
+      DateTime latestMod = files.first.modifiedAt;
+      final albumNames = isPixiv ? <String>{} : null;
+
+      for (final f in files) {
+        totalSize += f.fileSize;
+        if (f.mediaKind == MediaKind.image) {
+          photoCount++;
+          if (sampleImage == null && f.savedPath.isNotEmpty) {
+            sampleImage = f;
+          }
+        }
+        if (f.isPrivate) privateCount++;
+        if (f.modifiedAt.isAfter(latestMod)) latestMod = f.modifiedAt;
+        albumNames?.add(f.effectiveAlbumName);
+      }
+
+      entries.add(
+        _CreatorEntry(
+          name: creator,
+          files: files,
+          totalSize: totalSize,
+          photoCount: photoCount,
+          privateCount: privateCount,
+          albumCount: albumNames?.length ?? 0,
+          latestModified: latestMod,
+          sampleImage: sampleImage,
+        ),
+      );
+    }
+
+    entries.sort((a, b) {
+      final primary = switch (effectiveSort) {
+        _CreatorSortMode.newest => b.latestModified.compareTo(a.latestModified),
+        _CreatorSortMode.sizeDesc => b.totalSize.compareTo(a.totalSize),
+        _CreatorSortMode.sizeAsc => a.totalSize.compareTo(b.totalSize),
+        _CreatorSortMode.photosDesc => isPixiv
+            ? b.photoCount.compareTo(a.photoCount)
+            : b.files.length.compareTo(a.files.length),
+        _CreatorSortMode.albumsDesc => b.albumCount.compareTo(a.albumCount),
+        _CreatorSortMode.nameAsc =>
+            a.name.toLowerCase().compareTo(b.name.toLowerCase()),
+      };
+      if (primary != 0) return primary;
+      final bySize = b.totalSize.compareTo(a.totalSize);
+      if (bySize != 0) return bySize;
+      return a.name.toLowerCase().compareTo(b.name.toLowerCase());
+    });
+
+    if (entries.isEmpty) {
       return _buildEmptySearchSliver(
         context,
         isPixiv ? 'Artist Pixiv tidak ditemukan' : 'Kreator tidak ditemukan',
@@ -1128,18 +1258,16 @@ class _FilesScreenState extends State<FilesScreen> {
     return SliverPadding(
       padding: const EdgeInsets.fromLTRB(16, 4, 16, 28),
       sliver: SliverList.separated(
-        itemCount: creators.length,
+        itemCount: entries.length,
         separatorBuilder: (_, _) => const SizedBox(height: 10),
         itemBuilder: (context, index) {
-          final creator = creators[index];
-          final files = byCreator[creator]!;
-          final totalSize = files.fold<int>(0, (s, f) => s + f.fileSize);
-          final privateCount = files.where((f) => f.isPrivate).length;
-          final albumCount =
-              isPixiv ? files.map((f) => f.effectiveAlbumName).toSet().length : 0;
-          final sampleImage = files
-              .where((f) => f.mediaKind == MediaKind.image && f.savedPath.isNotEmpty)
-              .firstOrNull;
+          final item = entries[index];
+          final creator = item.name;
+          final files = item.files;
+          final totalSize = item.totalSize;
+          final privateCount = item.privateCount;
+          final albumCount = item.albumCount;
+          final sampleImage = item.sampleImage;
 
           final subLine = isPixiv
               ? '$albumCount album • ${files.length} foto • ${formatBytes(totalSize)}'
@@ -3268,6 +3396,28 @@ class _StickyAlbumToolbarDelegate extends SliverPersistentHeaderDelegate {
         shuffleEnabled != oldDelegate.shuffleEnabled ||
         viewMode != oldDelegate.viewMode;
   }
+}
+
+class _CreatorEntry {
+  final String name;
+  final List<ManagedFile> files;
+  final int totalSize;
+  final int photoCount;
+  final int privateCount;
+  final int albumCount;
+  final DateTime latestModified;
+  final ManagedFile? sampleImage;
+
+  const _CreatorEntry({
+    required this.name,
+    required this.files,
+    required this.totalSize,
+    required this.photoCount,
+    required this.privateCount,
+    required this.albumCount,
+    required this.latestModified,
+    required this.sampleImage,
+  });
 }
 
 class _CreatorStatCard extends StatelessWidget {

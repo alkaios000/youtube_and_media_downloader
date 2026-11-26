@@ -13,6 +13,7 @@ import 'package:linkdrop_downloader/screens/settings_screen.dart';
 import 'package:linkdrop_downloader/services/download_manager.dart';
 import 'package:linkdrop_downloader/theme/app_theme.dart';
 import 'package:linkdrop_downloader/widgets/media_preview_card.dart';
+import 'package:linkdrop_downloader/widgets/pixiv_album_viewer.dart';
 
 class _FakeFilesManager extends DownloadManager {
   final List<ManagedFile> _fakeFiles;
@@ -656,6 +657,227 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.byType(PageView), findsOneWidget);
     expect(find.byTooltip('Acak ulang & segarkan'), findsOneWidget);
+
+    manager.dispose();
+  });
+
+  testWidgets(
+      'Artist list sorts by largest size & most photos, and finished history puts newest completed on top',
+      (WidgetTester tester) async {
+    // 1) Verify sortFinishedDownloads orders by completedAt descending (even when createdAt was older!)
+    final oldCreatedNewlyDone = DownloadItem(
+      id: 'resumed_old',
+      title: 'Resumed Old',
+      author: 'A',
+      sourceUrl: 'https://example.com/1',
+      platform: MediaPlatform.pixiv,
+      mediaKind: MediaKind.image,
+      formatLabel: 'HD',
+      extension: 'jpg',
+      status: DownloadStatus.completed,
+      createdAt: DateTime(2026, 11, 20, 8, 0),
+      completedAt: DateTime(2026, 11, 26, 15, 50),
+    );
+    final newerCreatedEarlierDone = DownloadItem(
+      id: 'earlier_done',
+      title: 'Earlier Done',
+      author: 'B',
+      sourceUrl: 'https://example.com/2',
+      platform: MediaPlatform.pixiv,
+      mediaKind: MediaKind.image,
+      formatLabel: 'HD',
+      extension: 'jpg',
+      status: DownloadStatus.completed,
+      createdAt: DateTime(2026, 11, 26, 15, 0),
+      completedAt: DateTime(2026, 11, 26, 15, 10),
+    );
+    final legacyNoCompletedAt = DownloadItem(
+      id: 'legacy',
+      title: 'Legacy',
+      author: 'C',
+      sourceUrl: 'https://example.com/3',
+      platform: MediaPlatform.pixiv,
+      mediaKind: MediaKind.image,
+      formatLabel: 'HD',
+      extension: 'jpg',
+      status: DownloadStatus.completed,
+      createdAt: DateTime(2026, 11, 25, 12, 0),
+    );
+    final sortedFinished = sortFinishedDownloads([
+      legacyNoCompletedAt,
+      newerCreatedEarlierDone,
+      oldCreatedNewlyDone,
+    ]);
+    expect(
+      sortedFinished.map((e) => e.id).toList(),
+      ['resumed_old', 'earlier_done', 'legacy'],
+    );
+    // completedAt survives JSON round-trip
+    final rt = DownloadItem.fromJson(oldCreatedNewlyDone.toJson());
+    expect(rt.completedAt, oldCreatedNewlyDone.completedAt);
+
+    // 2) Verify Artist list sorting: Terbesar (size desc) & Foto Terbanyak (photo count desc)
+    final files = <ManagedFile>[
+      // ArtistHugeSize: 1 giant photo (50 MB), oldest
+      ManagedFile(
+        fileName: 'huge.jpg',
+        mimeType: 'image/jpeg',
+        mediaKind: MediaKind.image,
+        fileSize: 50 * 1024 * 1024,
+        modifiedAt: DateTime(2026, 11, 20),
+        relativePath: 'Pixiv/ArtistHugeSize/A1',
+        savedPath: '/nonexistent/huge.jpg',
+        contentUri: 'content://test/huge',
+        platformFolder: 'Pixiv',
+        creatorFolder: 'ArtistHugeSize',
+        albumFolder: 'A1',
+        isPrivate: true,
+      ),
+      // ArtistManyPhotos: 5 tiny photos (5 KB total), middle date
+      for (int i = 0; i < 5; i++)
+        ManagedFile(
+          fileName: 'many_$i.jpg',
+          mimeType: 'image/jpeg',
+          mediaKind: MediaKind.image,
+          fileSize: 1024,
+          modifiedAt: DateTime(2026, 11, 22),
+          relativePath: 'Pixiv/ArtistManyPhotos/M$i',
+          savedPath: '/nonexistent/many_$i.jpg',
+          contentUri: 'content://test/many_$i',
+          platformFolder: 'Pixiv',
+          creatorFolder: 'ArtistManyPhotos',
+          albumFolder: 'M$i',
+          isPrivate: true,
+        ),
+      // ArtistNewest: 2 medium photos (2 MB total), newest date
+      for (int i = 0; i < 2; i++)
+        ManagedFile(
+          fileName: 'new_$i.jpg',
+          mimeType: 'image/jpeg',
+          mediaKind: MediaKind.image,
+          fileSize: 1024 * 1024,
+          modifiedAt: DateTime(2026, 11, 26),
+          relativePath: 'Pixiv/ArtistNewest/N1',
+          savedPath: '/nonexistent/new_$i.jpg',
+          contentUri: 'content://test/new_$i',
+          platformFolder: 'Pixiv',
+          creatorFolder: 'ArtistNewest',
+          albumFolder: 'N1',
+          isPrivate: true,
+        ),
+    ];
+
+    final manager = _FakeFilesManager(files, const {});
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: AppTheme.darkTheme(),
+        home: Scaffold(
+          body: SafeArea(
+            child: FilesScreen(manager: manager),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    await tester.tap(find.text('Pixiv'));
+    await tester.pumpAndSettle();
+
+    // Default (Terbaru): ArtistNewest is above ArtistHugeSize
+    expect(
+      tester.getTopLeft(find.text('ArtistNewest')).dy,
+      lessThan(tester.getTopLeft(find.text('ArtistHugeSize')).dy),
+    );
+
+    // Sort by Terbesar -> ArtistHugeSize (50 MB) jumps above ArtistNewest (2 MB) & ArtistManyPhotos (5 KB)
+    await tester.tap(find.text('Terbesar'));
+    await tester.pumpAndSettle();
+    expect(
+      tester.getTopLeft(find.text('ArtistHugeSize')).dy,
+      lessThan(tester.getTopLeft(find.text('ArtistNewest')).dy),
+    );
+    expect(
+      tester.getTopLeft(find.text('ArtistNewest')).dy,
+      lessThan(tester.getTopLeft(find.text('ArtistManyPhotos')).dy),
+    );
+
+    // Sort by Foto Terbanyak -> ArtistManyPhotos (5) jumps above ArtistNewest (2) & ArtistHugeSize (1)
+    await tester.tap(find.text('Foto Terbanyak'));
+    await tester.pumpAndSettle();
+    expect(
+      tester.getTopLeft(find.text('ArtistManyPhotos')).dy,
+      lessThan(tester.getTopLeft(find.text('ArtistNewest')).dy),
+    );
+    expect(
+      tester.getTopLeft(find.text('ArtistNewest')).dy,
+      lessThan(tester.getTopLeft(find.text('ArtistHugeSize')).dy),
+    );
+
+    manager.dispose();
+  });
+
+  testWidgets(
+      'PixivAlbumViewer switches smoothly to next album with only a short (~20%) horizontal slide',
+      (WidgetTester tester) async {
+    final files = <ManagedFile>[
+      ManagedFile(
+        fileName: 'a1_0.jpg',
+        mimeType: 'image/jpeg',
+        mediaKind: MediaKind.image,
+        fileSize: 1024,
+        modifiedAt: DateTime(2026, 11, 26, 10, 0),
+        relativePath: 'Pixiv/ArtistSwipe/Album Satu',
+        savedPath: '/nonexistent/a1_0.jpg',
+        contentUri: 'content://test/swipe/1',
+        platformFolder: 'Pixiv',
+        creatorFolder: 'ArtistSwipe',
+        albumFolder: 'Album Satu',
+        isPrivate: true,
+      ),
+      ManagedFile(
+        fileName: 'a2_0.jpg',
+        mimeType: 'image/jpeg',
+        mediaKind: MediaKind.image,
+        fileSize: 1024,
+        modifiedAt: DateTime(2026, 11, 26, 10, 1),
+        relativePath: 'Pixiv/ArtistSwipe/Album Dua',
+        savedPath: '/nonexistent/a2_0.jpg',
+        contentUri: 'content://test/swipe/2',
+        platformFolder: 'Pixiv',
+        creatorFolder: 'ArtistSwipe',
+        albumFolder: 'Album Dua',
+        isPrivate: true,
+      ),
+    ];
+
+    final manager = _FakeFilesManager(files, const {});
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: AppTheme.darkTheme(),
+        home: PixivAlbumViewer(
+          manager: manager,
+          platformFolder: 'Pixiv',
+          creatorFolder: 'ArtistSwipe',
+          albumName: 'Album Satu',
+          albumNames: const ['Album Satu', 'Album Dua'],
+          initialAlbumIndex: 0,
+        ),
+      ),
+    );
+    await tester.pump();
+    expect(find.text('Album Satu'), findsOneWidget);
+
+    // Slow short drag of ONLY 20% of screen width (default Flutter PageView needs >50%!)
+    final width = tester.getSize(find.byType(PageView)).width;
+    await tester.timedDrag(
+      find.byType(PageView),
+      Offset(-width * 0.20, 0),
+      const Duration(milliseconds: 450),
+    );
+    await tester.pumpAndSettle();
+
+    // Must immediately land on Album Dua!
+    expect(find.text('Album Dua'), findsOneWidget);
 
     manager.dispose();
   });

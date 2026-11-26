@@ -21,38 +21,106 @@ class _PageHitMeta {
   const _PageHitMeta(this.index);
 }
 
-/// Ultra-snappy critically-damped page physics (~120ms settle with zero slow
-/// ballistic tail) so immediately scrolling vertically after sliding to another
-/// album NEVER gets stuck inside the horizontal slide threshold.
+/// Effortless, buttery-smooth, critically-damped page physics (~120ms settle):
+/// - Requires only a tiny horizontal slide (~14% of screen width) or a gentle flick
+///   to switch to the adjacent album (instead of Flutter's default 50% drag!).
+/// - Critically-damped spring settles cleanly with zero sluggish tail so vertical
+///   scrolling works immediately after switching albums.
 class _SnappyAlbumPagePhysics extends PageScrollPhysics {
-  const _SnappyAlbumPagePhysics({super.parent});
+  final int Function()? currentIndexProvider;
+
+  const _SnappyAlbumPagePhysics({
+    this.currentIndexProvider,
+    super.parent,
+  });
 
   @override
   _SnappyAlbumPagePhysics applyTo(ScrollPhysics? ancestor) {
-    return _SnappyAlbumPagePhysics(parent: buildParent(ancestor));
+    return _SnappyAlbumPagePhysics(
+      currentIndexProvider: currentIndexProvider,
+      parent: buildParent(ancestor),
+    );
   }
 
   @override
   SpringDescription get spring => SpringDescription.withDampingRatio(
-        mass: 0.6,
-        stiffness: 720.0,
-        ratio: 1.05,
+        mass: 0.55,
+        stiffness: 620.0,
+        ratio: 1.0,
       );
 
   @override
   Tolerance toleranceFor(ScrollMetrics metrics) {
     return const Tolerance(
-      distance: 1.5,
+      distance: 1.0,
       time: 0.01,
-      velocity: 30.0,
+      velocity: 25.0,
     );
   }
 
   @override
-  double get minFlingDistance => 12.0;
+  double get minFlingDistance => 8.0;
 
   @override
-  double get minFlingVelocity => 180.0;
+  double get minFlingVelocity => 140.0;
+
+  double _resolveTargetPixels(ScrollMetrics position, double velocity) {
+    final viewport = position.viewportDimension;
+    if (viewport <= 0) return position.pixels;
+    final page = position.pixels / viewport;
+    final maxPage = (position.maxScrollExtent / viewport).roundToDouble();
+    final basePage = (currentIndexProvider?.call() ?? page.round()).toDouble();
+    final delta = page - basePage;
+
+    const double switchThreshold = 0.14;
+    const double flickVelocity = 140.0;
+
+    double targetPage;
+    if (delta.abs() >= 0.85) {
+      if (velocity > flickVelocity) {
+        targetPage = page.ceilToDouble();
+      } else if (velocity < -flickVelocity) {
+        targetPage = page.floorToDouble();
+      } else {
+        targetPage = page.roundToDouble();
+      }
+    } else if (velocity > flickVelocity) {
+      targetPage = (delta < -0.04) ? basePage : (basePage + 1.0);
+    } else if (velocity < -flickVelocity) {
+      targetPage = (delta > 0.04) ? basePage : (basePage - 1.0);
+    } else if (delta >= switchThreshold) {
+      targetPage = basePage + 1.0;
+    } else if (delta <= -switchThreshold) {
+      targetPage = basePage - 1.0;
+    } else {
+      targetPage = basePage;
+    }
+
+    return targetPage.clamp(0.0, maxPage) * viewport;
+  }
+
+  @override
+  Simulation? createBallisticSimulation(
+    ScrollMetrics position,
+    double velocity,
+  ) {
+    if ((velocity <= 0.0 && position.pixels <= position.minScrollExtent) ||
+        (velocity >= 0.0 && position.pixels >= position.maxScrollExtent)) {
+      return super.createBallisticSimulation(position, velocity);
+    }
+    final tolerance = toleranceFor(position);
+    final target = _resolveTargetPixels(position, velocity);
+    if ((target - position.pixels).abs() < tolerance.distance) {
+      return null;
+    }
+    return ScrollSpringSimulation(
+      spring,
+      position.pixels,
+      target,
+      velocity,
+      tolerance: tolerance,
+    );
+  }
 }
 
 /// Dedicated Pixiv Album Reader opened when clicking a Pixiv artwork/album in File tab.
@@ -434,10 +502,13 @@ class _PixivAlbumViewerState extends State<PixivAlbumViewer> {
                     children: [
                       PageView.builder(
                         controller: _pageController,
+                        allowImplicitScrolling: true,
                         itemCount: activeAlbums.length,
                         physics: _isSelectionMode
                             ? const NeverScrollableScrollPhysics()
-                            : const _SnappyAlbumPagePhysics(),
+                            : _SnappyAlbumPagePhysics(
+                                currentIndexProvider: () => _currentAlbumIndex,
+                              ),
                         onPageChanged: (newIndex) {
                           _stopAutoScroll();
                           setState(() {
@@ -462,6 +533,8 @@ class _PixivAlbumViewerState extends State<PixivAlbumViewer> {
                             onLongPressEnd: _onDragEnd,
                             child: CustomScrollView(
                               controller: _controllerFor(albumIdx),
+                              scrollCacheExtent:
+                                  const ScrollCacheExtent.pixels(600),
                               slivers: [
                                 // Privacy Status + 3-Mode Reader Switcher Banner
                                 if (!_isSelectionMode)

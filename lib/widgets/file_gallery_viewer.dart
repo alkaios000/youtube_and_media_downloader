@@ -86,9 +86,12 @@ class _FileGalleryViewerState extends State<FileGalleryViewer> {
           // Full-viewport swipeable & unclipped zoomable pager
           PageView.builder(
             controller: _pageController,
+            allowImplicitScrolling: true,
             physics: _isZoomed
                 ? const NeverScrollableScrollPhysics()
-                : const _SnappyPhotoPagePhysics(),
+                : _SnappyPhotoPagePhysics(
+                    currentIndexProvider: () => _currentIndex,
+                  ),
             itemCount: _images.length,
             onPageChanged: (idx) {
               setState(() {
@@ -588,34 +591,100 @@ class _ViewerActionBtn extends StatelessWidget {
 }
 
 class _SnappyPhotoPagePhysics extends PageScrollPhysics {
-  const _SnappyPhotoPagePhysics({super.parent});
+  final int Function()? currentIndexProvider;
+
+  const _SnappyPhotoPagePhysics({
+    this.currentIndexProvider,
+    super.parent,
+  });
 
   @override
   _SnappyPhotoPagePhysics applyTo(ScrollPhysics? ancestor) {
-    return _SnappyPhotoPagePhysics(parent: buildParent(ancestor));
+    return _SnappyPhotoPagePhysics(
+      currentIndexProvider: currentIndexProvider,
+      parent: buildParent(ancestor),
+    );
   }
 
   @override
   SpringDescription get spring => SpringDescription.withDampingRatio(
-        mass: 0.6,
-        stiffness: 720.0,
-        ratio: 1.05,
+        mass: 0.55,
+        stiffness: 620.0,
+        ratio: 1.0,
       );
 
   @override
   Tolerance toleranceFor(ScrollMetrics metrics) {
     return const Tolerance(
-      distance: 1.5,
+      distance: 1.0,
       time: 0.01,
-      velocity: 30.0,
+      velocity: 25.0,
     );
   }
 
   @override
-  double get minFlingDistance => 12.0;
+  double get minFlingDistance => 8.0;
 
   @override
-  double get minFlingVelocity => 180.0;
+  double get minFlingVelocity => 140.0;
+
+  double _resolveTargetPixels(ScrollMetrics position, double velocity) {
+    final viewport = position.viewportDimension;
+    if (viewport <= 0) return position.pixels;
+    final page = position.pixels / viewport;
+    final maxPage = (position.maxScrollExtent / viewport).roundToDouble();
+    final basePage = (currentIndexProvider?.call() ?? page.round()).toDouble();
+    final delta = page - basePage;
+
+    const double switchThreshold = 0.14;
+    const double flickVelocity = 140.0;
+
+    double targetPage;
+    if (delta.abs() >= 0.85) {
+      if (velocity > flickVelocity) {
+        targetPage = page.ceilToDouble();
+      } else if (velocity < -flickVelocity) {
+        targetPage = page.floorToDouble();
+      } else {
+        targetPage = page.roundToDouble();
+      }
+    } else if (velocity > flickVelocity) {
+      targetPage = (delta < -0.04) ? basePage : (basePage + 1.0);
+    } else if (velocity < -flickVelocity) {
+      targetPage = (delta > 0.04) ? basePage : (basePage - 1.0);
+    } else if (delta >= switchThreshold) {
+      targetPage = basePage + 1.0;
+    } else if (delta <= -switchThreshold) {
+      targetPage = basePage - 1.0;
+    } else {
+      targetPage = basePage;
+    }
+
+    return targetPage.clamp(0.0, maxPage) * viewport;
+  }
+
+  @override
+  Simulation? createBallisticSimulation(
+    ScrollMetrics position,
+    double velocity,
+  ) {
+    if ((velocity <= 0.0 && position.pixels <= position.minScrollExtent) ||
+        (velocity >= 0.0 && position.pixels >= position.maxScrollExtent)) {
+      return super.createBallisticSimulation(position, velocity);
+    }
+    final tolerance = toleranceFor(position);
+    final target = _resolveTargetPixels(position, velocity);
+    if ((target - position.pixels).abs() < tolerance.distance) {
+      return null;
+    }
+    return ScrollSpringSimulation(
+      spring,
+      position.pixels,
+      target,
+      velocity,
+      tolerance: tolerance,
+    );
+  }
 }
 
 class _DetailRow extends StatelessWidget {
