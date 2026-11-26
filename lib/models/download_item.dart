@@ -195,6 +195,7 @@ class DownloadItem {
     bool clearError = false,
     List<SubFileTask>? subFiles,
     Map<String, dynamic>? resumePayload,
+    bool clearResumePayload = false,
   }) {
     return DownloadItem(
       id: id,
@@ -219,11 +220,18 @@ class DownloadItem {
       errorMessage: clearError ? null : (errorMessage ?? this.errorMessage),
       createdAt: createdAt,
       subFiles: subFiles ?? this.subFiles,
-      resumePayload: resumePayload ?? this.resumePayload,
+      resumePayload: clearResumePayload
+          ? null
+          : (resumePayload ?? this.resumePayload),
     );
   }
 
   Map<String, dynamic> toJson() {
+    // Strip heavy cookies/headers/galleryUrls/ugoiraFrames once a task finishes
+    // so large histories stay tiny and never cause memory/storage bloat.
+    final keepResumePayload = resumePayload != null &&
+        status != DownloadStatus.completed &&
+        status != DownloadStatus.cancelled;
     return {
       'id': id,
       'sourceUrl': sourceUrl,
@@ -246,7 +254,7 @@ class DownloadItem {
       'errorMessage': errorMessage,
       'createdAt': createdAt.toIso8601String(),
       'subFiles': subFiles.map((e) => e.toJson()).toList(),
-      if (resumePayload != null) 'resumePayload': resumePayload,
+      if (keepResumePayload) 'resumePayload': resumePayload,
     };
   }
 

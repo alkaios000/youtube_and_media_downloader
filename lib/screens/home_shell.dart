@@ -168,8 +168,8 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
       bottomNavigationBar: ListenableBuilder(
         listenable: widget.manager,
         builder: (context, _) {
-          final activeCount = widget.manager.activeDownloads.length;
-          final pausedCount = widget.manager.pausedDownloads.length;
+          final activeCount = widget.manager.activeDownloadCount;
+          final pausedCount = widget.manager.pausedDownloadCount;
           final badgeCount = activeCount > 0 ? activeCount : pausedCount;
           final badgeBg = activeCount > 0 ? null : const Color(0xFFF59E0B);
           return NavigationBar(
@@ -177,8 +177,8 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
             onDestinationSelected: (index) {
               FocusManager.instance.primaryFocus?.unfocus();
               if (index == 2 && _tabIndex != 2) {
-                final hasLoading = widget.manager.activeDownloads.isNotEmpty ||
-                    widget.manager.pausedDownloads.isNotEmpty;
+                final hasLoading = widget.manager.activeDownloadCount > 0 ||
+                    widget.manager.pausedDownloadCount > 0;
                 _historySectionNotifier.value = hasLoading ? 0 : 1;
               }
               setState(() => _tabIndex = index);

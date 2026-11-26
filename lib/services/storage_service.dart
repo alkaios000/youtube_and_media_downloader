@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:isolate';
 
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
@@ -8,6 +9,20 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../models/app_settings.dart';
 import '../models/creator_profile.dart';
 import '../models/download_item.dart';
+
+List<Map<String, dynamic>> _decodeJsonMapList(String raw) {
+  final decoded = jsonDecode(raw);
+  if (decoded is! List) return const <Map<String, dynamic>>[];
+  final out = <Map<String, dynamic>>[];
+  for (final entry in decoded) {
+    if (entry is Map) {
+      out.add(Map<String, dynamic>.from(entry));
+    }
+  }
+  return out;
+}
+
+String _encodeJsonPayload(Object payload) => jsonEncode(payload);
 
 class BackupDataBundle {
   final AppSettings settings;
@@ -31,57 +46,184 @@ class StorageService {
   static const String _downloadedMarkersKey = 'all_download_markers_v1';
   static const String _creatorProfilesKey = 'all_download_creator_profiles_v1';
 
-  Future<List<DownloadItem>> loadHistory() async {
-    final prefs = await SharedPreferences.getInstance();
-    final raw = prefs.getString(_historyKey);
-    if (raw == null || raw.isEmpty) return [];
+  // Serialized coalescing writers prevent concurrent multi-MB JSON spikes in RAM.
+  bool _isWritingHistory = false;
+  List<DownloadItem>? _pendingHistoryWrite;
+  bool _isWritingMarkers = false;
+  Set<String>? _pendingMarkersWrite;
+
+  Future<File?> _supportFileOrNull(String fileName) async {
     try {
-      final list = jsonDecode(raw) as List;
-      return list.whereType<Map>().map((e) {
-        final item = DownloadItem.fromJson(Map<String, dynamic>.from(e));
-        // If app was terminated mid-download, auto-convert into resumable Paused state!
-        if (item.isActive) {
-          return item.copyWith(
-            status: DownloadStatus.paused,
-            statusText: item.subFiles.length > 1
-                ? 'Terjeda (${item.completedSubFilesCount}/${item.subFiles.length} selesai) — ketuk Lanjut'
-                : 'Terjeda otomatis — ketuk Lanjut',
-            subFiles: item.subFiles
-                .map((s) => s.isActive
-                    ? s.copyWith(status: DownloadStatus.paused, speedText: '')
-                    : s)
-                .toList(growable: false),
-          );
+      final dir = await getApplicationSupportDirectory();
+      return File(p.join(dir.path, fileName));
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<void> _writeAtomicFile(File target, String content) async {
+    final tmp = File('${target.path}.tmp');
+    await tmp.writeAsString(content, flush: true);
+    if (await target.exists()) {
+      await target.delete().catchError((_) => target);
+    }
+    await tmp.rename(target.path);
+  }
+
+  Future<List<DownloadItem>> _parseHistoryRaw(String raw) async {
+    final maps = raw.length > 65536
+        ? await Isolate.run(() => _decodeJsonMapList(raw))
+        : _decodeJsonMapList(raw);
+    return maps.map((m) {
+      final item = DownloadItem.fromJson(m);
+      // If app was terminated mid-download, auto-convert into resumable Paused state!
+      if (item.isActive) {
+        return item.copyWith(
+          status: DownloadStatus.paused,
+          statusText: item.subFiles.length > 1
+              ? 'Terjeda (${item.completedSubFilesCount}/${item.subFiles.length} selesai) — ketuk Lanjut'
+              : 'Terjeda otomatis — ketuk Lanjut',
+          subFiles: item.subFiles
+              .map((s) => s.isActive
+                  ? s.copyWith(status: DownloadStatus.paused, speedText: '')
+                  : s)
+              .toList(growable: false),
+        );
+      }
+      if (item.status == DownloadStatus.completed &&
+          item.resumePayload != null) {
+        return item.copyWith(clearResumePayload: true);
+      }
+      return item;
+    }).toList();
+  }
+
+  Future<List<DownloadItem>> loadHistory() async {
+    // 1) Primary crash-proof local file storage (no Android 1MB Binder limit!)
+    final file = await _supportFileOrNull('download_history_v2.json');
+    if (file != null && await file.exists()) {
+      try {
+        final raw = await file.readAsString();
+        if (raw.isNotEmpty) {
+          return await _parseHistoryRaw(raw);
         }
-        return item;
-      }).toList();
+      } catch (_) {}
+    }
+
+    // 2) One-time migration from legacy SharedPreferences storage
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString(_historyKey);
+      if (raw == null || raw.isEmpty) return [];
+      final parsed = await _parseHistoryRaw(raw);
+      if (file != null) {
+        try {
+          await saveHistory(parsed);
+          await prefs.remove(_historyKey);
+        } catch (_) {}
+      }
+      return parsed;
     } catch (_) {
       return [];
     }
   }
 
-  /// Saves ALL items including paused & active checkpoints so nothing is lost on pause/restart.
+  /// Saves ALL items including paused & active checkpoints using serialized,
+  /// off-thread JSON encoding into an atomic local file (never hits Android
+  /// SharedPreferences Binder limits even with thousands of history entries).
   Future<void> saveHistory(List<DownloadItem> items) async {
-    final prefs = await SharedPreferences.getInstance();
+    _pendingHistoryWrite = List<DownloadItem>.unmodifiable(items);
+    if (_isWritingHistory) return;
+
+    _isWritingHistory = true;
+    try {
+      while (_pendingHistoryWrite != null) {
+        final batch = _pendingHistoryWrite!;
+        _pendingHistoryWrite = null;
+        await _persistHistoryBatch(batch);
+      }
+    } finally {
+      _isWritingHistory = false;
+    }
+  }
+
+  Future<void> _persistHistoryBatch(List<DownloadItem> items) async {
     final toSave = items.map((e) => e.toJson()).toList(growable: false);
-    await prefs.setString(_historyKey, jsonEncode(toSave));
+    final encoded = items.length >= 60
+        ? await Isolate.run(() => _encodeJsonPayload(toSave))
+        : jsonEncode(toSave);
+
+    final file = await _supportFileOrNull('download_history_v2.json');
+    if (file != null) {
+      await _writeAtomicFile(file, encoded);
+      return;
+    }
+
+    // Fallback when running in headless unit tests without path_provider
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_historyKey, encoded);
   }
 
   /// Returns null when markers have never been saved yet (first run / upgrade).
   Future<Set<String>?> loadDownloadedMarkers() async {
-    final prefs = await SharedPreferences.getInstance();
-    if (!prefs.containsKey(_downloadedMarkersKey)) return null;
-    final list = prefs.getStringList(_downloadedMarkersKey);
-    if (list == null) return <String>{};
-    return list.where((e) => e.isNotEmpty).toSet();
+    final file = await _supportFileOrNull('downloaded_markers_v2.json');
+    if (file != null && await file.exists()) {
+      try {
+        final raw = await file.readAsString();
+        if (raw.isNotEmpty) {
+          final decoded = jsonDecode(raw);
+          if (decoded is List) {
+            return decoded
+                .map((e) => e.toString())
+                .where((e) => e.isNotEmpty)
+                .toSet();
+          }
+        }
+      } catch (_) {}
+    }
+
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      if (!prefs.containsKey(_downloadedMarkersKey)) return null;
+      final list = prefs.getStringList(_downloadedMarkersKey);
+      if (list == null) return <String>{};
+      final set = list.where((e) => e.isNotEmpty).toSet();
+      if (file != null) {
+        try {
+          await saveDownloadedMarkers(set);
+          await prefs.remove(_downloadedMarkersKey);
+        } catch (_) {}
+      }
+      return set;
+    } catch (_) {
+      return null;
+    }
   }
 
   Future<void> saveDownloadedMarkers(Set<String> markers) async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setStringList(
-      _downloadedMarkersKey,
-      markers.toList(growable: false),
-    );
+    _pendingMarkersWrite = Set<String>.unmodifiable(markers);
+    if (_isWritingMarkers) return;
+
+    _isWritingMarkers = true;
+    try {
+      while (_pendingMarkersWrite != null) {
+        final batch = _pendingMarkersWrite!;
+        _pendingMarkersWrite = null;
+        final list = batch.toList(growable: false);
+        final file = await _supportFileOrNull('downloaded_markers_v2.json');
+        if (file != null) {
+          final encoded = list.length >= 500
+              ? await Isolate.run(() => _encodeJsonPayload(list))
+              : jsonEncode(list);
+          await _writeAtomicFile(file, encoded);
+        } else {
+          final prefs = await SharedPreferences.getInstance();
+          await prefs.setStringList(_downloadedMarkersKey, list);
+        }
+      }
+    } finally {
+      _isWritingMarkers = false;
+    }
   }
 
   Future<List<CreatorProfileRecord>> loadCreatorProfiles() async {

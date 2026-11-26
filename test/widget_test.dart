@@ -15,11 +15,27 @@ import 'package:linkdrop_downloader/widgets/media_preview_card.dart';
 class _FakeFilesManager extends DownloadManager {
   final List<ManagedFile> _fakeFiles;
   final Map<String, CreatorProfileRecord> _fakeProfiles;
+  final List<DownloadItem> fakeItems;
 
-  _FakeFilesManager(this._fakeFiles, this._fakeProfiles);
+  _FakeFilesManager(
+    this._fakeFiles,
+    this._fakeProfiles, {
+    this.fakeItems = const [],
+  });
 
   @override
   List<ManagedFile> get managedFiles => _fakeFiles;
+
+  @override
+  List<DownloadItem> get items => fakeItems;
+
+  @override
+  int get activeDownloadCount =>
+      fakeItems.where((i) => i.isActive).length;
+
+  @override
+  int get pausedDownloadCount =>
+      fakeItems.where((i) => i.isPaused).length;
 
   @override
   CreatorProfileRecord? getCreatorProfile(
@@ -375,6 +391,126 @@ void main() {
     final albumChipRect = tester.getRect(find.text('Album (14)'));
     expect(albumChipRect.top, greaterThanOrEqualTo(0));
     expect(albumChipRect.bottom, lessThan(80));
+
+    manager.dispose();
+  });
+
+  testWidgets(
+      'DownloadsScreen load balancer windows 2,000 items cleanly and strips completed resumePayload',
+      (WidgetTester tester) async {
+    final heavyPayload = {
+      'headers': {'Cookie': 'PHPSESSID=secret_token_value'},
+      'galleryUrls': List.generate(30, (i) => 'https://i.pximg.net/p$i.jpg'),
+    };
+    final completedSample = DownloadItem(
+      id: 'done_check',
+      title: 'Completed Check',
+      author: 'Artist',
+      sourceUrl: 'https://www.pixiv.net/artworks/999',
+      platform: MediaPlatform.pixiv,
+      mediaKind: MediaKind.image,
+      formatLabel: 'HD',
+      extension: 'jpg',
+      status: DownloadStatus.completed,
+      createdAt: DateTime(2026, 11, 26),
+      resumePayload: heavyPayload,
+    );
+    final pausedSample = completedSample.copyWith(status: DownloadStatus.paused);
+    expect(completedSample.toJson().containsKey('resumePayload'), isFalse);
+    expect(pausedSample.toJson().containsKey('resumePayload'), isTrue);
+
+    final items = <DownloadItem>[
+      // 2 actively processing items
+      for (int i = 0; i < 2; i++)
+        DownloadItem(
+          id: 'proc_$i',
+          title: 'Active Work $i',
+          author: 'Artist',
+          sourceUrl: 'https://www.pixiv.net/artworks/10$i',
+          platform: MediaPlatform.pixiv,
+          mediaKind: MediaKind.image,
+          formatLabel: 'HD',
+          extension: 'jpg',
+          status: DownloadStatus.downloading,
+          progress: 50,
+          createdAt: DateTime(2026, 11, 26),
+        ),
+      // 1,195 queued items
+      for (int i = 0; i < 1195; i++)
+        DownloadItem(
+          id: 'q_$i',
+          title: 'Queued Work $i',
+          author: 'Artist',
+          sourceUrl: 'https://www.pixiv.net/artworks/2000$i',
+          platform: MediaPlatform.pixiv,
+          mediaKind: MediaKind.image,
+          formatLabel: 'HD',
+          extension: 'jpg',
+          status: DownloadStatus.queued,
+          createdAt: DateTime(2026, 11, 26),
+        ),
+      // 3 failed items (must remain at bottom of Berjalan!)
+      for (int i = 0; i < 3; i++)
+        DownloadItem(
+          id: 'fail_$i',
+          title: 'Failed Work $i',
+          author: 'Artist',
+          sourceUrl: 'https://www.pixiv.net/artworks/30$i',
+          platform: MediaPlatform.pixiv,
+          mediaKind: MediaKind.image,
+          formatLabel: 'HD',
+          extension: 'jpg',
+          status: DownloadStatus.failed,
+          errorMessage: 'Timeout',
+          createdAt: DateTime(2026, 11, 26),
+        ),
+      // 800 completed items
+      for (int i = 0; i < 800; i++)
+        DownloadItem(
+          id: 'done_$i',
+          title: 'Finished Work $i',
+          author: 'Artist',
+          sourceUrl: 'https://www.pixiv.net/artworks/4000$i',
+          platform: MediaPlatform.pixiv,
+          mediaKind: MediaKind.image,
+          formatLabel: 'HD',
+          extension: 'jpg',
+          status: DownloadStatus.completed,
+          progress: 100,
+          createdAt: DateTime(2026, 11, 26),
+        ),
+    ];
+
+    final manager = _FakeFilesManager(const [], const {}, fakeItems: items);
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: AppTheme.darkTheme(),
+        home: Scaffold(
+          body: SafeArea(
+            child: DownloadsScreen(manager: manager),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    // Berjalan tab shows 1200 total, but load balancer renders only 2 + 40 + 3 = 45!
+    expect(find.text('Berjalan (1200)'), findsOneWidget);
+    expect(find.text('Selesai (800)'), findsOneWidget);
+    expect(
+      find.text('Load Balancer Aktif • menampilkan 45 dari 1200 item'),
+      findsOneWidget,
+    );
+    expect(find.text('Sedang Diproses (2)'), findsOneWidget);
+
+    // Switch to Selesai tab -> load balancer caps initial render to 60 of 800!
+    await tester.tap(find.text('Selesai (800)'));
+    await tester.pumpAndSettle();
+    expect(
+      find.text('Load Balancer Aktif • menampilkan 60 dari 800 item'),
+      findsOneWidget,
+    );
 
     manager.dispose();
   });

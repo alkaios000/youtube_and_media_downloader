@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 
 import '../models/download_item.dart';
@@ -367,38 +369,135 @@ class DownloadTile extends StatelessWidget {
   }
 }
 
-class _MiniThumb extends StatelessWidget {
+class _MiniThumb extends StatefulWidget {
   final DownloadItem item;
 
   const _MiniThumb({required this.item});
 
   @override
+  State<_MiniThumb> createState() => _MiniThumbState();
+}
+
+class _MiniThumbState extends State<_MiniThumb> {
+  ValueNotifier<bool>? _scrollingNotifier;
+  bool _deferred = false;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _checkDeferred();
+  }
+
+  @override
+  void didUpdateWidget(covariant _MiniThumb oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.item.id != widget.item.id ||
+        oldWidget.item.thumbnailUrl != widget.item.thumbnailUrl ||
+        oldWidget.item.savedPath != widget.item.savedPath) {
+      _checkDeferred();
+    }
+  }
+
+  void _checkDeferred() {
+    final shouldDefer = Scrollable.recommendDeferredLoadingForContext(context);
+    if (shouldDefer) {
+      _deferred = true;
+      _attachScrollIdleListener();
+    } else {
+      _deferred = false;
+      _detachScrollIdleListener();
+    }
+  }
+
+  void _attachScrollIdleListener() {
+    final notifier = Scrollable.maybeOf(context)?.position.isScrollingNotifier;
+    if (notifier == null || identical(notifier, _scrollingNotifier)) return;
+    _detachScrollIdleListener();
+    _scrollingNotifier = notifier;
+    _scrollingNotifier!.addListener(_onScrollingChanged);
+  }
+
+  void _detachScrollIdleListener() {
+    _scrollingNotifier?.removeListener(_onScrollingChanged);
+    _scrollingNotifier = null;
+  }
+
+  void _onScrollingChanged() {
+    if (!mounted) return;
+    final isScrolling = _scrollingNotifier?.value ?? false;
+    if (!isScrolling && _deferred) {
+      _detachScrollIdleListener();
+      setState(() => _deferred = false);
+    }
+  }
+
+  @override
+  void dispose() {
+    _detachScrollIdleListener();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
+    final item = widget.item;
     final fallbackIcon = item.mediaKind == MediaKind.audio
         ? Icons.music_note_rounded
         : (item.mediaKind == MediaKind.image
             ? Icons.image_rounded
             : Icons.videocam_rounded);
 
-    final headers = item.platform == MediaPlatform.pixiv
-        ? const {'Referer': 'https://www.pixiv.net/'}
-        : null;
+    Widget content;
+    if (_deferred) {
+      content = _ThumbPlaceholder(icon: fallbackIcon);
+    } else {
+      final hasLocalImage = item.status == DownloadStatus.completed &&
+          item.mediaKind == MediaKind.image &&
+          item.savedPath != null &&
+          item.savedPath!.isNotEmpty;
+      final hasNetworkThumb =
+          item.thumbnailUrl != null && item.thumbnailUrl!.isNotEmpty;
+      final headers = item.platform == MediaPlatform.pixiv
+          ? const {'Referer': 'https://www.pixiv.net/'}
+          : null;
+
+      if (hasLocalImage) {
+        content = Image.file(
+          File(item.savedPath!),
+          cacheWidth: 152,
+          filterQuality: FilterQuality.low,
+          fit: BoxFit.cover,
+          errorBuilder: (_, _, _) => hasNetworkThumb
+              ? Image.network(
+                  item.thumbnailUrl!,
+                  headers: headers,
+                  cacheWidth: 152,
+                  filterQuality: FilterQuality.low,
+                  fit: BoxFit.cover,
+                  errorBuilder: (_, _, _) =>
+                      _ThumbPlaceholder(icon: fallbackIcon),
+                )
+              : _ThumbPlaceholder(icon: fallbackIcon),
+        );
+      } else if (hasNetworkThumb) {
+        content = Image.network(
+          item.thumbnailUrl!,
+          headers: headers,
+          cacheWidth: 152,
+          filterQuality: FilterQuality.low,
+          fit: BoxFit.cover,
+          errorBuilder: (_, _, _) => _ThumbPlaceholder(icon: fallbackIcon),
+        );
+      } else {
+        content = _ThumbPlaceholder(icon: fallbackIcon);
+      }
+    }
 
     return ClipRRect(
       borderRadius: BorderRadius.circular(12),
       child: SizedBox(
         width: 76,
         height: 76,
-        child: item.thumbnailUrl != null && item.thumbnailUrl!.isNotEmpty
-            ? Image.network(
-                item.thumbnailUrl!,
-                headers: headers,
-                cacheWidth: 160,
-                filterQuality: FilterQuality.low,
-                fit: BoxFit.cover,
-                errorBuilder: (_, _, _) => _ThumbPlaceholder(icon: fallbackIcon),
-              )
-            : _ThumbPlaceholder(icon: fallbackIcon),
+        child: content,
       ),
     );
   }

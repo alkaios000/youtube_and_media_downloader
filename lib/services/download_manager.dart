@@ -80,6 +80,10 @@ class DownloadManager extends ChangeNotifier {
   PermissionStatusInfo _permissionStatus = PermissionStatusInfo.unknown();
   AppSettings _settings = const AppSettings();
   List<DownloadItem> _items = [];
+  final Map<String, int> _itemIndexById = <String, int>{};
+  int _itemsRevision = 0;
+  int _activeDownloadCount = 0;
+  int _pausedDownloadCount = 0;
   List<ManagedFile> _managedFiles = const [];
   Set<String> _downloadedMarkers = <String>{};
   final Map<String, CreatorProfileRecord> _creatorProfiles = {};
@@ -109,7 +113,9 @@ class DownloadManager extends ChangeNotifier {
   Timer? _throttleNotifyTimer;
   bool _hasPendingNotify = false;
   Timer? _postSyncTimer;
+  Timer? _markersFlushTimer;
   DateTime _lastHistoryFlush = DateTime.fromMillisecondsSinceEpoch(0);
+  DateTime _lastManagedFilesRefresh = DateTime.fromMillisecondsSinceEpoch(0);
   int _taskSeq = 0;
 
   void Function(String sharedText)? _onIncomingSharedLink;
@@ -179,6 +185,9 @@ class DownloadManager extends ChangeNotifier {
   bool get permissionChecked => _permissionChecked;
   AppSettings get settings => _settings;
   List<DownloadItem> get items => List.unmodifiable(_items);
+  int get itemsRevision => _itemsRevision;
+  int get activeDownloadCount => _activeDownloadCount;
+  int get pausedDownloadCount => _pausedDownloadCount;
   List<ManagedFile> get managedFiles => _managedFiles;
   Set<String> get downloadedMarkers => Set.unmodifiable(_downloadedMarkers);
   List<CreatorProfileRecord> get creatorProfiles =>
@@ -204,10 +213,33 @@ class DownloadManager extends ChangeNotifier {
   int get cacheBytes => _cacheBytes;
 
   DownloadItem? findItemById(String id) {
+    final idx = _itemIndexById[id];
+    if (idx != null && idx >= 0 && idx < _items.length && _items[idx].id == id) {
+      return _items[idx];
+    }
     for (final item in _items) {
       if (item.id == id) return item;
     }
     return null;
+  }
+
+  void _setItems(List<DownloadItem> next) {
+    _items = next;
+    _itemIndexById.clear();
+    var active = 0;
+    var paused = 0;
+    for (int i = 0; i < _items.length; i++) {
+      final it = _items[i];
+      _itemIndexById[it.id] = i;
+      if (it.isActive) {
+        active++;
+      } else if (it.isPaused) {
+        paused++;
+      }
+    }
+    _activeDownloadCount = active;
+    _pausedDownloadCount = paused;
+    _itemsRevision++;
   }
 
   // ===========================================================================
@@ -300,10 +332,27 @@ class DownloadManager extends ChangeNotifier {
     final next = {..._downloadedMarkers, ...cleaned};
     if (next.length == _downloadedMarkers.length) return;
     _downloadedMarkers = next;
+    // Coalesce UI & disk writes during active bulk downloads so finishing
+    // hundreds of items rapidly never freezes the UI or hammers storage.
+    if (_activeDownloadCount > 0 && _items.length >= 40) {
+      _notifyThrottled();
+      _scheduleMarkersFlush();
+      return;
+    }
     _notifyImmediate();
     try {
       await _storage.saveDownloadedMarkers(_downloadedMarkers);
     } catch (_) {}
+  }
+
+  void _scheduleMarkersFlush() {
+    if (_isDisposed) return;
+    if (_markersFlushTimer?.isActive ?? false) return;
+    _markersFlushTimer = Timer(const Duration(milliseconds: 1200), () {
+      _markersFlushTimer = null;
+      if (_isDisposed) return;
+      unawaited(_storage.saveDownloadedMarkers(_downloadedMarkers));
+    });
   }
 
   Future<void> unmarkDownloaded(String markerKey) async {
@@ -388,7 +437,7 @@ class DownloadManager extends ChangeNotifier {
       final incoming = bundle.history
           .where((e) => !existingIds.contains(e.id))
           .toList(growable: false);
-      _items = [..._items, ...incoming];
+      _setItems([..._items, ...incoming]);
     } else {
       _downloadedMarkers = Set<String>.from(bundle.downloadedMarkers);
       _creatorProfiles
@@ -397,7 +446,7 @@ class DownloadManager extends ChangeNotifier {
           bundle.creatorProfiles.map((r) => MapEntry(r.lookupKey, r)),
         );
       final activeNow = _items.where((i) => i.isActive).toList(growable: false);
-      _items = [...activeNow, ...bundle.history];
+      _setItems([...activeNow, ...bundle.history]);
     }
 
     _notifyImmediate();
@@ -438,7 +487,7 @@ class DownloadManager extends ChangeNotifier {
 
     _settings = localData[0] as AppSettings;
     themeNotifier.value = _settings.themeMode;
-    _items = localData[1] as List<DownloadItem>;
+    _setItems(localData[1] as List<DownloadItem>);
 
     final savedMarkers = localData[2] as Set<String>?;
     if (savedMarkers != null) {
@@ -735,7 +784,7 @@ class DownloadManager extends ChangeNotifier {
       resumePayload: resumePayload,
     );
 
-    _items = [initialItem, ..._items];
+    _setItems([initialItem, ..._items]);
     _notifyImmediate();
 
     if (option.engine == DownloadEngine.directHttp) {
@@ -949,7 +998,7 @@ class DownloadManager extends ChangeNotifier {
       }
     }
 
-    _items = [...newItems.reversed, ..._items];
+    _setItems([...newItems.reversed, ..._items]);
     _notifyImmediate();
 
     if (directQueue.isNotEmpty) {
@@ -1594,6 +1643,7 @@ class DownloadManager extends ChangeNotifier {
             fileSize: saved.fileSize,
             mimeType: saved.mimeType,
             subFiles: [completedSub],
+            clearResumePayload: true,
           ),
         );
 
@@ -2156,7 +2206,9 @@ class DownloadManager extends ChangeNotifier {
             fileSize: totalSavedBytes,
             mimeType: representative.mimeType,
             subFiles: List<SubFileTask>.unmodifiable(subTasks),
+            clearResumePayload: true,
           ),
+          throttled: _activeDownloadCount > 1 && _items.length >= 60,
         );
 
         await markManyDownloaded([
@@ -2247,8 +2299,8 @@ class DownloadManager extends ChangeNotifier {
   }
 
   void _handleNativeProgress(NativeProgressEvent event) {
-    final idx = _items.indexWhere((i) => i.id == event.taskId);
-    if (idx == -1) return;
+    final idx = _itemIndexById[event.taskId];
+    if (idx == null || idx < 0 || idx >= _items.length) return;
     final current = _items[idx];
     if (!current.isActive) return;
 
@@ -2449,16 +2501,18 @@ class DownloadManager extends ChangeNotifier {
       }
       unawaited(refreshManagedFiles());
     }
-    _items = _items.where((i) => i.id != item.id).toList();
+    _setItems(_items.where((i) => i.id != item.id).toList());
     _notifyImmediate();
     await _storage.saveHistory(_items);
   }
 
   Future<void> clearAllHistory() async {
-    _items = _items
-        .where((i) =>
-            i.isActive || i.isPaused || i.status == DownloadStatus.failed)
-        .toList();
+    _setItems(
+      _items
+          .where((i) =>
+              i.isActive || i.isPaused || i.status == DownloadStatus.failed)
+          .toList(),
+    );
     _notifyImmediate();
     await _storage.saveHistory(_items);
   }
@@ -2509,9 +2563,24 @@ class DownloadManager extends ChangeNotifier {
     bool throttled = false,
   }) {
     if (_isDisposed) return;
-    final index = _items.indexWhere((i) => i.id == id);
-    if (index == -1) return;
-    _items[index] = updater(_items[index]);
+    var index = _itemIndexById[id];
+    if (index == null || index < 0 || index >= _items.length || _items[index].id != id) {
+      index = _items.indexWhere((i) => i.id == id);
+      if (index == -1) return;
+      _itemIndexById[id] = index;
+    }
+    final prev = _items[index];
+    final next = updater(prev);
+    _items[index] = next;
+    if (prev.isActive != next.isActive) {
+      _activeDownloadCount += next.isActive ? 1 : -1;
+      if (_activeDownloadCount < 0) _activeDownloadCount = 0;
+    }
+    if (prev.isPaused != next.isPaused) {
+      _pausedDownloadCount += next.isPaused ? 1 : -1;
+      if (_pausedDownloadCount < 0) _pausedDownloadCount = 0;
+    }
+    _itemsRevision++;
     if (throttled) {
       _notifyThrottled();
     } else {
@@ -2527,6 +2596,16 @@ class DownloadManager extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Adaptive UI notification load balancer: scales refresh interval smoothly
+  /// as history grows so thousands of items never cause UI frame drops or ANR.
+  Duration get _adaptiveThrottleInterval {
+    final n = _items.length;
+    if (n >= 1000) return const Duration(milliseconds: 900);
+    if (n >= 300) return const Duration(milliseconds: 600);
+    if (n >= 80) return const Duration(milliseconds: 380);
+    return const Duration(milliseconds: 250);
+  }
+
   void _notifyThrottled() {
     if (_isDisposed) return;
     if (_throttleNotifyTimer != null && _throttleNotifyTimer!.isActive) {
@@ -2534,7 +2613,7 @@ class DownloadManager extends ChangeNotifier {
       return;
     }
     notifyListeners();
-    _throttleNotifyTimer = Timer(const Duration(milliseconds: 250), () {
+    _throttleNotifyTimer = Timer(_adaptiveThrottleInterval, () {
       _throttleNotifyTimer = null;
       if (_hasPendingNotify && !_isDisposed) {
         _hasPendingNotify = false;
@@ -2547,32 +2626,53 @@ class DownloadManager extends ChangeNotifier {
     if (_isDisposed) return;
     _postSyncTimer?.cancel();
 
-    final hasActive = _items.any((i) => i.isActive);
+    final hasActive = _activeDownloadCount > 0;
     if (!hasActive) {
-      unawaited(_runPostDownloadSync(includeMediaRefresh: includeMediaRefresh));
+      _markersFlushTimer?.cancel();
+      _markersFlushTimer = null;
+      unawaited(_storage.saveDownloadedMarkers(_downloadedMarkers));
+      unawaited(_runPostDownloadSync(
+        includeMediaRefresh: includeMediaRefresh,
+        forceMediaRefresh: true,
+      ));
       return;
     }
 
-    if (DateTime.now().difference(_lastHistoryFlush) >
-        const Duration(seconds: 8)) {
+    final flushInterval = _items.length >= 300
+        ? const Duration(seconds: 14)
+        : const Duration(seconds: 8);
+    if (DateTime.now().difference(_lastHistoryFlush) > flushInterval) {
       _lastHistoryFlush = DateTime.now();
       unawaited(_storage.saveHistory(_items));
     }
 
-    _postSyncTimer = Timer(const Duration(milliseconds: 1800), () {
+    _postSyncTimer = Timer(const Duration(milliseconds: 2200), () {
       if (_isDisposed) return;
-      unawaited(_runPostDownloadSync(includeMediaRefresh: includeMediaRefresh));
+      unawaited(_runPostDownloadSync(
+        includeMediaRefresh: includeMediaRefresh,
+        forceMediaRefresh: false,
+      ));
     });
   }
 
-  Future<void> _runPostDownloadSync({bool includeMediaRefresh = true}) async {
+  Future<void> _runPostDownloadSync({
+    bool includeMediaRefresh = true,
+    bool forceMediaRefresh = false,
+  }) async {
     _lastHistoryFlush = DateTime.now();
     try {
       await _storage.saveHistory(_items);
     } catch (_) {}
     if (includeMediaRefresh && !_isDisposed) {
-      unawaited(refreshStorageInfo());
-      unawaited(refreshManagedFiles());
+      final now = DateTime.now();
+      // Avoid rescanning thousands of files on MediaStore every 2s during bulk loads!
+      if (forceMediaRefresh ||
+          now.difference(_lastManagedFilesRefresh) >
+              const Duration(seconds: 15)) {
+        _lastManagedFilesRefresh = now;
+        unawaited(refreshStorageInfo());
+        unawaited(refreshManagedFiles());
+      }
     }
   }
 
@@ -2590,6 +2690,7 @@ class DownloadManager extends ChangeNotifier {
     _isDisposed = true;
     _throttleNotifyTimer?.cancel();
     _postSyncTimer?.cancel();
+    _markersFlushTimer?.cancel();
     _progressSub?.cancel();
     _shareSub?.cancel();
     for (final token in _directCancelTokens.values) {
