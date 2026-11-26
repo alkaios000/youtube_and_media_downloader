@@ -1,38 +1,86 @@
 package com.linkdrop.linkdrop_downloader
 
 import android.Manifest
+import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.provider.Settings
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
+import io.flutter.embedding.engine.FlutterEngineCache
 import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodChannel
 
 class MainActivity : FlutterActivity() {
     companion object {
+        private const val CACHED_ENGINE_ID = "all_download_main_engine"
         private const val ENGINE_CHANNEL = "com.linkdrop.downloader/engine"
         private const val PROGRESS_CHANNEL = "com.linkdrop.downloader/progress"
         private const val SHARE_CHANNEL = "com.linkdrop.downloader/share"
         private const val PERMISSION_REQUEST_CODE = 4201
         private const val EXPORT_BACKUP_REQUEST_CODE = 4202
         private const val IMPORT_BACKUP_REQUEST_CODE = 4203
+
+        // Process-wide singletons so active downloads, FFmpeg/yt-dlp coroutines,
+        // and wallpaper jobs survive Android 12/13+ Monet Activity relaunches!
+        @Volatile
+        private var sharedBridge: MediaEngineBridge? = null
+
+        @Volatile
+        private var sharedSniffer: WebViewMediaSniffer? = null
+
+        @Volatile
+        private var pluginsRegisteredOnEngine: FlutterEngine? = null
+
+        @Volatile
+        private var pendingInitialSharedText: String? = null
+
+        @Volatile
+        private var activeShareEventSink: EventChannel.EventSink? = null
+
+        private fun getBridge(appContext: Context): MediaEngineBridge {
+            return sharedBridge ?: synchronized(this) {
+                sharedBridge ?: MediaEngineBridge(appContext.applicationContext).also {
+                    sharedBridge = it
+                }
+            }
+        }
+
+        private fun getSniffer(appContext: Context): WebViewMediaSniffer {
+            return sharedSniffer ?: synchronized(this) {
+                sharedSniffer ?: WebViewMediaSniffer(appContext.applicationContext).also {
+                    sharedSniffer = it
+                }
+            }
+        }
     }
 
     private lateinit var bridge: MediaEngineBridge
     private lateinit var sniffer: WebViewMediaSniffer
-    private var initialSharedText: String? = null
-    private var shareEventSink: EventChannel.EventSink? = null
     private var pendingPermissionResult: MethodChannel.Result? = null
     private var pendingExportResult: MethodChannel.Result? = null
     private var pendingExportJson: String? = null
     private var pendingImportResult: MethodChannel.Result? = null
     private var hasRequestedPermissionsBefore = false
+
+    /**
+     * Reuses the already-running [FlutterEngine] across Android 12/13+ Material You
+     * (Monet) wallpaper relaunches & warm restarts. On first launch returns `null` so
+     * Flutter creates the engine with full debug/release shell args, then caches it in
+     * [configureFlutterEngine]. Eliminates the 5+ second ANR freeze after setting wallpaper.
+     */
+    override fun provideFlutterEngine(context: Context): FlutterEngine? {
+        return FlutterEngineCache.getInstance().get(CACHED_ENGINE_ID)
+    }
+
+    override fun shouldDestroyEngineWithHost(): Boolean = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -57,11 +105,11 @@ class MainActivity : FlutterActivity() {
                 else -> extraSubject
             }
             if (shared.isNotEmpty()) {
-                val sink = shareEventSink
+                val sink = activeShareEventSink
                 if (sink != null) {
                     runOnUiThread { sink.success(shared) }
                 } else {
-                    initialSharedText = shared
+                    pendingInitialSharedText = shared
                 }
             }
         }
@@ -158,42 +206,50 @@ class MainActivity : FlutterActivity() {
     }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
-        super.configureFlutterEngine(flutterEngine)
-        bridge = MediaEngineBridge(applicationContext)
-        sniffer = WebViewMediaSniffer(applicationContext)
+        FlutterEngineCache.getInstance().put(CACHED_ENGINE_ID, flutterEngine)
+        bridge = getBridge(applicationContext)
+        sniffer = getSniffer(applicationContext)
 
-        EventChannel(flutterEngine.dartExecutor.binaryMessenger, PROGRESS_CHANNEL)
-            .setStreamHandler(
-                object : EventChannel.StreamHandler {
-                    override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
-                        bridge.setProgressEmitter { payload ->
-                            events?.success(payload)
+        if (pluginsRegisteredOnEngine !== flutterEngine) {
+            super.configureFlutterEngine(flutterEngine)
+            pluginsRegisteredOnEngine = flutterEngine
+
+            // Bind EventChannels once per cached FlutterEngine so active streams
+            // survive Android 12/13+ Monet wallpaper Activity relaunches uninterrupted.
+            val mainLooperHandler = Handler(Looper.getMainLooper())
+            EventChannel(flutterEngine.dartExecutor.binaryMessenger, PROGRESS_CHANNEL)
+                .setStreamHandler(
+                    object : EventChannel.StreamHandler {
+                        override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
+                            bridge.setProgressEmitter { payload ->
+                                events?.success(payload)
+                            }
                         }
-                    }
 
-                    override fun onCancel(arguments: Any?) {
-                        bridge.setProgressEmitter(null)
-                    }
-                },
-            )
-
-        EventChannel(flutterEngine.dartExecutor.binaryMessenger, SHARE_CHANNEL)
-            .setStreamHandler(
-                object : EventChannel.StreamHandler {
-                    override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
-                        shareEventSink = events
-                        val pending = initialSharedText
-                        if (!pending.isNullOrEmpty() && events != null) {
-                            initialSharedText = null
-                            runOnUiThread { events.success(pending) }
+                        override fun onCancel(arguments: Any?) {
+                            bridge.setProgressEmitter(null)
                         }
-                    }
+                    },
+                )
 
-                    override fun onCancel(arguments: Any?) {
-                        shareEventSink = null
-                    }
-                },
-            )
+            EventChannel(flutterEngine.dartExecutor.binaryMessenger, SHARE_CHANNEL)
+                .setStreamHandler(
+                    object : EventChannel.StreamHandler {
+                        override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
+                            activeShareEventSink = events
+                            val pending = pendingInitialSharedText
+                            if (!pending.isNullOrEmpty() && events != null) {
+                                pendingInitialSharedText = null
+                                mainLooperHandler.post { events.success(pending) }
+                            }
+                        }
+
+                        override fun onCancel(arguments: Any?) {
+                            activeShareEventSink = null
+                        }
+                    },
+                )
+        }
 
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, ENGINE_CHANNEL)
             .setMethodCallHandler { call, result ->
@@ -558,8 +614,8 @@ class MainActivity : FlutterActivity() {
                     }
 
                     "getInitialSharedText" -> {
-                        val pending = initialSharedText
-                        initialSharedText = null
+                        val pending = pendingInitialSharedText
+                        pendingInitialSharedText = null
                         result.success(pending)
                     }
 
