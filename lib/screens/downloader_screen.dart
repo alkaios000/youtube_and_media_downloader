@@ -102,9 +102,11 @@ class _DownloaderScreenState extends State<DownloaderScreen> {
     return LayoutBuilder(
       builder: (context, constraints) {
         final isCenteredIdle = preview == null;
+        final bottomInset =
+            isCenteredIdle ? 0.0 : MediaQuery.viewInsetsOf(context).bottom;
 
         return SingleChildScrollView(
-          padding: const EdgeInsets.fromLTRB(18, 12, 18, 24),
+          padding: EdgeInsets.fromLTRB(18, 12, 18, 24 + bottomInset),
           child: ConstrainedBox(
             constraints: BoxConstraints(
               minHeight: (constraints.maxHeight - 36).clamp(0, double.infinity),
@@ -171,6 +173,7 @@ class _DownloaderScreenState extends State<DownloaderScreen> {
                         // Input with Paste button ONLY inside the field (and Clear when filled)
                         TextField(
                           controller: widget.urlController,
+                          scrollPadding: EdgeInsets.zero,
                           minLines: 1,
                           maxLines: 3,
                           keyboardType: TextInputType.url,

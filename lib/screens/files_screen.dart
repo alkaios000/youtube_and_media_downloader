@@ -1534,18 +1534,9 @@ class _FilesScreenState extends State<FilesScreen> {
     if (targets.isEmpty || _isBusy) return;
     setState(() => _isBusy = true);
     try {
-      final count = await widget.manager.unlockManagedFiles(targets);
+      await widget.manager.unlockManagedFiles(targets);
       if (!mounted) return;
       if (_isSelectionMode) _exitSelectionMode();
-      ScaffoldMessenger.of(context)
-        ..hideCurrentSnackBar()
-        ..showSnackBar(
-          SnackBar(
-            content: Text(
-              '$count media berhasil di-Unlock ke Galeri & WhatsApp.',
-            ),
-          ),
-        );
     } finally {
       if (mounted) setState(() => _isBusy = false);
     }
@@ -1555,18 +1546,9 @@ class _FilesScreenState extends State<FilesScreen> {
     if (targets.isEmpty || _isBusy) return;
     setState(() => _isBusy = true);
     try {
-      final count = await widget.manager.lockManagedFiles(targets);
+      await widget.manager.lockManagedFiles(targets);
       if (!mounted) return;
       if (_isSelectionMode) _exitSelectionMode();
-      ScaffoldMessenger.of(context)
-        ..hideCurrentSnackBar()
-        ..showSnackBar(
-          SnackBar(
-            content: Text(
-              '$count media dikunci kembali ke Privat (disembunyikan dari Galeri & WA).',
-            ),
-          ),
-        );
     } finally {
       if (mounted) setState(() => _isBusy = false);
     }

@@ -862,18 +862,9 @@ class _PixivAlbumViewerState extends State<PixivAlbumViewer> {
     if (targets.isEmpty || _isBusy) return;
     setState(() => _isBusy = true);
     try {
-      final count = await widget.manager.unlockManagedFiles(targets);
+      await widget.manager.unlockManagedFiles(targets);
       if (!mounted) return;
       if (_isSelectionMode) _exitSelection();
-      ScaffoldMessenger.of(context)
-        ..hideCurrentSnackBar()
-        ..showSnackBar(
-          SnackBar(
-            content: Text(
-              '$count foto dibuka ke Galeri & WhatsApp (Pictures/all_download).',
-            ),
-          ),
-        );
     } finally {
       if (mounted) setState(() => _isBusy = false);
     }
@@ -883,18 +874,9 @@ class _PixivAlbumViewerState extends State<PixivAlbumViewer> {
     if (targets.isEmpty || _isBusy) return;
     setState(() => _isBusy = true);
     try {
-      final count = await widget.manager.lockManagedFiles(targets);
+      await widget.manager.lockManagedFiles(targets);
       if (!mounted) return;
       if (_isSelectionMode) _exitSelection();
-      ScaffoldMessenger.of(context)
-        ..hideCurrentSnackBar()
-        ..showSnackBar(
-          SnackBar(
-            content: Text(
-              '$count foto dikunci kembali ke Privat (disembunyikan dari Galeri & WA).',
-            ),
-          ),
-        );
     } finally {
       if (mounted) setState(() => _isBusy = false);
     }

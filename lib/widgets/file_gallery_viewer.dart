@@ -230,15 +230,6 @@ class _FileGalleryViewerState extends State<FileGalleryViewer> {
         _images[_currentIndex] = updated;
       }
     });
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(
-          wasPrivate
-              ? 'Foto dibuka ke Galeri & WhatsApp.'
-              : 'Foto dikunci kembali ke Privat.',
-        ),
-      ),
-    );
   }
 
   Future<void> _confirmDeleteCurrent() async {
