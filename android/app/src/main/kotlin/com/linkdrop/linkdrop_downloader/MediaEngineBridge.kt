@@ -32,6 +32,11 @@ import com.yausername.youtubedl_android.YoutubeDLRequest
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
+import java.nio.file.FileVisitResult
+import java.nio.file.Files
+import java.nio.file.Path
+import java.nio.file.SimpleFileVisitor
+import java.nio.file.attribute.BasicFileAttributes
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -1667,6 +1672,330 @@ class MediaEngineBridge(private val context: Context) {
         }
     }
 
+    private data class PackedFileRow(
+        val fileName: String,
+        val mimeType: String,
+        val mediaKind: String,
+        val fileSize: Long,
+        val modifiedMs: Long,
+        val relativePath: String,
+        val savedPath: String,
+        val contentUri: String,
+        val platformFolder: String,
+        val creatorFolder: String,
+        val albumFolder: String,
+        val isPrivate: Boolean,
+    ) {
+        fun toMap(): Map<String, Any?> = mapOf(
+            "fileName" to fileName,
+            "mimeType" to mimeType,
+            "mediaKind" to mediaKind,
+            "fileSize" to fileSize,
+            "modifiedMs" to modifiedMs,
+            "relativePath" to relativePath,
+            "savedPath" to savedPath,
+            "contentUri" to contentUri,
+            "platformFolder" to platformFolder,
+            "creatorFolder" to creatorFolder,
+            "albumFolder" to albumFolder,
+            "isPrivate" to isPrivate,
+        )
+
+        fun appendTsvLine(sb: StringBuilder) {
+            fun clean(s: String): String {
+                if (s.indexOf('\t') == -1 && s.indexOf('\n') == -1 && s.indexOf('\r') == -1) {
+                    return s
+                }
+                return s.replace('\t', ' ').replace('\n', ' ').replace('\r', ' ')
+            }
+            sb.append(clean(fileName)).append('\t')
+                .append(clean(mimeType)).append('\t')
+                .append(mediaKind).append('\t')
+                .append(fileSize).append('\t')
+                .append(modifiedMs).append('\t')
+                .append(clean(relativePath)).append('\t')
+                .append(clean(savedPath)).append('\t')
+                .append(clean(contentUri)).append('\t')
+                .append(clean(platformFolder)).append('\t')
+                .append(clean(creatorFolder)).append('\t')
+                .append(clean(albumFolder)).append('\t')
+                .append(if (isPrivate) '1' else '0')
+        }
+    }
+
+    private fun scanManagedFilesRows(): ArrayList<PackedFileRow> {
+        val results = ArrayList<PackedFileRow>(512)
+        val seenPaths = HashSet<String>(512)
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val resolver = context.contentResolver
+            val collections = listOf(
+                MediaStore.Video.Media.EXTERNAL_CONTENT_URI to "video",
+                MediaStore.Images.Media.EXTERNAL_CONTENT_URI to "image",
+                MediaStore.Audio.Media.EXTERNAL_CONTENT_URI to "audio",
+            )
+
+            @Suppress("DEPRECATION")
+            val projection = arrayOf(
+                MediaStore.MediaColumns._ID,
+                MediaStore.MediaColumns.DISPLAY_NAME,
+                MediaStore.MediaColumns.MIME_TYPE,
+                MediaStore.MediaColumns.SIZE,
+                MediaStore.MediaColumns.DATE_MODIFIED,
+                MediaStore.MediaColumns.RELATIVE_PATH,
+                MediaStore.MediaColumns.DATA,
+            )
+
+            val selection = "${MediaStore.MediaColumns.RELATIVE_PATH} LIKE ?"
+            val selectionArgs = arrayOf("%all_download%")
+            val sortOrder = "${MediaStore.MediaColumns.DATE_MODIFIED} DESC"
+
+            for ((collectionUri, mediaKind) in collections) {
+                runCatching {
+                    resolver.query(collectionUri, projection, selection, selectionArgs, sortOrder)?.use { cursor ->
+                        val idIdx = cursor.getColumnIndex(MediaStore.MediaColumns._ID)
+                        val nameIdx = cursor.getColumnIndex(MediaStore.MediaColumns.DISPLAY_NAME)
+                        val mimeIdx = cursor.getColumnIndex(MediaStore.MediaColumns.MIME_TYPE)
+                        val sizeIdx = cursor.getColumnIndex(MediaStore.MediaColumns.SIZE)
+                        val modIdx = cursor.getColumnIndex(MediaStore.MediaColumns.DATE_MODIFIED)
+                        val relIdx = cursor.getColumnIndex(MediaStore.MediaColumns.RELATIVE_PATH)
+                        @Suppress("DEPRECATION")
+                        val dataIdx = cursor.getColumnIndex(MediaStore.MediaColumns.DATA)
+
+                        while (cursor.moveToNext()) {
+                            val id = if (idIdx >= 0) cursor.getLong(idIdx) else continue
+                            val name = if (nameIdx >= 0) cursor.getString(nameIdx) ?: continue else continue
+                            val mime = if (mimeIdx >= 0) cursor.getString(mimeIdx) ?: detectMimeType(name) else detectMimeType(name)
+                            val size = if (sizeIdx >= 0) cursor.getLong(sizeIdx) else 0L
+                            val modSec = if (modIdx >= 0) cursor.getLong(modIdx) else 0L
+                            val relPath = if (relIdx >= 0) cursor.getString(relIdx) ?: "" else ""
+                            val dataPath = if (dataIdx >= 0) cursor.getString(dataIdx) ?: "" else ""
+                            if (relPath.contains(".all_download_vault", ignoreCase = true) ||
+                                dataPath.contains(".all_download_vault", ignoreCase = true)
+                            ) {
+                                continue
+                            }
+
+                            val contentUri = ContentUris.withAppendedId(collectionUri, id).toString()
+                            val dedupKey = dataPath.ifBlank { contentUri }
+                            if (!seenPaths.add(dedupKey)) continue
+
+                            val (platformName, creatorName, albumName) = parseFolderHierarchy(relPath)
+                            results.add(
+                                PackedFileRow(
+                                    fileName = name,
+                                    mimeType = mime,
+                                    mediaKind = mediaKind,
+                                    fileSize = size,
+                                    modifiedMs = modSec * 1000L,
+                                    relativePath = relPath.trimEnd('/'),
+                                    savedPath = dataPath,
+                                    contentUri = contentUri,
+                                    platformFolder = platformName,
+                                    creatorFolder = creatorName,
+                                    albumFolder = albumName,
+                                    isPrivate = false,
+                                ),
+                            )
+                        }
+                    }
+                }
+            }
+        } else {
+            @Suppress("DEPRECATION")
+            val roots = listOf(
+                File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES), "all_download"),
+                File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MOVIES), "all_download"),
+                File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DCIM), "all_download"),
+                File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MUSIC), "all_download"),
+                File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "all_download"),
+            )
+            for (root in roots) {
+                if (!root.exists()) continue
+                root.walkTopDown().filter { it.isFile && it.length() > 0 }.forEach { f ->
+                    if (!seenPaths.add(f.absolutePath)) return@forEach
+                    val mime = detectMimeType(f.name)
+                    val kind = when {
+                        mime.startsWith("video/") -> "video"
+                        mime.startsWith("audio/") -> "audio"
+                        mime.startsWith("image/") -> "image"
+                        else -> "video"
+                    }
+                    val rel = f.parentFile?.absolutePath.orEmpty()
+                    val (platformName, creatorName, albumName) = parseFolderHierarchy(rel)
+                    results.add(
+                        PackedFileRow(
+                            fileName = f.name,
+                            mimeType = mime,
+                            mediaKind = kind,
+                            fileSize = f.length(),
+                            modifiedMs = f.lastModified(),
+                            relativePath = rel,
+                            savedPath = f.absolutePath,
+                            contentUri = "",
+                            platformFolder = platformName,
+                            creatorFolder = creatorName,
+                            albumFolder = albumName,
+                            isPrivate = false,
+                        ),
+                    )
+                }
+            }
+        }
+
+        // Also scan Private Vault roots (uninstall-proof Documents/.all_download_vault/media + legacy fallback).
+        // On Android 8+ (API 26+), use NIO Files.walkFileTree + BasicFileAttributes to cut FUSE syscalls by 3x!
+        val seenPrivateLogical = HashSet<String>(512)
+        for (vault in allPrivateVaultRoots()) {
+            runCatching {
+                if (!vault.exists()) return@runCatching
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    val vaultPath = vault.toPath()
+                    Files.walkFileTree(
+                        vaultPath,
+                        object : SimpleFileVisitor<Path>() {
+                            override fun preVisitDirectory(
+                                dir: Path,
+                                attrs: BasicFileAttributes,
+                            ): FileVisitResult {
+                                if (dir != vaultPath) {
+                                    val dirName = dir.fileName?.toString().orEmpty()
+                                    if (dirName.startsWith(".")) {
+                                        return FileVisitResult.SKIP_SUBTREE
+                                    }
+                                }
+                                return FileVisitResult.CONTINUE
+                            }
+
+                            override fun visitFile(
+                                file: Path,
+                                attrs: BasicFileAttributes,
+                            ): FileVisitResult {
+                                if (!attrs.isRegularFile) return FileVisitResult.CONTINUE
+                                val size = attrs.size()
+                                if (size <= 0L) return FileVisitResult.CONTINUE
+                                val name = file.fileName?.toString().orEmpty()
+                                if (name.isEmpty() || name.startsWith(".")) return FileVisitResult.CONTINUE
+                                val absPath = file.toString()
+                                if (!seenPaths.add(absPath)) return FileVisitResult.CONTINUE
+
+                                val parentPath = file.parent
+                                val relDir = if (parentPath != null && parentPath != vaultPath) {
+                                    runCatching { vaultPath.relativize(parentPath).toString().replace('\\', '/') }
+                                        .getOrDefault("")
+                                } else {
+                                    ""
+                                }
+                                val parts = relDir.split('/').filter { it.isNotBlank() }
+                                val platformName = parts.getOrNull(0) ?: "Pixiv"
+                                val creatorName = parts.getOrNull(1) ?: "Umum"
+                                val albumName = parts.getOrNull(2) ?: ""
+                                val logicalKey = "$platformName/$creatorName/$albumName/$name".lowercase(Locale.US)
+                                if (!seenPrivateLogical.add(logicalKey)) return FileVisitResult.CONTINUE
+
+                                val mime = detectMimeType(name)
+                                val kind = when {
+                                    mime.startsWith("video/") -> "video"
+                                    mime.startsWith("audio/") -> "audio"
+                                    mime.startsWith("image/") -> "image"
+                                    else -> "image"
+                                }
+                                results.add(
+                                    PackedFileRow(
+                                        fileName = name,
+                                        mimeType = mime,
+                                        mediaKind = kind,
+                                        fileSize = size,
+                                        modifiedMs = attrs.lastModifiedTime().toMillis(),
+                                        relativePath = "Privat/$relDir",
+                                        savedPath = absPath,
+                                        contentUri = "",
+                                        platformFolder = platformName,
+                                        creatorFolder = creatorName,
+                                        albumFolder = albumName,
+                                        isPrivate = true,
+                                    ),
+                                )
+                                return FileVisitResult.CONTINUE
+                            }
+
+                            override fun visitFileFailed(
+                                file: Path?,
+                                exc: java.io.IOException?,
+                            ): FileVisitResult = FileVisitResult.CONTINUE
+                        },
+                    )
+                } else {
+                    vault.walkTopDown()
+                        .onEnter { it == vault || !it.name.startsWith(".") }
+                        .filter { it.isFile && !it.name.startsWith(".") && it.length() > 0 }
+                        .forEach { f ->
+                            if (!seenPaths.add(f.absolutePath)) return@forEach
+                            val mime = detectMimeType(f.name)
+                            val kind = when {
+                                mime.startsWith("video/") -> "video"
+                                mime.startsWith("audio/") -> "audio"
+                                mime.startsWith("image/") -> "image"
+                                else -> "image"
+                            }
+                            val relDir = f.parentFile?.relativeTo(vault)?.path?.replace('\\', '/').orEmpty()
+                            val parts = relDir.split('/').filter { it.isNotBlank() }
+                            val platformName = parts.getOrNull(0) ?: "Pixiv"
+                            val creatorName = parts.getOrNull(1) ?: "Umum"
+                            val albumName = parts.getOrNull(2) ?: ""
+                            val logicalKey = "$platformName/$creatorName/$albumName/${f.name}".lowercase(Locale.US)
+                            if (!seenPrivateLogical.add(logicalKey)) return@forEach
+                            results.add(
+                                PackedFileRow(
+                                    fileName = f.name,
+                                    mimeType = mime,
+                                    mediaKind = kind,
+                                    fileSize = f.length(),
+                                    modifiedMs = f.lastModified(),
+                                    relativePath = "Privat/$relDir",
+                                    savedPath = f.absolutePath,
+                                    contentUri = "",
+                                    platformFolder = platformName,
+                                    creatorFolder = creatorName,
+                                    albumFolder = albumName,
+                                    isPrivate = true,
+                                ),
+                            )
+                        }
+                }
+            }
+        }
+
+        results.sortByDescending { it.modifiedMs }
+        return results
+    }
+
+    /**
+     * Scans Android MediaStore & Private Vault and returns a compact tab-delimited
+     * payload (1 line per file) so 10,000–50,000+ files cross the PlatformChannel
+     * in a single String with zero per-map UI-thread codec serialization lag.
+     */
+    fun listManagedFilesPacked(
+        onSuccess: (String) -> Unit,
+        onError: (String, String) -> Unit,
+    ) {
+        scope.launch {
+            try {
+                val rows = scanManagedFilesRows()
+                val sb = StringBuilder(rows.size * 180)
+                for (i in rows.indices) {
+                    if (i > 0) sb.append('\n')
+                    rows[i].appendTsvLine(sb)
+                }
+                val payload = sb.toString()
+                postToMain { onSuccess(payload) }
+            } catch (t: Throwable) {
+                Log.e(TAG, "listManagedFilesPacked failed", t)
+                postToMain { onError("LIST_ERROR", t.message ?: "Gagal membaca folder file") }
+            }
+        }
+    }
+
     /**
      * Scans Android MediaStore for all files saved inside `all_download/<Platform>/<Username>/`
      * so the in-app File Explorer tab always reflects the real device storage structure.
@@ -1677,172 +2006,10 @@ class MediaEngineBridge(private val context: Context) {
     ) {
         scope.launch {
             try {
-                val results = mutableListOf<Map<String, Any?>>()
-                val seenPaths = HashSet<String>()
-
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    val resolver = context.contentResolver
-                    val collections = listOf(
-                        MediaStore.Video.Media.EXTERNAL_CONTENT_URI to "video",
-                        MediaStore.Images.Media.EXTERNAL_CONTENT_URI to "image",
-                        MediaStore.Audio.Media.EXTERNAL_CONTENT_URI to "audio",
-                    )
-
-                    @Suppress("DEPRECATION")
-                    val projection = arrayOf(
-                        MediaStore.MediaColumns._ID,
-                        MediaStore.MediaColumns.DISPLAY_NAME,
-                        MediaStore.MediaColumns.MIME_TYPE,
-                        MediaStore.MediaColumns.SIZE,
-                        MediaStore.MediaColumns.DATE_MODIFIED,
-                        MediaStore.MediaColumns.RELATIVE_PATH,
-                        MediaStore.MediaColumns.DATA,
-                    )
-
-                    val selection = "${MediaStore.MediaColumns.RELATIVE_PATH} LIKE ?"
-                    val selectionArgs = arrayOf("%all_download%")
-                    val sortOrder = "${MediaStore.MediaColumns.DATE_MODIFIED} DESC"
-
-                    for ((collectionUri, mediaKind) in collections) {
-                        runCatching {
-                            resolver.query(collectionUri, projection, selection, selectionArgs, sortOrder)?.use { cursor ->
-                                val idIdx = cursor.getColumnIndex(MediaStore.MediaColumns._ID)
-                                val nameIdx = cursor.getColumnIndex(MediaStore.MediaColumns.DISPLAY_NAME)
-                                val mimeIdx = cursor.getColumnIndex(MediaStore.MediaColumns.MIME_TYPE)
-                                val sizeIdx = cursor.getColumnIndex(MediaStore.MediaColumns.SIZE)
-                                val modIdx = cursor.getColumnIndex(MediaStore.MediaColumns.DATE_MODIFIED)
-                                val relIdx = cursor.getColumnIndex(MediaStore.MediaColumns.RELATIVE_PATH)
-                                @Suppress("DEPRECATION")
-                                val dataIdx = cursor.getColumnIndex(MediaStore.MediaColumns.DATA)
-
-                                while (cursor.moveToNext()) {
-                                    val id = if (idIdx >= 0) cursor.getLong(idIdx) else continue
-                                    val name = if (nameIdx >= 0) cursor.getString(nameIdx) ?: continue else continue
-                                    val mime = if (mimeIdx >= 0) cursor.getString(mimeIdx) ?: detectMimeType(name) else detectMimeType(name)
-                                    val size = if (sizeIdx >= 0) cursor.getLong(sizeIdx) else 0L
-                                    val modSec = if (modIdx >= 0) cursor.getLong(modIdx) else 0L
-                                    val relPath = if (relIdx >= 0) cursor.getString(relIdx) ?: "" else ""
-                                    val dataPath = if (dataIdx >= 0) cursor.getString(dataIdx) ?: "" else ""
-                                    if (relPath.contains(".all_download_vault", ignoreCase = true) ||
-                                        dataPath.contains(".all_download_vault", ignoreCase = true)
-                                    ) {
-                                        continue
-                                    }
-
-                                    val contentUri = ContentUris.withAppendedId(collectionUri, id).toString()
-                                    val dedupKey = dataPath.ifBlank { contentUri }
-                                    if (!seenPaths.add(dedupKey)) continue
-
-                                    val (platformName, creatorName, albumName) = parseFolderHierarchy(relPath)
-                                    results.add(
-                                        mapOf(
-                                            "fileName" to name,
-                                            "mimeType" to mime,
-                                            "mediaKind" to mediaKind,
-                                            "fileSize" to size,
-                                            "modifiedMs" to (modSec * 1000L),
-                                            "relativePath" to relPath.trimEnd('/'),
-                                            "savedPath" to dataPath,
-                                            "contentUri" to contentUri,
-                                            "platformFolder" to platformName,
-                                            "creatorFolder" to creatorName,
-                                            "albumFolder" to albumName,
-                                            "isPrivate" to false,
-                                        ),
-                                    )
-                                }
-                            }
-                        }
-                    }
-                } else {
-                    @Suppress("DEPRECATION")
-                    val roots = listOf(
-                        File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES), "all_download"),
-                        File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MOVIES), "all_download"),
-                        File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DCIM), "all_download"),
-                        File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MUSIC), "all_download"),
-                        File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "all_download"),
-                    )
-                    for (root in roots) {
-                        if (!root.exists()) continue
-                        root.walkTopDown().filter { it.isFile && it.length() > 0 }.forEach { f ->
-                            if (!seenPaths.add(f.absolutePath)) return@forEach
-                            val mime = detectMimeType(f.name)
-                            val kind = when {
-                                mime.startsWith("video/") -> "video"
-                                mime.startsWith("audio/") -> "audio"
-                                mime.startsWith("image/") -> "image"
-                                else -> "video"
-                            }
-                            val rel = f.parentFile?.absolutePath.orEmpty()
-                            val (platformName, creatorName, albumName) = parseFolderHierarchy(rel)
-                            results.add(
-                                mapOf(
-                                    "fileName" to f.name,
-                                    "mimeType" to mime,
-                                    "mediaKind" to kind,
-                                    "fileSize" to f.length(),
-                                    "modifiedMs" to f.lastModified(),
-                                    "relativePath" to rel,
-                                    "savedPath" to f.absolutePath,
-                                    "contentUri" to "",
-                                    "platformFolder" to platformName,
-                                    "creatorFolder" to creatorName,
-                                    "albumFolder" to albumName,
-                                    "isPrivate" to false,
-                                ),
-                            )
-                        }
-                    }
-                }
-
-                // Also scan Private Vault roots (uninstall-proof Documents/.all_download_vault/media + legacy fallback)
-                val seenPrivateLogical = HashSet<String>()
-                for (vault in allPrivateVaultRoots()) {
-                    runCatching {
-                        if (vault.exists()) {
-                            vault.walkTopDown()
-                                .onEnter { it == vault || !it.name.startsWith(".") }
-                                .filter { it.isFile && !it.name.startsWith(".") && it.length() > 0 }
-                                .forEach { f ->
-                                    if (!seenPaths.add(f.absolutePath)) return@forEach
-                                    val mime = detectMimeType(f.name)
-                                    val kind = when {
-                                        mime.startsWith("video/") -> "video"
-                                        mime.startsWith("audio/") -> "audio"
-                                        mime.startsWith("image/") -> "image"
-                                        else -> "image"
-                                    }
-                                    val relDir = f.parentFile?.relativeTo(vault)?.path?.replace('\\', '/').orEmpty()
-                                    val parts = relDir.split('/').filter { it.isNotBlank() }
-                                    val platformName = parts.getOrNull(0) ?: "Pixiv"
-                                    val creatorName = parts.getOrNull(1) ?: "Umum"
-                                    val albumName = parts.getOrNull(2) ?: ""
-                                    val logicalKey = "$platformName/$creatorName/$albumName/${f.name}".lowercase(Locale.US)
-                                    if (!seenPrivateLogical.add(logicalKey)) return@forEach
-                                    results.add(
-                                        mapOf(
-                                            "fileName" to f.name,
-                                            "mimeType" to mime,
-                                            "mediaKind" to kind,
-                                            "fileSize" to f.length(),
-                                            "modifiedMs" to f.lastModified(),
-                                            "relativePath" to "Privat/$relDir",
-                                            "savedPath" to f.absolutePath,
-                                            "contentUri" to "",
-                                            "platformFolder" to platformName,
-                                            "creatorFolder" to creatorName,
-                                            "albumFolder" to albumName,
-                                            "isPrivate" to true,
-                                        ),
-                                    )
-                                }
-                        }
-                    }
-                }
-
-                results.sortByDescending { (it["modifiedMs"] as? Long) ?: 0L }
-                postToMain { onSuccess(results) }
+                val rows = scanManagedFilesRows()
+                val mapped = ArrayList<Map<String, Any?>>(rows.size)
+                for (r in rows) mapped.add(r.toMap())
+                postToMain { onSuccess(mapped) }
             } catch (t: Throwable) {
                 Log.e(TAG, "listManagedFiles failed", t)
                 postToMain { onError("LIST_ERROR", t.message ?: "Gagal membaca folder file") }
@@ -2226,6 +2393,7 @@ class MediaEngineBridge(private val context: Context) {
     // =========================================================================
 
     private val trashLock = Any()
+    private val cachedTrashByDir = HashMap<String, MutableList<JSONObject>>()
 
     private fun ensureNoMediaMarker(dir: File) {
         runCatching {
@@ -2255,26 +2423,52 @@ class MediaEngineBridge(private val context: Context) {
         return out
     }
 
-    private fun readTrashEntriesLocked(trashDir: File): MutableList<JSONObject> {
+    /**
+     * Reads Trash index entries with in-memory caching.
+     * When [validateFiles] is `false` (default for hot delete paths like Fast Delete),
+     * skips O(N) FUSE `File.exists()` syscalls across hundreds of previously trashed items.
+     */
+    private fun readTrashEntriesLocked(
+        trashDir: File,
+        validateFiles: Boolean = false,
+    ): Pair<MutableList<JSONObject>, Boolean> {
+        val cacheKey = trashDir.absolutePath
+        if (!validateFiles) {
+            cachedTrashByDir[cacheKey]?.let { return Pair(ArrayList(it), false) }
+        }
         val indexFile = File(trashDir, "trash_index_v1.json")
-        if (!indexFile.exists()) return mutableListOf()
-        return runCatching {
+        if (!indexFile.exists()) {
+            val empty = mutableListOf<JSONObject>()
+            cachedTrashByDir[cacheKey] = empty
+            return Pair(ArrayList(), false)
+        }
+        var pruned = false
+        val loaded = runCatching {
             val arr = JSONArray(indexFile.readText(Charsets.UTF_8))
             val out = ArrayList<JSONObject>(arr.length())
             for (i in 0 until arr.length()) {
                 val obj = arr.optJSONObject(i) ?: continue
                 val tp = obj.optString("trashPath")
-                if (tp.isNotBlank() && File(tp).exists()) {
-                    out.add(obj)
+                if (tp.isBlank()) {
+                    pruned = true
+                    continue
                 }
+                if (validateFiles && !File(tp).exists()) {
+                    pruned = true
+                    continue
+                }
+                out.add(obj)
             }
             out
         }.getOrDefault(mutableListOf())
+        cachedTrashByDir[cacheKey] = ArrayList(loaded)
+        return Pair(loaded, pruned)
     }
 
     private fun writeTrashEntriesLocked(trashDir: File, entries: List<JSONObject>) {
         if (!trashDir.exists()) trashDir.mkdirs()
         ensureNoMediaMarker(trashDir)
+        cachedTrashByDir[trashDir.absolutePath] = ArrayList(entries)
         val arr = JSONArray()
         for (e in entries) arr.put(e)
         val target = File(trashDir, "trash_index_v1.json")
@@ -2398,7 +2592,7 @@ class MediaEngineBridge(private val context: Context) {
 
             if (newEntries.isNotEmpty()) {
                 synchronized(trashLock) {
-                    val existing = readTrashEntriesLocked(trashDir)
+                    val (existing, _) = readTrashEntriesLocked(trashDir, validateFiles = false)
                     existing.addAll(0, newEntries)
                     writeTrashEntriesLocked(trashDir, existing)
                 }
@@ -2412,8 +2606,10 @@ class MediaEngineBridge(private val context: Context) {
             val all = ArrayList<Map<String, Any?>>()
             synchronized(trashLock) {
                 for (dir in allTrashDirs()) {
-                    val entries = readTrashEntriesLocked(dir)
-                    writeTrashEntriesLocked(dir, entries)
+                    val (entries, pruned) = readTrashEntriesLocked(dir, validateFiles = true)
+                    if (pruned) {
+                        writeTrashEntriesLocked(dir, entries)
+                    }
                     for (e in entries) {
                         all.add(jsonObjectToTrashMap(e))
                     }
@@ -2434,7 +2630,7 @@ class MediaEngineBridge(private val context: Context) {
             var restored = 0
             synchronized(trashLock) {
                 for (dir in allTrashDirs()) {
-                    val entries = readTrashEntriesLocked(dir)
+                    val (entries, _) = readTrashEntriesLocked(dir, validateFiles = false)
                     val remaining = ArrayList<JSONObject>(entries.size)
                     var changed = false
                     for (obj in entries) {
@@ -2501,7 +2697,7 @@ class MediaEngineBridge(private val context: Context) {
             var deleted = 0
             synchronized(trashLock) {
                 for (dir in allTrashDirs()) {
-                    val entries = readTrashEntriesLocked(dir)
+                    val (entries, _) = readTrashEntriesLocked(dir, validateFiles = false)
                     val remaining = ArrayList<JSONObject>(entries.size)
                     var changed = false
                     for (obj in entries) {
@@ -2528,7 +2724,7 @@ class MediaEngineBridge(private val context: Context) {
             var deleted = 0
             synchronized(trashLock) {
                 for (dir in allTrashDirs()) {
-                    val entries = readTrashEntriesLocked(dir)
+                    val (entries, _) = readTrashEntriesLocked(dir, validateFiles = false)
                     for (obj in entries) {
                         runCatching { File(obj.optString("trashPath")).delete() }
                         deleted++
@@ -2556,9 +2752,9 @@ class MediaEngineBridge(private val context: Context) {
             var purged = 0
             synchronized(trashLock) {
                 for (dir in allTrashDirs()) {
-                    val entries = readTrashEntriesLocked(dir)
+                    val (entries, pruned) = readTrashEntriesLocked(dir, validateFiles = true)
                     val remaining = ArrayList<JSONObject>(entries.size)
-                    var changed = false
+                    var changed = pruned
                     for (obj in entries) {
                         val deletedAt = obj.optLong("deletedAtMs", System.currentTimeMillis())
                         if (deletedAt < cutoffMs) {

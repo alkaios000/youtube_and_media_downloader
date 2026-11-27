@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 import '../models/media_platform.dart';
 import '../services/download_manager.dart';
 import '../widgets/app_feedback.dart';
+import '../widgets/route_aware_listener.dart';
 import '../widgets/security_lock_screen.dart';
 import 'downloader_screen.dart';
 import 'downloads_screen.dart';
@@ -224,9 +225,9 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
           ],
         ),
       ),
-      bottomNavigationBar: ListenableBuilder(
+      bottomNavigationBar: RouteAwareListenableBuilder(
         listenable: widget.manager,
-        builder: (context, _) {
+        builder: (context) {
           final activeCount = widget.manager.activeDownloadCount;
           final pausedCount = widget.manager.pausedDownloadCount;
           final badgeCount = activeCount > 0 ? activeCount : pausedCount;
@@ -256,8 +257,8 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
               }
               setState(() => _tabIndex = index);
               if (index == 1) {
-                widget.manager.refreshManagedFiles();
-                unawaited(widget.manager.refreshTrashItems());
+                widget.manager.refreshManagedFilesIfStale();
+                unawaited(widget.manager.refreshTrashItemsIfStale());
               } else if (index == 3) {
                 widget.manager.refreshStorageInfo();
               }
@@ -308,10 +309,9 @@ class _HomeShellState extends State<HomeShell> with WidgetsBindingObserver {
   }
 }
 
-/// Only rebuilds the currently visible tab when [listenable] notifies,
-/// keeping background tabs completely idle (0% CPU) during heavy bulk downloads
-/// while preserving each tab's full scroll & navigation State.
-class _ActiveTabListener extends StatefulWidget {
+/// Only rebuilds the currently visible tab when [listenable] notifies AND the
+/// HomeShell route is currently on top (0% CPU while covered by Album/Photo viewer).
+class _ActiveTabListener extends StatelessWidget {
   final bool active;
   final Listenable listenable;
   final WidgetBuilder builder;
@@ -323,37 +323,11 @@ class _ActiveTabListener extends StatefulWidget {
   });
 
   @override
-  State<_ActiveTabListener> createState() => _ActiveTabListenerState();
-}
-
-class _ActiveTabListenerState extends State<_ActiveTabListener> {
-  @override
-  void initState() {
-    super.initState();
-    widget.listenable.addListener(_onChanged);
+  Widget build(BuildContext context) {
+    return RouteAwareListenableBuilder(
+      active: active,
+      listenable: listenable,
+      builder: builder,
+    );
   }
-
-  @override
-  void didUpdateWidget(covariant _ActiveTabListener oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    if (oldWidget.listenable != widget.listenable) {
-      oldWidget.listenable.removeListener(_onChanged);
-      widget.listenable.addListener(_onChanged);
-    }
-  }
-
-  void _onChanged() {
-    if (widget.active && mounted) {
-      setState(() {});
-    }
-  }
-
-  @override
-  void dispose() {
-    widget.listenable.removeListener(_onChanged);
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) => widget.builder(context);
 }

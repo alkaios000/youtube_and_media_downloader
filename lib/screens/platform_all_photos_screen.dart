@@ -11,6 +11,7 @@ import '../models/media_metadata.dart';
 import '../models/media_platform.dart';
 import '../services/download_manager.dart';
 import '../widgets/file_gallery_viewer.dart';
+import '../widgets/route_aware_listener.dart';
 
 /// Displays ALL photos across EVERY artist/creator in [platformFolder],
 /// shuffled by default, with pull-to-refresh + instant reshuffle button and
@@ -31,10 +32,13 @@ class PlatformAllPhotosScreen extends StatefulWidget {
 }
 
 class _PlatformAllPhotosScreenState extends State<PlatformAllPhotosScreen> {
+  static const int _windowStep = 180;
+
   final ScrollController _scrollController = ScrollController();
 
   bool _shuffleEnabled = true;
   int _shuffleSeed = DateTime.now().microsecondsSinceEpoch;
+  int _visibleWindowLimit = _windowStep;
 
   // Memoized photo list so scrolling never reshuffles or re-scans
   List<ManagedFile>? _cachedSourceRef;
@@ -43,9 +47,28 @@ class _PlatformAllPhotosScreenState extends State<PlatformAllPhotosScreen> {
   List<ManagedFile> _cachedPhotos = const [];
 
   @override
+  void initState() {
+    super.initState();
+    _scrollController.addListener(_handleScrollLoadMore);
+  }
+
+  @override
   void dispose() {
+    _scrollController.removeListener(_handleScrollLoadMore);
     _scrollController.dispose();
     super.dispose();
+  }
+
+  void _handleScrollLoadMore() {
+    if (!_scrollController.hasClients) return;
+    if (_visibleWindowLimit >= _cachedPhotos.length) return;
+    final pos = _scrollController.position;
+    if (pos.pixels >= pos.maxScrollExtent - 900) {
+      setState(() {
+        _visibleWindowLimit =
+            math.min(_cachedPhotos.length, _visibleWindowLimit + _windowStep);
+      });
+    }
   }
 
   List<ManagedFile> _resolvePhotos(List<ManagedFile> allFiles) {
@@ -91,6 +114,7 @@ class _PlatformAllPhotosScreenState extends State<PlatformAllPhotosScreen> {
     setState(() {
       _shuffleEnabled = true;
       _shuffleSeed = DateTime.now().microsecondsSinceEpoch;
+      _visibleWindowLimit = _windowStep;
     });
     _scrollToTop(animate: true);
   }
@@ -103,6 +127,7 @@ class _PlatformAllPhotosScreenState extends State<PlatformAllPhotosScreen> {
       if (_shuffleEnabled) {
         _shuffleSeed = DateTime.now().microsecondsSinceEpoch;
       }
+      _visibleWindowLimit = _windowStep;
     });
     _scrollToTop(animate: true);
   }
@@ -114,6 +139,7 @@ class _PlatformAllPhotosScreenState extends State<PlatformAllPhotosScreen> {
       if (_shuffleEnabled) {
         _shuffleSeed = DateTime.now().microsecondsSinceEpoch;
       }
+      _visibleWindowLimit = _windowStep;
     });
     _scrollToTop(animate: true);
   }
@@ -148,10 +174,11 @@ class _PlatformAllPhotosScreenState extends State<PlatformAllPhotosScreen> {
 
     return Scaffold(
       body: SafeArea(
-        child: ListenableBuilder(
+        child: RouteAwareListenableBuilder(
           listenable: widget.manager,
-          builder: (context, _) {
+          builder: (context) {
             final photos = _resolvePhotos(widget.manager.visibleManagedFiles);
+            final renderedCount = math.min(photos.length, _visibleWindowLimit);
             final hiddenByFilter = photos.isEmpty &&
                 widget.manager.managedFiles.any(
                   (f) =>
@@ -341,9 +368,29 @@ class _PlatformAllPhotosScreenState extends State<PlatformAllPhotosScreen> {
                               ),
                             );
                           },
-                          childCount: photos.length,
+                          childCount: renderedCount,
                           addAutomaticKeepAlives: false,
                           addRepaintBoundaries: true,
+                        ),
+                      ),
+                    ),
+                  if (renderedCount < photos.length)
+                    SliverToBoxAdapter(
+                      child: Padding(
+                        padding: const EdgeInsets.fromLTRB(16, 4, 16, 28),
+                        child: Center(
+                          child: OutlinedButton.icon(
+                            onPressed: () => setState(() {
+                              _visibleWindowLimit = math.min(
+                                photos.length,
+                                _visibleWindowLimit + _windowStep,
+                              );
+                            }),
+                            icon: const Icon(Icons.expand_more_rounded, size: 18),
+                            label: Text(
+                              'Muat lagi ($renderedCount / ${photos.length} foto)',
+                            ),
+                          ),
                         ),
                       ),
                     ),

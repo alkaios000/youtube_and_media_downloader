@@ -712,6 +712,13 @@ class MainActivity : FlutterActivity() {
                         )
                     }
 
+                    "listManagedFilesPacked" -> {
+                        bridge.listManagedFilesPacked(
+                            onSuccess = { packed -> result.success(packed) },
+                            onError = { code, message -> result.error(code, message, null) },
+                        )
+                    }
+
                     "setWallpaper" -> {
                         val filePath = call.argument<String>("filePath")
                         val contentUri = call.argument<String>("contentUri")

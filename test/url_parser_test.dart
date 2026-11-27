@@ -428,4 +428,164 @@ void main() {
       }
     });
   });
+
+  group('Extreme-scale ManagedFile packed TSV & zero-alloc natural sort', () {
+    test('round-trips 5,000 ManagedFiles via packed TSV and sorts naturally without RegExp', () {
+      final files = List<ManagedFile>.generate(
+        5000,
+        (i) => ManagedFile(
+          fileName: 'Artwork_${i % 25 + 1}.jpg',
+          mimeType: 'image/jpeg',
+          mediaKind: MediaKind.image,
+          fileSize: 4096 + i,
+          modifiedAt: DateTime.fromMillisecondsSinceEpoch(1700000000000 + i * 1000),
+          relativePath: 'Privat/Pixiv/Artist_${i % 40}/Album_${i % 200}',
+          savedPath: '/sdcard/Documents/.all_download_vault/media/Pixiv/Artist_${i % 40}/Album_${i % 200}/Artwork_${i % 25 + 1}.jpg',
+          contentUri: '',
+          platformFolder: 'Pixiv',
+          creatorFolder: 'Artist_${i % 40}',
+          albumFolder: 'Album_${i % 200}',
+          isPrivate: true,
+        ),
+      );
+
+      final packed = encodePackedManagedFiles(files);
+      final parsed = parsePackedManagedFiles(packed);
+      expect(parsed.length, 5000);
+      expect(parsed.first.fileName, files.first.fileName);
+      expect(parsed.first.ratingKey, files.first.ratingKey);
+      expect(parsed.first.albumLookupKey, files.first.albumLookupKey);
+      expect(parsed.last.isPrivate, isTrue);
+      expect(parsed.last.fileSize, files.last.fileSize);
+
+      final names = [
+        'Page_100.jpg',
+        'Page_2.jpg',
+        'Page_02.jpg',
+        'Page_10.jpg',
+        'Page_1.jpg',
+        'Page_11.jpg',
+        'Page_9.jpg',
+      ];
+      names.sort(naturalCompareFileNames);
+      expect(names, [
+        'Page_1.jpg',
+        'Page_2.jpg',
+        'Page_02.jpg',
+        'Page_9.jpg',
+        'Page_10.jpg',
+        'Page_11.jpg',
+        'Page_100.jpg',
+      ]);
+    });
+  });
+
+  group('Curated Keep-Only Catalog ("Katalog Kurasi") workflow', () {
+    test('records only kept pages, prunes deleted/excluded works while keeping markers finished, survives backup & reinstall', () async {
+      TestWidgetsFlutterBinding.ensureInitialized();
+      SharedPreferences.setMockInitialValues({});
+
+      final tempVaultState =
+          await Directory.systemTemp.createTemp('all_download_curated_test_');
+      try {
+        final storage1 = StorageService()
+          ..setPersistentStateDir(tempVaultState.path);
+        final manager1 = DownloadManager(storage: storage1);
+
+        // Simulate 2 downloaded Pixiv albums + 1 skipped album ('pixiv:9003')
+        await manager1.markManyDownloaded(['pixiv:9001', 'pixiv:9002', 'pixiv:9003']);
+        await manager1.upsertCuratedWork(
+          CuratedWorkRecord(
+            markerKey: 'pixiv:9001',
+            sourceUrl: 'https://www.pixiv.net/artworks/9001',
+            platformFolder: 'Pixiv',
+            creatorFolder: 'ArtistOne',
+            albumFolder: 'Sunset',
+            title: 'Sunset',
+            pixivIllustId: '9001',
+            totalPages: 10,
+            keptFiles: const [
+              CuratedKeptFile(pageIndex: 1, fileName: 'Sunset_2.jpg'),
+              CuratedKeptFile(pageIndex: 4, fileName: 'Sunset_5.jpg'),
+            ],
+            tags: const ['Original', 'Sky'],
+            updatedAt: DateTime(2026, 11, 27),
+          ),
+        );
+        await manager1.upsertCuratedWork(
+          CuratedWorkRecord(
+            markerKey: 'pixiv:9002',
+            sourceUrl: 'https://www.pixiv.net/artworks/9002',
+            platformFolder: 'Pixiv',
+            creatorFolder: 'ArtistOne',
+            albumFolder: 'Cloud',
+            title: 'Cloud',
+            pixivIllustId: '9002',
+            totalPages: 5,
+            keptFiles: const [
+              CuratedKeptFile(pageIndex: 0, fileName: 'Cloud_1.jpg'),
+            ],
+            updatedAt: DateTime(2026, 11, 27),
+          ),
+        );
+
+        // User excludes Cloud ('pixiv:9002') — must disappear from curatedCatalog
+        // while staying marked finished in downloadedMarkers!
+        await manager1.removeCuratedWork('pixiv:9002');
+        expect(manager1.curatedCatalogMap.containsKey('pixiv:9002'), isFalse);
+        expect(manager1.isMarkedDownloaded('pixiv:9002'), isTrue);
+        expect(manager1.isMarkedDownloaded('pixiv:9003'), isTrue);
+        expect(manager1.curatedKeptWorksCount, 1);
+        expect(manager1.curatedKeptFilesCount, 2);
+
+        await manager1.flushPendingStateWrites();
+        final backupJson = manager1.buildBackupJson();
+
+        // Simulate brand-new phone (empty SharedPreferences, 0 files on disk)
+        SharedPreferences.setMockInitialValues({});
+        final newPhoneManager = DownloadManager(storage: StorageService());
+        final parsed = newPhoneManager.parseBackupText(backupJson);
+        await newPhoneManager.applyBackup(parsed, merge: false);
+
+        // Verify ONLY the 2 kept pages of Sunset are queued as missing,
+        // while Cloud ('pixiv:9002') & skipped ('pixiv:9003') stay excluded & finished!
+        final status = newPhoneManager.computeCuratedCatalogStatus();
+        expect(status.keptWorksCount, 1);
+        expect(status.keptFilesCount, 2);
+        expect(status.missingOnDeviceCount, 2);
+        expect(status.excludedMarkersCount, 2);
+        expect(newPhoneManager.isMarkedDownloaded('pixiv:9002'), isTrue);
+        expect(newPhoneManager.isMarkedDownloaded('pixiv:9003'), isTrue);
+
+        // Safety guard: syncing on an empty new phone MUST NOT wipe curated catalog!
+        final syncEmpty =
+            await newPhoneManager.syncCuratedCatalogWithDeviceFiles();
+        expect(syncEmpty.skippedPruneBecauseDeviceEmpty, isTrue);
+        expect(newPhoneManager.curatedKeptFilesCount, 2);
+
+        // Persistent vault auto-restore check after simulated reinstall
+        SharedPreferences.setMockInitialValues({});
+        final reinstalled = DownloadManager(storage: StorageService());
+        final syncedVault = await reinstalled.syncPersistentVaultAndState(
+          overrideStateDir: tempVaultState.path,
+        );
+        expect(syncedVault, isTrue);
+        expect(reinstalled.curatedKeptWorksCount, 1);
+        expect(
+          reinstalled.curatedCatalogMap['pixiv:9001']?.keptFiles
+              .map((f) => '${f.pageIndex}:${f.fileName}')
+              .toList(),
+          ['1:Sunset_2.jpg', '4:Sunset_5.jpg'],
+        );
+
+        manager1.dispose();
+        newPhoneManager.dispose();
+        reinstalled.dispose();
+      } finally {
+        if (await tempVaultState.exists()) {
+          await tempVaultState.delete(recursive: true);
+        }
+      }
+    });
+  });
 }

@@ -9,6 +9,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../models/app_settings.dart';
 import '../models/creator_profile.dart';
 import '../models/download_item.dart';
+import '../models/managed_file.dart';
 import '../models/media_metadata.dart';
 
 List<Map<String, dynamic>> _decodeJsonMapList(String raw) {
@@ -32,6 +33,7 @@ class BackupDataBundle {
   final List<DownloadItem> history;
   final Map<String, AlbumMetadata> albumMetadata;
   final Map<String, ContentRating> photoRatings;
+  final Map<String, CuratedWorkRecord> curatedCatalog;
   final DateTime? exportedAt;
 
   const BackupDataBundle({
@@ -41,6 +43,7 @@ class BackupDataBundle {
     required this.history,
     this.albumMetadata = const {},
     this.photoRatings = const {},
+    this.curatedCatalog = const {},
     this.exportedAt,
   });
 }
@@ -51,6 +54,7 @@ class PersistentStateSnapshot {
   final List<CreatorProfileRecord> creatorProfiles;
   final Map<String, AlbumMetadata> albumMetadata;
   final Map<String, ContentRating> photoRatings;
+  final Map<String, CuratedWorkRecord> curatedCatalog;
   final List<DownloadItem> history;
 
   const PersistentStateSnapshot({
@@ -59,6 +63,7 @@ class PersistentStateSnapshot {
     this.creatorProfiles = const [],
     this.albumMetadata = const {},
     this.photoRatings = const {},
+    this.curatedCatalog = const {},
     this.history = const [],
   });
 
@@ -68,6 +73,7 @@ class PersistentStateSnapshot {
       creatorProfiles.isNotEmpty ||
       albumMetadata.isNotEmpty ||
       photoRatings.isNotEmpty ||
+      curatedCatalog.isNotEmpty ||
       history.isNotEmpty;
 }
 
@@ -78,6 +84,7 @@ class StorageService {
   static const String _creatorProfilesKey = 'all_download_creator_profiles_v1';
   static const String _albumMetadataKey = 'all_download_album_metadata_v1';
   static const String _photoRatingsKey = 'all_download_photo_ratings_v1';
+  static const String _curatedCatalogKey = 'all_download_curated_catalog_v1';
 
   /// Uninstall-proof shared state directory (`Documents/.all_download_vault/state`)
   /// provided by native Android once All Files Access is granted.
@@ -100,6 +107,10 @@ class StorageService {
   Map<String, AlbumMetadata>? _pendingAlbumMetaWrite;
   bool _isWritingRatings = false;
   Map<String, ContentRating>? _pendingRatingsWrite;
+  bool _isWritingCurated = false;
+  Map<String, CuratedWorkRecord>? _pendingCuratedWrite;
+  bool _isWritingFileIndex = false;
+  String? _pendingFileIndexWrite;
 
   File? _persistentFileOrNull(String fileName) {
     final dir = _persistentStateDirPath;
@@ -207,6 +218,14 @@ class StorageService {
       } catch (_) {}
     }
 
+    var curated = <String, CuratedWorkRecord>{};
+    final curatedRaw = await _readPersistentText('curated_catalog_v1.json');
+    if (curatedRaw != null) {
+      try {
+        curated = await _parseCuratedCatalogRaw(curatedRaw);
+      } catch (_) {}
+    }
+
     var history = <DownloadItem>[];
     final historyRaw = await _readPersistentText('download_history_v2.json');
     if (historyRaw != null) {
@@ -221,6 +240,7 @@ class StorageService {
       creatorProfiles: profiles,
       albumMetadata: albumMeta,
       photoRatings: ratings,
+      curatedCatalog: curated,
       history: history,
     );
     return snap.hasAnyData ? snap : null;
@@ -613,6 +633,131 @@ class StorageService {
     }
   }
 
+  // ===========================================================================
+  // MANAGED FILES PACKED INDEX CACHE (INSTANT COLD START FOR 30,000+ FILES)
+  // ===========================================================================
+  Future<List<ManagedFile>> loadManagedFilesCache() async {
+    final file = await _supportFileOrNull('managed_files_index_v1.tsv');
+    if (file == null || !await file.exists()) return const <ManagedFile>[];
+    try {
+      final raw = await file.readAsString();
+      if (raw.isEmpty) return const <ManagedFile>[];
+      if (raw.length > 65536) {
+        return await Isolate.run(() => parsePackedManagedFiles(raw));
+      }
+      return parsePackedManagedFiles(raw);
+    } catch (_) {
+      return const <ManagedFile>[];
+    }
+  }
+
+  Future<void> saveManagedFilesCacheRaw(String packedTsv) async {
+    _pendingFileIndexWrite = packedTsv;
+    if (_isWritingFileIndex) return;
+    _isWritingFileIndex = true;
+    try {
+      while (_pendingFileIndexWrite != null) {
+        final payload = _pendingFileIndexWrite!;
+        _pendingFileIndexWrite = null;
+        final file = await _supportFileOrNull('managed_files_index_v1.tsv');
+        if (file != null) {
+          await _writeAtomicFile(file, payload);
+        }
+      }
+    } catch (_) {
+    } finally {
+      _isWritingFileIndex = false;
+    }
+  }
+
+  Future<void> saveManagedFilesCache(List<ManagedFile> files) async {
+    try {
+      final packed = files.length >= 200
+          ? await Isolate.run(() => encodePackedManagedFiles(files))
+          : encodePackedManagedFiles(files);
+      await saveManagedFilesCacheRaw(packed);
+    } catch (_) {}
+  }
+
+  // ===========================================================================
+  // CURATED KEEP-ONLY CATALOG (RECORD ONLY KEPT PHOTOS/PAGES)
+  // ===========================================================================
+  Future<Map<String, CuratedWorkRecord>> loadCuratedCatalog() async {
+    final file = await _supportFileOrNull('curated_catalog_v1.json');
+    if (file != null && await file.exists()) {
+      try {
+        final raw = await file.readAsString();
+        if (raw.isNotEmpty) {
+          return await _parseCuratedCatalogRaw(raw);
+        }
+      } catch (_) {}
+    }
+
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString(_curatedCatalogKey);
+      if (raw != null && raw.isNotEmpty) {
+        return await _parseCuratedCatalogRaw(raw);
+      }
+    } catch (_) {}
+
+    final persistentRaw = await _readPersistentText('curated_catalog_v1.json');
+    if (persistentRaw != null) {
+      try {
+        return await _parseCuratedCatalogRaw(persistentRaw);
+      } catch (_) {}
+    }
+    return {};
+  }
+
+  Future<Map<String, CuratedWorkRecord>> _parseCuratedCatalogRaw(
+    String raw,
+  ) async {
+    final maps = raw.length > 65536
+        ? await Isolate.run(() => _decodeJsonMapList(raw))
+        : _decodeJsonMapList(raw);
+    final out = <String, CuratedWorkRecord>{};
+    for (final m in maps) {
+      final rec = CuratedWorkRecord.fromJson(m);
+      if (rec.markerKey.isNotEmpty && rec.keptFiles.isNotEmpty) {
+        out[rec.markerKey] = rec;
+      }
+    }
+    return out;
+  }
+
+  Future<void> saveCuratedCatalog(
+    Map<String, CuratedWorkRecord> catalog,
+  ) async {
+    _pendingCuratedWrite = Map<String, CuratedWorkRecord>.unmodifiable(catalog);
+    if (_isWritingCurated) return;
+
+    _isWritingCurated = true;
+    try {
+      while (_pendingCuratedWrite != null) {
+        final batch = _pendingCuratedWrite!;
+        _pendingCuratedWrite = null;
+        final list = batch.values
+            .where((r) => r.markerKey.isNotEmpty && r.keptFiles.isNotEmpty)
+            .map((e) => e.toJson())
+            .toList(growable: false);
+        final encoded = list.length >= 120
+            ? await Isolate.run(() => _encodeJsonPayload(list))
+            : jsonEncode(list);
+        final file = await _supportFileOrNull('curated_catalog_v1.json');
+        if (file != null) {
+          await _writeAtomicFile(file, encoded);
+        } else {
+          final prefs = await SharedPreferences.getInstance();
+          await prefs.setString(_curatedCatalogKey, encoded);
+        }
+        await _mirrorToPersistentFile('curated_catalog_v1.json', encoded);
+      }
+    } finally {
+      _isWritingCurated = false;
+    }
+  }
+
   Future<AppSettings> loadSettings() async {
     String? raw;
     try {
@@ -642,7 +787,8 @@ class StorageService {
   }
 
   /// Builds a portable JSON backup containing settings, downloaded markers,
-  /// saved per-artist profile URLs, album tags, photo ratings, and download history.
+  /// saved per-artist profile URLs, album tags, photo ratings, curated keep-only
+  /// catalog, and download history.
   String buildBackupJson({
     required AppSettings settings,
     required Set<String> downloadedMarkers,
@@ -650,6 +796,7 @@ class StorageService {
     required List<DownloadItem> history,
     Map<String, AlbumMetadata> albumMetadata = const {},
     Map<String, ContentRating> photoRatings = const {},
+    Map<String, CuratedWorkRecord> curatedCatalog = const {},
   }) {
     final serializedRatings = <String, String>{};
     photoRatings.forEach((k, v) {
@@ -657,15 +804,20 @@ class StorageService {
         serializedRatings[k] = v.name;
       }
     });
+    final serializedCurated = curatedCatalog.values
+        .where((r) => r.markerKey.isNotEmpty && r.keptFiles.isNotEmpty)
+        .map((e) => e.toJson())
+        .toList(growable: false);
     final payload = {
       'app': 'all_download',
-      'schemaVersion': 3,
+      'schemaVersion': 4,
       'exportedAt': DateTime.now().toIso8601String(),
       'settings': settings.toJson(),
       'downloadedMarkers': downloadedMarkers.toList(growable: false),
       'creatorProfiles': creatorProfiles.map((e) => e.toJson()).toList(growable: false),
       'albumMetadata': albumMetadata.values.map((e) => e.toJson()).toList(growable: false),
       'photoRatings': serializedRatings,
+      'curatedCatalog': serializedCurated,
       'history': history.map((e) => e.toJson()).toList(growable: false),
     };
     return const JsonEncoder.withIndent('  ').convert(payload);
@@ -687,6 +839,7 @@ class StorageService {
         map.containsKey('creatorProfiles') ||
         map.containsKey('albumMetadata') ||
         map.containsKey('photoRatings') ||
+        map.containsKey('curatedCatalog') ||
         map.containsKey('history');
     if (!hasAnyExpectedKey) {
       throw const FormatException(
@@ -729,6 +882,18 @@ class StorageService {
         }
       });
     }
+    final curated = <String, CuratedWorkRecord>{};
+    if (map['curatedCatalog'] is List) {
+      for (final entry in map['curatedCatalog'] as List) {
+        if (entry is Map) {
+          final rec =
+              CuratedWorkRecord.fromJson(Map<String, dynamic>.from(entry));
+          if (rec.markerKey.isNotEmpty && rec.keptFiles.isNotEmpty) {
+            curated[rec.markerKey] = rec;
+          }
+        }
+      }
+    }
     final history = (map['history'] as List?)
             ?.whereType<Map>()
             .map((e) {
@@ -750,6 +915,7 @@ class StorageService {
       history: history,
       albumMetadata: albumMeta,
       photoRatings: ratings,
+      curatedCatalog: curated,
       exportedAt: DateTime.tryParse(map['exportedAt']?.toString() ?? ''),
     );
   }

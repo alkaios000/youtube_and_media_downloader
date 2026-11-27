@@ -17,6 +17,7 @@ import '../widgets/file_gallery_viewer.dart';
 import '../widgets/pixiv_album_viewer.dart';
 import '../widgets/tag_albums_screen.dart';
 import '../widgets/wallpaper_sheet.dart';
+import 'curated_catalog_screen.dart';
 import 'platform_all_photos_screen.dart';
 import 'trash_screen.dart';
 
@@ -50,24 +51,64 @@ class _SelectableIndexMeta {
   const _SelectableIndexMeta(this.index);
 }
 
+class _PlatformSummary {
+  final int creatorCount;
+  final int fileCount;
+  final int privateCount;
+  final int imageCount;
+  final ManagedFile? sampleImage;
+
+  const _PlatformSummary({
+    required this.creatorCount,
+    required this.fileCount,
+    required this.privateCount,
+    required this.imageCount,
+    required this.sampleImage,
+  });
+}
+
 class _PixivAlbumGroup {
   final String albumName;
   final List<ManagedFile> pages;
+  final int totalBytes;
+  final int privateCount;
+  final DateTime latestModified;
 
-  const _PixivAlbumGroup({
+  factory _PixivAlbumGroup({
+    required String albumName,
+    required List<ManagedFile> pages,
+  }) {
+    var bytes = 0;
+    var priv = 0;
+    var latest = pages.isNotEmpty
+        ? pages.first.modifiedAt
+        : DateTime.fromMillisecondsSinceEpoch(0);
+    for (final f in pages) {
+      bytes += f.fileSize;
+      if (f.isPrivate) priv++;
+      if (f.modifiedAt.isAfter(latest)) latest = f.modifiedAt;
+    }
+    return _PixivAlbumGroup._(
+      albumName: albumName,
+      pages: pages,
+      totalBytes: bytes,
+      privateCount: priv,
+      latestModified: latest,
+    );
+  }
+
+  const _PixivAlbumGroup._({
     required this.albumName,
     required this.pages,
+    required this.totalBytes,
+    required this.privateCount,
+    required this.latestModified,
   });
 
   ManagedFile get cover => pages.first;
-  int get totalBytes => pages.fold<int>(0, (s, f) => s + f.fileSize);
-  int get privateCount => pages.where((f) => f.isPrivate).length;
   int get publicCount => pages.length - privateCount;
   bool get hasPrivate => privateCount > 0;
   bool get hasPublic => publicCount > 0;
-  DateTime get latestModified => pages
-      .map((e) => e.modifiedAt)
-      .reduce((a, b) => a.isAfter(b) ? a : b);
 }
 
 /// Dedicated "File" explorer tab:
@@ -95,6 +136,8 @@ class FilesScreen extends StatefulWidget {
 }
 
 class _FilesScreenState extends State<FilesScreen> {
+  static const int _windowStep = 150;
+
   final ScrollController _scrollController = ScrollController();
   final TextEditingController _searchController = TextEditingController();
   final GlobalKey _viewportKey = GlobalKey();
@@ -107,6 +150,10 @@ class _FilesScreenState extends State<FilesScreen> {
   bool _pixivShowAllPhotos = false;
   bool _shuffleEnabled = false;
   int _shuffleSeed = 0;
+
+  // Progressive windowing load balancer for 10,000–50,000+ artists/albums/photos
+  int _visibleWindowLimit = _windowStep;
+  int _currentListTotalCount = 0;
 
   // Multi-select & Drag-select state (works for both Pixiv albums & loose files!)
   bool _isSelectionMode = false;
@@ -121,11 +168,36 @@ class _FilesScreenState extends State<FilesScreen> {
   List<String> _activeSelectableKeys = const [];
 
   @override
+  void initState() {
+    super.initState();
+    _scrollController.addListener(_handleScrollLoadMore);
+  }
+
+  @override
   void dispose() {
     _stopAutoScroll();
+    _scrollController.removeListener(_handleScrollLoadMore);
     _scrollController.dispose();
     _searchController.dispose();
     super.dispose();
+  }
+
+  void _resetWindow() {
+    _visibleWindowLimit = _windowStep;
+  }
+
+  void _handleScrollLoadMore() {
+    if (!_scrollController.hasClients) return;
+    if (_visibleWindowLimit >= _currentListTotalCount) return;
+    final pos = _scrollController.position;
+    if (pos.pixels >= pos.maxScrollExtent - 900) {
+      setState(() {
+        _visibleWindowLimit = math.min(
+          _currentListTotalCount,
+          _visibleWindowLimit + _windowStep,
+        );
+      });
+    }
   }
 
   void _clearSearch() {
@@ -177,6 +249,7 @@ class _FilesScreenState extends State<FilesScreen> {
     }
     setState(() {
       _clearSearch();
+      _resetWindow();
       _pixivShowAllPhotos = false;
       _shuffleEnabled = false;
       if (_selectedCreatorFolder != null) {
@@ -328,11 +401,31 @@ class _FilesScreenState extends State<FilesScreen> {
     _autoScrollTimer = null;
   }
 
-  // Memoized grouping caches so search/selection/scroll do zero redundant O(N log N) work
+  // Memoized grouping & stats caches so search/selection/scroll do ZERO redundant O(N log N) work
   List<ManagedFile>? _cachedFilesRef;
   Map<String, Map<String, List<ManagedFile>>> _cachedByPlatform = const {};
+  Map<String, _PlatformSummary> _cachedPlatformSummaries = const {};
+  List<String> _cachedSortedPlatforms = const [];
   List<ManagedFile>? _cachedAlbumsSourceRef;
   List<_PixivAlbumGroup> _cachedPixivAlbums = const [];
+
+  // Memoized creator list cache
+  Map<String, List<ManagedFile>>? _cachedCreatorsSourceRef;
+  String? _cachedCreatorsPlatform;
+  String _cachedCreatorsQuery = '';
+  _CreatorSortMode? _cachedCreatorsSort;
+  List<_CreatorEntry> _cachedCreatorEntries = const [];
+
+  // Memoized shuffle caches
+  Object? _cachedShuffledAlbumsSourceRef;
+  bool? _cachedShuffledAlbumsFlag;
+  int? _cachedShuffledAlbumsSeed;
+  List<_PixivAlbumGroup> _cachedShuffledAlbums = const [];
+
+  Object? _cachedShuffledFilesSourceRef;
+  bool? _cachedShuffledFilesFlag;
+  int? _cachedShuffledFilesSeed;
+  List<ManagedFile> _cachedShuffledFiles = const [];
 
   Map<String, Map<String, List<ManagedFile>>> _getByPlatform(
     List<ManagedFile> allFiles,
@@ -341,13 +434,46 @@ class _FilesScreenState extends State<FilesScreen> {
       return _cachedByPlatform;
     }
     final byPlatform = <String, Map<String, List<ManagedFile>>>{};
+    final fileCounts = <String, int>{};
+    final privateCounts = <String, int>{};
+    final imageCounts = <String, int>{};
+    final sampleImages = <String, ManagedFile>{};
+
     for (final file in allFiles) {
-      final platMap = byPlatform.putIfAbsent(file.platformFolder, () => {});
+      final plat = file.platformFolder;
+      final platMap = byPlatform.putIfAbsent(plat, () => {});
       platMap.putIfAbsent(file.creatorFolder, () => []).add(file);
+      fileCounts[plat] = (fileCounts[plat] ?? 0) + 1;
+      if (file.isPrivate) {
+        privateCounts[plat] = (privateCounts[plat] ?? 0) + 1;
+      }
+      if (file.mediaKind == MediaKind.image && file.savedPath.isNotEmpty) {
+        imageCounts[plat] = (imageCounts[plat] ?? 0) + 1;
+        sampleImages.putIfAbsent(plat, () => file);
+      }
     }
+
+    final summaries = <String, _PlatformSummary>{};
+    byPlatform.forEach((plat, creators) {
+      summaries[plat] = _PlatformSummary(
+        creatorCount: creators.length,
+        fileCount: fileCounts[plat] ?? 0,
+        privateCount: privateCounts[plat] ?? 0,
+        imageCount: imageCounts[plat] ?? 0,
+        sampleImage: sampleImages[plat],
+      );
+    });
+
+    final sortedPlatforms = byPlatform.keys.toList(growable: false)..sort();
+
     _cachedFilesRef = allFiles;
     _cachedByPlatform = byPlatform;
+    _cachedPlatformSummaries = summaries;
+    _cachedSortedPlatforms = sortedPlatforms;
     _cachedAlbumsSourceRef = null;
+    _cachedCreatorsSourceRef = null;
+    _cachedShuffledAlbumsSourceRef = null;
+    _cachedShuffledFilesSourceRef = null;
     return byPlatform;
   }
 
@@ -370,16 +496,42 @@ class _FilesScreenState extends State<FilesScreen> {
     return groups;
   }
 
-  List<T> _applyShuffle<T>(List<T> input) {
+  List<_PixivAlbumGroup> _applyShuffleAlbums(List<_PixivAlbumGroup> input) {
     if (!_shuffleEnabled || input.length <= 1) return input;
-    final copy = List<T>.from(input);
+    if (identical(_cachedShuffledAlbumsSourceRef, input) &&
+        _cachedShuffledAlbumsFlag == _shuffleEnabled &&
+        _cachedShuffledAlbumsSeed == _shuffleSeed) {
+      return _cachedShuffledAlbums;
+    }
+    final copy = List<_PixivAlbumGroup>.from(input);
     copy.shuffle(math.Random(_shuffleSeed));
+    _cachedShuffledAlbumsSourceRef = input;
+    _cachedShuffledAlbumsFlag = _shuffleEnabled;
+    _cachedShuffledAlbumsSeed = _shuffleSeed;
+    _cachedShuffledAlbums = copy;
+    return copy;
+  }
+
+  List<ManagedFile> _applyShuffleFiles(List<ManagedFile> input) {
+    if (!_shuffleEnabled || input.length <= 1) return input;
+    if (identical(_cachedShuffledFilesSourceRef, input) &&
+        _cachedShuffledFilesFlag == _shuffleEnabled &&
+        _cachedShuffledFilesSeed == _shuffleSeed) {
+      return _cachedShuffledFiles;
+    }
+    final copy = List<ManagedFile>.from(input);
+    copy.shuffle(math.Random(_shuffleSeed));
+    _cachedShuffledFilesSourceRef = input;
+    _cachedShuffledFilesFlag = _shuffleEnabled;
+    _cachedShuffledFilesSeed = _shuffleSeed;
+    _cachedShuffledFiles = copy;
     return copy;
   }
 
   void _toggleShuffle() {
     HapticFeedback.selectionClick();
     setState(() {
+      _resetWindow();
       if (_shuffleEnabled) {
         _shuffleEnabled = false;
       } else {
@@ -406,6 +558,7 @@ class _FilesScreenState extends State<FilesScreen> {
   void _reshuffle() {
     HapticFeedback.selectionClick();
     setState(() {
+      _resetWindow();
       _shuffleEnabled = true;
       _shuffleSeed = DateTime.now().microsecondsSinceEpoch;
     });
@@ -457,11 +610,33 @@ class _FilesScreenState extends State<FilesScreen> {
         ? _groupIntoPixivAlbums(folderFiles)
         : const <_PixivAlbumGroup>[];
     final pixivAlbums = isPixivAlbumView
-        ? _applyShuffle(allPixivAlbums)
+        ? _applyShuffleAlbums(allPixivAlbums)
         : const <_PixivAlbumGroup>[];
 
     final visibleFolderFiles =
-        !isPixivAlbumView ? _applyShuffle(folderFiles) : folderFiles;
+        !isPixivAlbumView ? _applyShuffleFiles(folderFiles) : folderFiles;
+
+    // Pre-compute creator entries (memoized!) when on Level 1 so progressive windowing knows exact total
+    final creatorEntries = (_selectedPlatformFolder != null &&
+            _selectedCreatorFolder == null)
+        ? _resolveCreatorEntries(
+            _selectedPlatformFolder!,
+            byPlatform[_selectedPlatformFolder!] ?? const {},
+          )
+        : const <_CreatorEntry>[];
+
+    // Update active list total count for progressive scroll windowing
+    if (_selectedPlatformFolder == null) {
+      _currentListTotalCount = _cachedSortedPlatforms.length;
+    } else if (_selectedCreatorFolder == null) {
+      _currentListTotalCount = creatorEntries.length;
+    } else if (isPixivAlbumView) {
+      _currentListTotalCount = pixivAlbums.length;
+    } else {
+      _currentListTotalCount = visibleFolderFiles.length;
+    }
+    final renderedWindowCount =
+        math.min(_currentListTotalCount, _visibleWindowLimit);
 
     _activeSelectableKeys = isPixivAlbumView
         ? pixivAlbums.map((a) => a.albumName).toList(growable: false)
@@ -519,7 +694,7 @@ class _FilesScreenState extends State<FilesScreen> {
             onLongPressMoveUpdate: inCreatorFolder ? _onDragSelectMove : null,
             onLongPressEnd: inCreatorFolder ? _onDragSelectEnd : null,
             child: RefreshIndicator(
-              onRefresh: widget.manager.refreshManagedFiles,
+              onRefresh: () => widget.manager.refreshManagedFiles(force: true),
               child: CustomScrollView(
                 controller: _scrollController,
                 keyboardDismissBehavior:
@@ -565,6 +740,7 @@ class _FilesScreenState extends State<FilesScreen> {
                                         _pixivShowAllPhotos = false;
                                         _shuffleEnabled = false;
                                         _clearSearch();
+                                        _resetWindow();
                                         _isSelectionMode = false;
                                         _selectedKeys.clear();
                                       });
@@ -584,6 +760,7 @@ class _FilesScreenState extends State<FilesScreen> {
                                           _pixivShowAllPhotos = false;
                                           _shuffleEnabled = false;
                                           _clearSearch();
+                                          _resetWindow();
                                           _isSelectionMode = false;
                                           _selectedKeys.clear();
                                         });
@@ -607,8 +784,10 @@ class _FilesScreenState extends State<FilesScreen> {
                               const SizedBox(height: 10),
                               TextField(
                                 controller: _searchController,
-                                onChanged: (v) =>
-                                    setState(() => _searchQuery = v),
+                                onChanged: (v) => setState(() {
+                                  _searchQuery = v;
+                                  _resetWindow();
+                                }),
                                 decoration: InputDecoration(
                                   isDense: true,
                                   hintText: _isPixivPlatform
@@ -618,8 +797,10 @@ class _FilesScreenState extends State<FilesScreen> {
                                       const Icon(Icons.search_rounded, size: 20),
                                   suffixIcon: _searchQuery.isNotEmpty
                                       ? IconButton(
-                                          onPressed: () =>
-                                              setState(_clearSearch),
+                                          onPressed: () => setState(() {
+                                            _clearSearch();
+                                            _resetWindow();
+                                          }),
                                           icon: const Icon(Icons.close_rounded,
                                               size: 18),
                                           tooltip: 'Hapus pencarian',
@@ -701,6 +882,7 @@ class _FilesScreenState extends State<FilesScreen> {
                           }
                           setState(() {
                             _pixivShowAllPhotos = false;
+                            _resetWindow();
                             _isSelectionMode = false;
                             _selectedKeys.clear();
                           });
@@ -715,6 +897,7 @@ class _FilesScreenState extends State<FilesScreen> {
                           }
                           setState(() {
                             _pixivShowAllPhotos = true;
+                            _resetWindow();
                             _isSelectionMode = false;
                             _selectedKeys.clear();
                           });
@@ -782,25 +965,57 @@ class _FilesScreenState extends State<FilesScreen> {
                     _buildAllPlatformPhotosMenuSliver(
                       context,
                       _selectedPlatformFolder!,
-                      byPlatform[_selectedPlatformFolder!] ?? const {},
                     ),
                     _buildCreatorFoldersSliver(
                       _selectedPlatformFolder!,
-                      byPlatform[_selectedPlatformFolder!] ?? const {},
+                      creatorEntries,
+                      renderedCount: renderedWindowCount,
                     ),
+                    if (renderedWindowCount < creatorEntries.length)
+                      _buildLoadMoreSliver(
+                        renderedCount: renderedWindowCount,
+                        totalCount: creatorEntries.length,
+                        unitLabel: _isPixivPlatform ? 'artist' : 'kreator',
+                      ),
                   ]
-                  else if (isPixivAlbumView)
+                  else if (isPixivAlbumView) ...[
                     (pixivAlbums.isEmpty
                         ? _buildEmptySearchSliver(context, 'Album tidak ditemukan')
                         : (_viewMode == _FileViewMode.gallery
-                            ? _buildPixivAlbumsGridSliver(pixivAlbums)
-                            : _buildPixivAlbumsRowSliver(pixivAlbums)))
+                            ? _buildPixivAlbumsGridSliver(
+                                pixivAlbums,
+                                renderedCount: renderedWindowCount,
+                              )
+                            : _buildPixivAlbumsRowSliver(
+                                pixivAlbums,
+                                renderedCount: renderedWindowCount,
+                              ))),
+                    if (renderedWindowCount < pixivAlbums.length)
+                      _buildLoadMoreSliver(
+                        renderedCount: renderedWindowCount,
+                        totalCount: pixivAlbums.length,
+                        unitLabel: 'album',
+                      ),
+                  ]
                   else if (visibleFolderFiles.isEmpty)
                     _buildEmptySearchSliver(context, 'File tidak ditemukan')
-                  else if (_viewMode == _FileViewMode.gallery)
-                    _buildFilesGallerySliver(visibleFolderFiles)
-                  else
-                    _buildFilesRowSliver(visibleFolderFiles),
+                  else ...[
+                    (_viewMode == _FileViewMode.gallery
+                        ? _buildFilesGallerySliver(
+                            visibleFolderFiles,
+                            renderedCount: renderedWindowCount,
+                          )
+                        : _buildFilesRowSliver(
+                            visibleFolderFiles,
+                            renderedCount: renderedWindowCount,
+                          )),
+                    if (renderedWindowCount < visibleFolderFiles.length)
+                      _buildLoadMoreSliver(
+                        renderedCount: renderedWindowCount,
+                        totalCount: visibleFolderFiles.length,
+                        unitLabel: 'file',
+                      ),
+                  ],
                 ],
               ),
             ),
@@ -905,6 +1120,17 @@ class _FilesScreenState extends State<FilesScreen> {
             onPressed: () {
               Navigator.of(context).push(
                 MaterialPageRoute<void>(
+                  builder: (_) => CuratedCatalogScreen(manager: widget.manager),
+                ),
+              );
+            },
+            icon: const Icon(Icons.bookmarks_outlined),
+            tooltip: 'Katalog Kurasi & Pulihkan',
+          ),
+          IconButton(
+            onPressed: () {
+              Navigator.of(context).push(
+                MaterialPageRoute<void>(
                   builder: (_) => TagExplorerScreen(manager: widget.manager),
                 ),
               );
@@ -938,7 +1164,7 @@ class _FilesScreenState extends State<FilesScreen> {
             tooltip: 'Pilih banyak',
           ),
         IconButton(
-          onPressed: widget.manager.refreshManagedFiles,
+          onPressed: () => widget.manager.refreshManagedFiles(force: true),
           icon: const Icon(Icons.refresh_rounded),
           tooltip: 'Segarkan folder',
         ),
@@ -952,7 +1178,7 @@ class _FilesScreenState extends State<FilesScreen> {
   Widget _buildPlatformFoldersSliver(
     Map<String, Map<String, List<ManagedFile>>> byPlatform,
   ) {
-    final platformNames = byPlatform.keys.toList()..sort();
+    final platformNames = _cachedSortedPlatforms;
 
     return SliverPadding(
       padding: const EdgeInsets.fromLTRB(16, 4, 16, 28),
@@ -966,9 +1192,10 @@ class _FilesScreenState extends State<FilesScreen> {
         delegate: SliverChildBuilderDelegate(
           (context, index) {
             final name = platformNames[index];
-            final creators = byPlatform[name]!;
-            final allPlatFiles = creators.values.expand((e) => e).toList();
-            final privateCount = allPlatFiles.where((f) => f.isPrivate).length;
+            final summary = _cachedPlatformSummaries[name];
+            final creatorCount = summary?.creatorCount ?? 0;
+            final fileCount = summary?.fileCount ?? 0;
+            final privateCount = summary?.privateCount ?? 0;
             final platform = MediaPlatformMeta.fromKey(name);
 
             return Card(
@@ -976,6 +1203,7 @@ class _FilesScreenState extends State<FilesScreen> {
               child: InkWell(
                 onTap: () => setState(() {
                   _clearSearch();
+                  _resetWindow();
                   _selectedPlatformFolder = name;
                 }),
                 child: Padding(
@@ -1051,7 +1279,7 @@ class _FilesScreenState extends State<FilesScreen> {
                       ),
                       const SizedBox(height: 2),
                       Text(
-                        '${creators.length} akun • ${allPlatFiles.length} file',
+                        '$creatorCount akun • $fileCount file',
                         style: Theme.of(context).textTheme.bodySmall?.copyWith(
                               color: Theme.of(context)
                                   .colorScheme
@@ -1076,24 +1304,16 @@ class _FilesScreenState extends State<FilesScreen> {
   Widget _buildAllPlatformPhotosMenuSliver(
     BuildContext context,
     String platformFolder,
-    Map<String, List<ManagedFile>> byCreator,
   ) {
-    final allPhotos = <ManagedFile>[];
-    for (final list in byCreator.values) {
-      for (final f in list) {
-        if (f.mediaKind == MediaKind.image && f.savedPath.isNotEmpty) {
-          allPhotos.add(f);
-        }
-      }
-    }
-    if (allPhotos.isEmpty) {
+    final summary = _cachedPlatformSummaries[platformFolder];
+    if (summary == null || summary.imageCount == 0 || summary.sampleImage == null) {
       return const SliverToBoxAdapter(child: SizedBox.shrink());
     }
 
     final theme = Theme.of(context);
     final platform = MediaPlatformMeta.fromKey(platformFolder);
     final isPixiv = platform == MediaPlatform.pixiv;
-    final sample = allPhotos.first;
+    final sample = summary.sampleImage!;
 
     return SliverToBoxAdapter(
       child: Padding(
@@ -1175,7 +1395,7 @@ class _FilesScreenState extends State<FilesScreen> {
                         ),
                         const SizedBox(height: 2),
                         Text(
-                          '${allPhotos.length} foto • ${byCreator.length} ${isPixiv ? 'artist' : 'kreator'} • Acak & slide',
+                          '${summary.imageCount} foto • ${summary.creatorCount} ${isPixiv ? 'artist' : 'kreator'} • Acak & slide',
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                           style: theme.textTheme.bodySmall?.copyWith(
@@ -1214,24 +1434,33 @@ class _FilesScreenState extends State<FilesScreen> {
       onSelected: (_) {
         if (_creatorSortMode == mode) return;
         HapticFeedback.selectionClick();
-        setState(() => _creatorSortMode = mode);
+        setState(() {
+          _creatorSortMode = mode;
+          _resetWindow();
+        });
       },
     );
   }
 
-  // ===========================================================================
-  // LEVEL 1: Folders by Username / Creator inside Platform
-  // ===========================================================================
-  Widget _buildCreatorFoldersSliver(
+  /// Memoized creator statistics & sorting — prevents O(30,000) rescan on every scroll/rebuild.
+  List<_CreatorEntry> _resolveCreatorEntries(
     String platformFolder,
     Map<String, List<ManagedFile>> byCreator,
   ) {
     final q = _searchQuery.trim().toLowerCase();
     final platform = MediaPlatformMeta.fromKey(platformFolder);
     final isPixiv = platform == MediaPlatform.pixiv;
-    final effectiveSort = (!isPixiv && _creatorSortMode == _CreatorSortMode.albumsDesc)
-        ? _CreatorSortMode.photosDesc
-        : _creatorSortMode;
+    final effectiveSort =
+        (!isPixiv && _creatorSortMode == _CreatorSortMode.albumsDesc)
+            ? _CreatorSortMode.photosDesc
+            : _creatorSortMode;
+
+    if (identical(_cachedCreatorsSourceRef, byCreator) &&
+        _cachedCreatorsPlatform == platformFolder &&
+        _cachedCreatorsQuery == q &&
+        _cachedCreatorsSort == effectiveSort) {
+      return _cachedCreatorEntries;
+    }
 
     final entries = <_CreatorEntry>[];
     for (final entry in byCreator.entries) {
@@ -1290,6 +1519,49 @@ class _FilesScreenState extends State<FilesScreen> {
       return a.name.toLowerCase().compareTo(b.name.toLowerCase());
     });
 
+    _cachedCreatorsSourceRef = byCreator;
+    _cachedCreatorsPlatform = platformFolder;
+    _cachedCreatorsQuery = q;
+    _cachedCreatorsSort = effectiveSort;
+    _cachedCreatorEntries = List<_CreatorEntry>.unmodifiable(entries);
+    return _cachedCreatorEntries;
+  }
+
+  Widget _buildLoadMoreSliver({
+    required int renderedCount,
+    required int totalCount,
+    required String unitLabel,
+  }) {
+    return SliverToBoxAdapter(
+      child: Padding(
+        padding: EdgeInsets.fromLTRB(16, 4, 16, _isSelectionMode ? 104 : 28),
+        child: Center(
+          child: OutlinedButton.icon(
+            onPressed: () => setState(() {
+              _visibleWindowLimit = math.min(
+                totalCount,
+                _visibleWindowLimit + _windowStep,
+              );
+            }),
+            icon: const Icon(Icons.expand_more_rounded, size: 18),
+            label: Text('Muat lagi ($renderedCount / $totalCount $unitLabel)'),
+          ),
+        ),
+      ),
+    );
+  }
+
+  // ===========================================================================
+  // LEVEL 1: Folders by Username / Creator inside Platform
+  // ===========================================================================
+  Widget _buildCreatorFoldersSliver(
+    String platformFolder,
+    List<_CreatorEntry> entries, {
+    required int renderedCount,
+  }) {
+    final platform = MediaPlatformMeta.fromKey(platformFolder);
+    final isPixiv = platform == MediaPlatform.pixiv;
+
     if (entries.isEmpty) {
       return _buildEmptySearchSliver(
         context,
@@ -1298,9 +1570,14 @@ class _FilesScreenState extends State<FilesScreen> {
     }
 
     return SliverPadding(
-      padding: const EdgeInsets.fromLTRB(16, 4, 16, 28),
+      padding: EdgeInsets.fromLTRB(
+        16,
+        4,
+        16,
+        renderedCount < entries.length ? 8 : 28,
+      ),
       sliver: SliverList.separated(
-        itemCount: entries.length,
+        itemCount: renderedCount,
         separatorBuilder: (_, _) => const SizedBox(height: 10),
         itemBuilder: (context, index) {
           final item = entries[index];
@@ -1414,6 +1691,7 @@ class _FilesScreenState extends State<FilesScreen> {
                 FocusManager.instance.primaryFocus?.unfocus();
                 setState(() {
                   _clearSearch();
+                  _resetWindow();
                   _pixivShowAllPhotos = false;
                   _shuffleEnabled = false;
                   _selectedCreatorFolder = creator;
@@ -1770,8 +2048,13 @@ class _FilesScreenState extends State<FilesScreen> {
   // ===========================================================================
   // LEVEL 2 (PIXIV): PER-ALBUM / PER-HALAMAN GRID (2 Columns)
   // ===========================================================================
-  Widget _buildPixivAlbumsGridSliver(List<_PixivAlbumGroup> albums) {
-    final bottomPad = _isSelectionMode ? 104.0 : 28.0;
+  Widget _buildPixivAlbumsGridSliver(
+    List<_PixivAlbumGroup> albums, {
+    required int renderedCount,
+  }) {
+    final bottomPad = renderedCount < albums.length
+        ? 8.0
+        : (_isSelectionMode ? 104.0 : 28.0);
     final theme = Theme.of(context);
 
     return SliverPadding(
@@ -1989,7 +2272,9 @@ class _FilesScreenState extends State<FilesScreen> {
               ),
             );
           },
-          childCount: albums.length,
+          childCount: renderedCount,
+          addAutomaticKeepAlives: false,
+          addRepaintBoundaries: true,
         ),
       ),
     );
@@ -1998,14 +2283,19 @@ class _FilesScreenState extends State<FilesScreen> {
   // ===========================================================================
   // LEVEL 2 (PIXIV): PER-ALBUM ROW LIST
   // ===========================================================================
-  Widget _buildPixivAlbumsRowSliver(List<_PixivAlbumGroup> albums) {
-    final bottomPad = _isSelectionMode ? 104.0 : 28.0;
+  Widget _buildPixivAlbumsRowSliver(
+    List<_PixivAlbumGroup> albums, {
+    required int renderedCount,
+  }) {
+    final bottomPad = renderedCount < albums.length
+        ? 8.0
+        : (_isSelectionMode ? 104.0 : 28.0);
     final theme = Theme.of(context);
 
     return SliverPadding(
       padding: EdgeInsets.fromLTRB(14, 2, 14, bottomPad),
       sliver: SliverList.separated(
-        itemCount: albums.length,
+        itemCount: renderedCount,
         separatorBuilder: (_, _) => const SizedBox(height: 8),
         itemBuilder: (context, index) {
           final album = albums[index];
@@ -2151,8 +2441,13 @@ class _FilesScreenState extends State<FilesScreen> {
   // ===========================================================================
   // LEVEL 2 (NON-PIXIV): GALLERY GRID & ROW LIST
   // ===========================================================================
-  Widget _buildFilesGallerySliver(List<ManagedFile> files) {
-    final bottomPad = _isSelectionMode ? 104.0 : 28.0;
+  Widget _buildFilesGallerySliver(
+    List<ManagedFile> files, {
+    required int renderedCount,
+  }) {
+    final bottomPad = renderedCount < files.length
+        ? 8.0
+        : (_isSelectionMode ? 104.0 : 28.0);
 
     return SliverPadding(
       padding: EdgeInsets.fromLTRB(10, 2, 10, bottomPad),
@@ -2187,20 +2482,27 @@ class _FilesScreenState extends State<FilesScreen> {
               ),
             );
           },
-          childCount: files.length,
+          childCount: renderedCount,
+          addAutomaticKeepAlives: false,
+          addRepaintBoundaries: true,
         ),
       ),
     );
   }
 
-  Widget _buildFilesRowSliver(List<ManagedFile> files) {
-    final bottomPad = _isSelectionMode ? 104.0 : 28.0;
+  Widget _buildFilesRowSliver(
+    List<ManagedFile> files, {
+    required int renderedCount,
+  }) {
+    final bottomPad = renderedCount < files.length
+        ? 8.0
+        : (_isSelectionMode ? 104.0 : 28.0);
     final theme = Theme.of(context);
 
     return SliverPadding(
       padding: EdgeInsets.fromLTRB(14, 2, 14, bottomPad),
       sliver: SliverList.separated(
-        itemCount: files.length,
+        itemCount: renderedCount,
         separatorBuilder: (_, _) => const SizedBox(height: 8),
         itemBuilder: (context, index) {
           final file = files[index];

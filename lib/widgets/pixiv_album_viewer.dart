@@ -186,6 +186,10 @@ class _PixivAlbumViewerState extends State<PixivAlbumViewer> {
   final Map<int, ScrollController> _scrollControllers = {};
   final Map<int, GlobalKey> _viewportKeys = {};
 
+  // Route-aware rebuild gating: 0% CPU while covered by FileGalleryViewer!
+  bool _isRouteCurrent = true;
+  bool _dirtyWhileHidden = false;
+
   // Memoized grouping cache so horizontal album slides do ZERO O(N) scan/sort!
   List<ManagedFile>? _cachedFilesRef;
   int _cachedRatingsRev = -1;
@@ -250,15 +254,31 @@ class _PixivAlbumViewerState extends State<PixivAlbumViewer> {
     widget.manager.addListener(_onManagerUpdated);
   }
 
-  /// Only rebuilds when visible files, photo ratings, or album tags change —
-  /// ignoring background download progress ticks so sliding stays 100% jank-free!
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final current = ModalRoute.isCurrentOf(context) ?? true;
+    _isRouteCurrent = current;
+    if (current && _dirtyWhileHidden) {
+      _dirtyWhileHidden = false;
+    }
+  }
+
+  /// Only rebuilds when visible files, photo ratings, or album tags change AND
+  /// this viewer is the active route (skipping hidden rebuilds when covered by
+  /// [FileGalleryViewer] during rapid Fast Delete or rating edits!).
   void _onManagerUpdated() {
     if (!mounted) return;
-    if (!identical(_cachedFilesRef, widget.manager.visibleManagedFiles) ||
-        _cachedRatingsRev != widget.manager.photoRatingsRevision ||
-        _cachedAlbumMetaRev != widget.manager.albumMetadataRevision) {
-      setState(() {});
+    final needsRebuild =
+        !identical(_cachedFilesRef, widget.manager.visibleManagedFiles) ||
+            _cachedRatingsRev != widget.manager.photoRatingsRevision ||
+            _cachedAlbumMetaRev != widget.manager.albumMetadataRevision;
+    if (!needsRebuild) return;
+    if (!_isRouteCurrent) {
+      _dirtyWhileHidden = true;
+      return;
     }
+    setState(() {});
   }
 
   @override
@@ -289,11 +309,7 @@ class _PixivAlbumViewerState extends State<PixivAlbumViewer> {
     }
     final grouped = <String, List<ManagedFile>>{};
     for (final f in allFiles) {
-      final key = AlbumMetadata.buildLookupKey(
-        f.platformFolder,
-        f.creatorFolder,
-        f.effectiveAlbumName,
-      );
+      final key = f.albumLookupKey;
       if (_allowedAlbumKeys.contains(key)) {
         grouped.putIfAbsent(key, () => []).add(f);
       }

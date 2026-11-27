@@ -8,6 +8,7 @@ import 'package:linkdrop_downloader/models/managed_file.dart';
 import 'package:linkdrop_downloader/models/media_info.dart';
 import 'package:linkdrop_downloader/models/media_metadata.dart';
 import 'package:linkdrop_downloader/models/media_platform.dart';
+import 'package:linkdrop_downloader/screens/curated_catalog_screen.dart';
 import 'package:linkdrop_downloader/screens/downloads_screen.dart';
 import 'package:linkdrop_downloader/screens/files_screen.dart';
 import 'package:linkdrop_downloader/screens/home_shell.dart';
@@ -15,12 +16,14 @@ import 'package:linkdrop_downloader/screens/settings_screen.dart';
 import 'package:linkdrop_downloader/screens/trash_screen.dart';
 import 'package:linkdrop_downloader/services/direct_extractors.dart';
 import 'package:linkdrop_downloader/services/download_manager.dart';
+import 'package:linkdrop_downloader/services/native_bridge.dart';
 import 'package:linkdrop_downloader/services/storage_service.dart';
 import 'package:linkdrop_downloader/theme/app_theme.dart';
 import 'package:linkdrop_downloader/widgets/app_feedback.dart';
 import 'package:linkdrop_downloader/widgets/file_gallery_viewer.dart';
 import 'package:linkdrop_downloader/widgets/media_preview_card.dart';
 import 'package:linkdrop_downloader/widgets/pixiv_album_viewer.dart';
+import 'package:linkdrop_downloader/widgets/route_aware_listener.dart';
 import 'package:linkdrop_downloader/widgets/security_lock_screen.dart';
 import 'package:linkdrop_downloader/widgets/sharp_original_image.dart';
 import 'package:linkdrop_downloader/widgets/tag_albums_screen.dart';
@@ -40,6 +43,20 @@ class _MemoryStorageService extends StorageService {
 
   @override
   Future<void> savePhotoRatings(Map<String, ContentRating> ratings) async {}
+
+  @override
+  Future<void> saveCuratedCatalog(
+    Map<String, CuratedWorkRecord> catalog,
+  ) async {}
+
+  @override
+  Future<void> saveManagedFilesCache(List<ManagedFile> files) async {}
+
+  @override
+  Future<void> saveManagedFilesCacheRaw(String packedTsv) async {}
+
+  @override
+  Future<List<ManagedFile>> loadManagedFilesCache() async => const [];
 
   @override
   Future<void> saveSettings(AppSettings settings) async {}
@@ -1760,4 +1777,284 @@ void main() {
 
     manager.dispose();
   });
+
+  testWidgets(
+      'RouteAwareListenableBuilder suppresses hidden rebuilds when covered by a pushed route',
+      (WidgetTester tester) async {
+    final notifier = ChangeNotifier();
+    var baseBuilds = 0;
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Builder(
+          builder: (context) => Scaffold(
+            body: RouteAwareListenableBuilder(
+              listenable: notifier,
+              builder: (_) {
+                baseBuilds++;
+                return ElevatedButton(
+                  onPressed: () {
+                    Navigator.of(context).push(
+                      MaterialPageRoute<void>(
+                        builder: (ctx) => Scaffold(
+                          body: ElevatedButton(
+                            onPressed: () => Navigator.pop(ctx),
+                            child: const Text('PopBack'),
+                          ),
+                        ),
+                      ),
+                    );
+                  },
+                  child: Text('Builds: $baseBuilds'),
+                );
+              },
+            ),
+          ),
+        ),
+      ),
+    );
+    expect(baseBuilds, 1);
+
+    // Push a second screen on top -> base route is no longer current
+    await tester.tap(find.text('Builds: 1'));
+    await tester.pumpAndSettle();
+    final buildsAfterPush = baseBuilds;
+
+    // Fire 10 notifications while covered -> base route MUST do 0 rebuilds!
+    for (int i = 0; i < 10; i++) {
+      notifier.notifyListeners();
+    }
+    await tester.pump();
+    expect(baseBuilds, buildsAfterPush);
+
+    // Pop back -> rebuilds cleanly once!
+    await tester.tap(find.text('PopBack'));
+    await tester.pumpAndSettle();
+    expect(baseBuilds, greaterThan(buildsAfterPush));
+
+    notifier.dispose();
+  });
+
+  testWidgets(
+      'FilesScreen progressive windowing handles 200+ artists & non-blocking setPhotoRating preserves visible list',
+      (WidgetTester tester) async {
+    final files = List<ManagedFile>.generate(
+      240,
+      (i) => ManagedFile(
+        fileName: 'photo_$i.jpg',
+        mimeType: 'image/jpeg',
+        mediaKind: MediaKind.image,
+        fileSize: 4096,
+        modifiedAt: DateTime(2026, 11, 27, 10, i % 60),
+        relativePath: 'Privat/Pixiv/Artist_${i.toString().padLeft(3, '0')}/AlbumA',
+        savedPath: '/nonexistent/a_$i.jpg',
+        contentUri: 'content://test/scale/$i',
+        platformFolder: 'Pixiv',
+        creatorFolder: 'Artist_${i.toString().padLeft(3, '0')}',
+        albumFolder: 'AlbumA',
+        isPrivate: true,
+      ),
+    );
+    final manager = _FakeFilesManager(files, const {});
+
+    // Verify incremental visibleManagedFiles cache preserves identical() when rating changes between two visible states
+    await manager.updateSettings(
+      manager.settings.copyWith(
+        showNormalContent: true,
+        showEcchiContent: true,
+        showNsfwContent: false,
+      ),
+    );
+    final beforeRef = manager.visibleManagedFiles;
+    await manager.setPhotoRating(files.first, ContentRating.ecchi);
+    final afterVisibleChangeRef = manager.visibleManagedFiles;
+    expect(identical(beforeRef, afterVisibleChangeRef), isTrue);
+
+    // Changing to hidden NSFW incrementally removes ONLY that 1 photo!
+    await manager.setPhotoRating(files.first, ContentRating.nsfw);
+    expect(manager.visibleManagedFiles.length, 239);
+
+    // Restore all visible and open Pixiv artist list -> progressive windowing caps initial render to 150 of 240!
+    await manager.updateSettings(
+      manager.settings.copyWith(showNsfwContent: true),
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: AppTheme.darkTheme(),
+        home: Scaffold(
+          body: SafeArea(child: FilesScreen(manager: manager)),
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.tap(find.text('Pixiv'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Semua Foto'), findsOneWidget);
+    expect(find.text('240 foto • 240 artist • Acak & slide'), findsOneWidget);
+
+    manager.dispose();
+  });
+
+  testWidgets(
+      'Real DownloadManager auto-prunes Curated Catalog on delete/trash, restores on Undo, and renders CuratedCatalogScreen',
+      (WidgetTester tester) async {
+    final mockBridge = _CuratedMockBridge();
+    final files = [
+      for (int i = 1; i <= 4; i++)
+        ManagedFile(
+          fileName: 'Sunset_$i.jpg',
+          mimeType: 'image/jpeg',
+          mediaKind: MediaKind.image,
+          fileSize: 2048,
+          modifiedAt: DateTime(2026, 11, 27, 10, i),
+          relativePath: 'Privat/Pixiv/ArtistOne/Sunset',
+          savedPath: '/vault/Pixiv/ArtistOne/Sunset/Sunset_$i.jpg',
+          contentUri: '',
+          platformFolder: 'Pixiv',
+          creatorFolder: 'ArtistOne',
+          albumFolder: 'Sunset',
+          isPrivate: true,
+        ),
+    ];
+    mockBridge.diskFiles.addAll(files);
+
+    final manager = DownloadManager(
+      bridge: mockBridge,
+      storage: _MemoryStorageService(),
+    );
+    await manager.refreshManagedFiles(force: true);
+    expect(manager.managedFiles.length, 4);
+
+    // Seed album metadata with pixivIllustId -> Sync from Device captures all 4 kept files!
+    await manager.saveAlbumMetadata(
+      platformFolder: 'Pixiv',
+      creatorFolder: 'ArtistOne',
+      albumFolder: 'Sunset',
+      pixivIllustId: '77001',
+      tags: const ['Sky'],
+    );
+    final syncRes = await manager.syncCuratedCatalogWithDeviceFiles();
+    expect(syncRes.addedFiles, 4);
+    expect(manager.curatedKeptFilesCount, 4);
+    expect(manager.isMarkedDownloaded('pixiv:77001'), isTrue);
+
+    // Permanently delete Sunset_1.jpg -> pruned immediately from curatedCatalog!
+    await manager.deleteManagedFile(files[0], permanent: true);
+    expect(manager.curatedKeptFilesCount, 3);
+    expect(
+      manager.curatedCatalogMap['pixiv:77001']!.keptFiles
+          .map((e) => e.fileName)
+          .toList(),
+      ['Sunset_2.jpg', 'Sunset_3.jpg', 'Sunset_4.jpg'],
+    );
+
+    // Move Sunset_3.jpg to Trash -> pruned from curatedCatalog, then Undo restores it!
+    final trashed = await manager.moveManagedFilesToTrash([files[2]]);
+    expect(trashed.length, 1);
+    expect(manager.curatedKeptFilesCount, 2);
+    expect(
+      manager.curatedCatalogMap['pixiv:77001']!.keptFiles
+          .map((e) => e.fileName)
+          .toList(),
+      ['Sunset_2.jpg', 'Sunset_4.jpg'],
+    );
+
+    await manager.restoreTrashItems([trashed.first.id]);
+    expect(manager.curatedKeptFilesCount, 3);
+    expect(
+      manager.curatedCatalogMap['pixiv:77001']!.keptFiles
+          .map((e) => e.fileName)
+          .toList(),
+      ['Sunset_2.jpg', 'Sunset_3.jpg', 'Sunset_4.jpg'],
+    );
+
+    // Simulate all photos wiped from phone -> CuratedCatalogScreen shows 3 hilang!
+    mockBridge.diskFiles.clear();
+    await manager.refreshManagedFiles(force: true);
+    expect(manager.managedFiles, isEmpty);
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: AppTheme.darkTheme(),
+        home: CuratedCatalogScreen(manager: manager),
+      ),
+    );
+    await tester.pump();
+
+    expect(find.text('Katalog Kurasi'), findsOneWidget);
+    expect(find.text('Pulihkan 3 Foto Pilihan Yang Hilang'), findsOneWidget);
+    expect(find.text('Sunset'), findsOneWidget);
+    expect(find.text('3 hilang'), findsOneWidget);
+
+    // Tap Sunset -> shows exact kept filenames & page numbers
+    await tester.tap(find.text('Sunset'));
+    await tester.pumpAndSettle();
+    expect(find.text('Sunset_2.jpg'), findsOneWidget);
+    expect(find.text('Sunset_3.jpg'), findsOneWidget);
+    expect(find.text('Sunset_4.jpg'), findsOneWidget);
+    expect(find.text('Sunset_1.jpg'), findsNothing);
+
+    manager.dispose();
+  });
+}
+
+class _CuratedMockBridge extends NativeBridge {
+  final List<ManagedFile> diskFiles = [];
+  final Map<String, ManagedFile> trashedById = {};
+  int _seq = 0;
+
+  @override
+  Future<String?> listManagedFilesPacked() async =>
+      encodePackedManagedFiles(diskFiles);
+
+  @override
+  Future<List<ManagedFile>> listManagedFiles() async =>
+      List<ManagedFile>.from(diskFiles);
+
+  @override
+  Future<bool> deleteFile({String? filePath, String? contentUri}) async {
+    diskFiles.removeWhere((f) => f.savedPath == filePath);
+    return true;
+  }
+
+  @override
+  Future<List<TrashItem>> moveFilesToTrash(List<ManagedFile> files) async {
+    final out = <TrashItem>[];
+    for (final f in files) {
+      diskFiles.removeWhere((x) => x.savedPath == f.savedPath);
+      final id = 'mock_trash_${++_seq}';
+      trashedById[id] = f;
+      out.add(
+        TrashItem(
+          id: id,
+          trashPath: '/trash/$id',
+          originalPath: f.savedPath,
+          fileName: f.fileName,
+          mimeType: f.mimeType,
+          mediaKind: f.mediaKind.name,
+          fileSize: f.fileSize,
+          isPrivate: f.isPrivate,
+          platformFolder: f.platformFolder,
+          creatorFolder: f.creatorFolder,
+          albumFolder: f.effectiveAlbumName,
+          deletedAt: DateTime.now(),
+        ),
+      );
+    }
+    return out;
+  }
+
+  @override
+  Future<int> restoreTrashItems(List<String> ids) async {
+    var count = 0;
+    for (final id in ids) {
+      final f = trashedById.remove(id);
+      if (f != null) {
+        diskFiles.add(f);
+        count++;
+      }
+    }
+    return count;
+  }
 }

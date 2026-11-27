@@ -8,6 +8,7 @@ import '../services/download_manager.dart';
 import '../services/storage_service.dart';
 import '../widgets/app_feedback.dart';
 import '../widgets/security_lock_screen.dart';
+import 'curated_catalog_screen.dart';
 import 'trash_screen.dart';
 
 /// Main Settings hub organized into clean categories that navigate to focused
@@ -740,6 +741,39 @@ class _BackupDataSubmenu extends StatelessWidget {
             children: [
               Card(
                 clipBehavior: Clip.antiAlias,
+                child: ListTile(
+                  leading: Container(
+                    width: 40,
+                    height: 40,
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF22C55E).withValues(alpha: 0.15),
+                      borderRadius: BorderRadius.circular(11),
+                    ),
+                    child: const Icon(
+                      Icons.bookmarks_rounded,
+                      color: Color(0xFF22C55E),
+                    ),
+                  ),
+                  title: const Text(
+                    'Katalog Kurasi & Pulihkan Terpilih',
+                    style: TextStyle(fontWeight: FontWeight.w700),
+                  ),
+                  subtitle: Text(
+                    '${manager.curatedKeptFilesCount} foto pilihan (${manager.curatedKeptWorksCount} album) tercatat — yang dihapus tidak akan diunduh ulang',
+                  ),
+                  trailing: const Icon(Icons.chevron_right_rounded),
+                  onTap: () => Navigator.of(context).push<void>(
+                    MaterialPageRoute<void>(
+                      builder: (_) => CuratedCatalogScreen(manager: manager),
+                    ),
+                  ),
+                ),
+              ),
+
+              const SizedBox(height: 14),
+
+              Card(
+                clipBehavior: Clip.antiAlias,
                 child: Column(
                   children: [
                     ListTile(
@@ -749,7 +783,7 @@ class _BackupDataSubmenu extends StatelessWidget {
                       ),
                       title: const Text('Ekspor & Impor Pengaturan'),
                       subtitle: Text(
-                        '${manager.downloadedMarkers.length} penanda • ${manager.creatorProfiles.length} link artis • ${manager.items.length} riwayat',
+                        '${manager.curatedKeptFilesCount} foto kurasi • ${manager.downloadedMarkers.length} penanda • ${manager.creatorProfiles.length} link artis',
                       ),
                     ),
                     Padding(
@@ -1780,6 +1814,10 @@ Future<void> _confirmAndApplyBackup(
             Text('• Tag album tersimpan: ${bundle.albumMetadata.length}'),
           if (bundle.photoRatings.isNotEmpty)
             Text('• Foto bertanda Ecchi/NSFW: ${bundle.photoRatings.length}'),
+          if (bundle.curatedCatalog.isNotEmpty)
+            Text(
+              '• Katalog kurasi terpilih: ${bundle.curatedCatalog.length} album (${bundle.curatedCatalog.values.fold<int>(0, (s, w) => s + w.keptFiles.length)} foto)',
+            ),
           Text('• Riwayat & antrean terjeda: ${bundle.history.length}'),
           const SizedBox(height: 12),
           Text(

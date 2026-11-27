@@ -8,6 +8,7 @@ import '../models/media_metadata.dart';
 import '../services/download_manager.dart';
 import 'app_feedback.dart';
 import 'pixiv_album_viewer.dart';
+import 'route_aware_listener.dart';
 
 /// Displays all visible albums across all artists/platforms that share [tag],
 /// with live **Multi-Tag Refinement** (`+ #Tag` AND filter, `- #Tag` exclude)
@@ -78,9 +79,9 @@ class _TagAlbumsScreenState extends State<TagAlbumsScreen> {
     final isR18 = primaryTag.toLowerCase().contains('r-18');
     final accent = isR18 ? const Color(0xFFEF4444) : theme.colorScheme.primary;
 
-    return AnimatedBuilder(
-      animation: widget.manager,
-      builder: (context, _) {
+    return RouteAwareListenableBuilder(
+      listenable: widget.manager,
+      builder: (context) {
         final matches = widget.manager.findAlbumsByTags(
           includeTags: _includeTags,
           excludeTags: _excludeTags,
@@ -410,9 +411,9 @@ class _TagExplorerScreenState extends State<TagExplorerScreen> {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    return AnimatedBuilder(
-      animation: widget.manager,
-      builder: (context, _) {
+    return RouteAwareListenableBuilder(
+      listenable: widget.manager,
+      builder: (context) {
         final allTags = widget.manager.getAllTagSummaries();
         final query = _searchController.text.trim().toLowerCase();
         final visibleTags = allTags.where((s) {
