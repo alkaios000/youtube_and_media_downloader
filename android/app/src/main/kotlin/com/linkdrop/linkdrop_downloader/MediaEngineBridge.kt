@@ -14,6 +14,7 @@ import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.ImageDecoder
+import android.media.MediaMetadataRetriever
 import android.media.MediaScannerConnection
 import android.net.Uri
 import android.os.Build
@@ -37,11 +38,13 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.SimpleFileVisitor
 import java.nio.file.attribute.BasicFileAttributes
+import java.security.MessageDigest
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.TimeZone
 import java.util.UUID
+import java.util.concurrent.Semaphore
 import java.util.concurrent.TimeUnit
 import java.util.zip.ZipInputStream
 import kotlinx.coroutines.CoroutineExceptionHandler
@@ -759,6 +762,20 @@ class MediaEngineBridge(private val context: Context) {
                         creatorFolder = creatorFolder,
                         albumFolder = albumFolder,
                     )
+                }
+
+                // Immediately cache Pixiv Ugoira's exact first frame (frame 0) as its thumbnail
+                // so Album Grid, Row List, Tag Explorer & Trash display it instantaneously!
+                val savedPath = exported["savedPath"]?.toString().orEmpty()
+                val firstFrameFile = File(framesDir, orderedFrames.first().first)
+                if (savedPath.isNotBlank() && firstFrameFile.exists()) {
+                    runCatching {
+                        cacheImageFileAsVideoThumbnail(
+                            sourceImageFile = firstFrameFile,
+                            videoFilePath = savedPath,
+                            maxDimension = 540,
+                        )
+                    }
                 }
 
                 postToMain { onSuccess(exported) }
@@ -2040,6 +2057,185 @@ class MediaEngineBridge(private val context: Context) {
         val creator = parts.getOrNull(idx + 2)?.takeIf { it.isNotBlank() } ?: "Umum"
         val album = parts.getOrNull(idx + 3)?.takeIf { it.isNotBlank() } ?: ""
         return Triple(platform, creator, album)
+    }
+
+    // =========================================================================
+    // FIRST-FRAME VIDEO / UGOIRA THUMBNAIL ENGINE (DISK-CACHED)
+    // =========================================================================
+
+    private val videoThumbSemaphore = Semaphore(3)
+
+    private fun videoThumbCacheDir(): File {
+        val dir = File(context.cacheDir, "video_thumbs")
+        if (!dir.exists()) dir.mkdirs()
+        return dir
+    }
+
+    private fun buildVideoThumbCacheFile(videoPath: String, contentUri: String?): File {
+        val f = if (videoPath.isNotBlank()) File(videoPath) else null
+        val sig = if (f != null && f.exists()) {
+            "${f.absolutePath}|${f.length()}|${f.lastModified()}"
+        } else {
+            "${videoPath}|${contentUri.orEmpty()}"
+        }
+        val digest = MessageDigest.getInstance("SHA-256")
+            .digest(sig.toByteArray(Charsets.UTF_8))
+        val hex = StringBuilder(24)
+        for (i in 0 until 12) {
+            hex.append(String.format(Locale.US, "%02x", digest[i]))
+        }
+        return File(videoThumbCacheDir(), "vthumb_$hex.jpg")
+    }
+
+    private fun saveScaledThumbnailBitmap(bitmap: Bitmap, targetFile: File, maxDimension: Int) {
+        var working = bitmap
+        val longest = maxOf(working.width, working.height)
+        if (longest > maxDimension && longest > 0) {
+            val scale = maxDimension.toFloat() / longest.toFloat()
+            val tw = maxOf(1, (working.width * scale).toInt())
+            val th = maxOf(1, (working.height * scale).toInt())
+            val scaled = Bitmap.createScaledBitmap(working, tw, th, true)
+            if (scaled !== working) {
+                working.recycle()
+                working = scaled
+            }
+        }
+        try {
+            val tmp = File(targetFile.parentFile, "${targetFile.name}.tmp")
+            FileOutputStream(tmp).use { out ->
+                working.compress(Bitmap.CompressFormat.JPEG, 86, out)
+            }
+            if (targetFile.exists()) targetFile.delete()
+            if (!tmp.renameTo(targetFile)) {
+                tmp.copyTo(targetFile, overwrite = true)
+                tmp.delete()
+            }
+        } finally {
+            working.recycle()
+        }
+    }
+
+    private fun cacheImageFileAsVideoThumbnail(
+        sourceImageFile: File,
+        videoFilePath: String,
+        maxDimension: Int = 540,
+    ) {
+        val target = buildVideoThumbCacheFile(videoFilePath, null)
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeFile(sourceImageFile.absolutePath, bounds)
+        var inSample = 1
+        val longest = maxOf(bounds.outWidth, bounds.outHeight)
+        while (longest / inSample > maxDimension * 2) {
+            inSample *= 2
+        }
+        val decodeOpts = BitmapFactory.Options().apply {
+            inSampleSize = inSample
+            inPreferredConfig = Bitmap.Config.ARGB_8888
+        }
+        val bmp = BitmapFactory.decodeFile(sourceImageFile.absolutePath, decodeOpts) ?: return
+        saveScaledThumbnailBitmap(bmp, target, maxDimension)
+    }
+
+    /**
+     * Extracts frame 0 (first frame at t=0) from any local Ugoira/video file using
+     * Android's hardware [MediaMetadataRetriever] and caches it on disk for instant
+     * reuse across Album Grid, Row List, Tag Explorer, and Trash screens.
+     */
+    fun getVideoThumbnail(
+        filePath: String?,
+        contentUri: String?,
+        maxWidth: Int = 540,
+        onDone: (String?) -> Unit,
+    ) {
+        scope.launch {
+            val normalizedPath = filePath?.trim()?.removePrefix("file://").orEmpty()
+            val normalizedUri = contentUri?.trim()?.takeIf { it.startsWith("content://") }
+            if (normalizedPath.isEmpty() && normalizedUri == null) {
+                postToMain { onDone(null) }
+                return@launch
+            }
+
+            val cacheFile = runCatching {
+                buildVideoThumbCacheFile(normalizedPath, normalizedUri)
+            }.getOrNull()
+            if (cacheFile != null && cacheFile.exists() && cacheFile.length() > 100L) {
+                postToMain { onDone(cacheFile.absolutePath) }
+                return@launch
+            }
+
+            val clampedMax = maxWidth.coerceIn(160, 720)
+            var acquired = false
+            try {
+                videoThumbSemaphore.acquire()
+                acquired = true
+
+                // Double-check after acquiring semaphore in case another request just wrote it
+                if (cacheFile != null && cacheFile.exists() && cacheFile.length() > 100L) {
+                    postToMain { onDone(cacheFile.absolutePath) }
+                    return@launch
+                }
+
+                val retriever = MediaMetadataRetriever()
+                val frame: Bitmap? = try {
+                    val localFile = if (normalizedPath.isNotEmpty()) File(normalizedPath) else null
+                    when {
+                        localFile != null && localFile.exists() && localFile.canRead() ->
+                            retriever.setDataSource(localFile.absolutePath)
+                        normalizedUri != null ->
+                            retriever.setDataSource(context, Uri.parse(normalizedUri))
+                        else -> {
+                            postToMain { onDone(null) }
+                            return@launch
+                        }
+                    }
+
+                    // Strictly request frame 0 (first frame at 0us) with safe fallbacks
+                    var bmp: Bitmap? = null
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+                        bmp = runCatching {
+                            retriever.getScaledFrameAtTime(
+                                0L,
+                                MediaMetadataRetriever.OPTION_CLOSEST_SYNC,
+                                clampedMax,
+                                clampedMax,
+                            )
+                        }.getOrNull()
+                    }
+                    if (bmp == null) {
+                        bmp = runCatching {
+                            retriever.getFrameAtTime(0L, MediaMetadataRetriever.OPTION_CLOSEST)
+                        }.getOrNull()
+                    }
+                    if (bmp == null) {
+                        bmp = runCatching {
+                            retriever.getFrameAtTime(0L, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+                        }.getOrNull()
+                    }
+                    if (bmp == null) {
+                        bmp = runCatching { retriever.getFrameAtTime(-1L) }.getOrNull()
+                    }
+                    bmp
+                } finally {
+                    runCatching { retriever.release() }
+                }
+
+                if (frame != null && cacheFile != null) {
+                    saveScaledThumbnailBitmap(frame, cacheFile, clampedMax)
+                    if (cacheFile.exists() && cacheFile.length() > 100L) {
+                        postToMain { onDone(cacheFile.absolutePath) }
+                        return@launch
+                    }
+                } else {
+                    frame?.recycle()
+                }
+                postToMain { onDone(null) }
+            } catch (t: Throwable) {
+                Log.w(TAG, "getVideoThumbnail failed for $normalizedPath", t)
+                postToMain { onDone(null) }
+            } finally {
+                if (acquired) videoThumbSemaphore.release()
+            }
+        }
     }
 
     fun setWallpaper(

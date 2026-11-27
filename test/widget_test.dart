@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -27,6 +29,7 @@ import 'package:linkdrop_downloader/widgets/route_aware_listener.dart';
 import 'package:linkdrop_downloader/widgets/security_lock_screen.dart';
 import 'package:linkdrop_downloader/widgets/sharp_original_image.dart';
 import 'package:linkdrop_downloader/widgets/tag_albums_screen.dart';
+import 'package:linkdrop_downloader/widgets/video_first_frame_thumbnail.dart';
 
 class _MemoryStorageService extends StorageService {
   @override
@@ -2018,6 +2021,93 @@ void main() {
     }
     await tester.runAsync(() => manager.refreshManagedFiles(force: true));
     expect(manager.managedFiles.length, 1500);
+
+    manager.dispose();
+  });
+
+  testWidgets(
+      'Pixiv Ugoira album cover and gallery tiles render frame-0 VideoFirstFrameThumbnail',
+      (WidgetTester tester) async {
+    final tmpDir = Directory.systemTemp.createTempSync('ugoira_thumb_test_');
+    addTearDown(() {
+      if (tmpDir.existsSync()) tmpDir.deleteSync(recursive: true);
+    });
+    // Minimal valid 1x1 transparent PNG bytes for frame-0 cache fixture.
+    final frame0File = File('${tmpDir.path}/frame0.png')
+      ..writeAsBytesSync(const <int>[
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D,
+        0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+        0x08, 0x06, 0x00, 0x00, 0x00, 0x1F, 0x15, 0xC4, 0x89, 0x00, 0x00, 0x00,
+        0x0A, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0x00, 0x01, 0x00, 0x00,
+        0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00, 0x00, 0x00, 0x00, 0x49,
+        0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+      ]);
+
+    final ugoiraPath = '${tmpDir.path}/AnimatedDance_ugoira.mp4';
+    VideoFirstFrameThumbnail.seedCache(ugoiraPath, frame0File.path);
+    expect(
+      VideoFirstFrameThumbnail.peekCachedPath(ugoiraPath),
+      frame0File.path,
+    );
+
+    final ugoiraFile = ManagedFile(
+      fileName: 'AnimatedDance_ugoira.mp4',
+      mimeType: 'video/mp4',
+      mediaKind: MediaKind.video,
+      fileSize: 512000,
+      modifiedAt: DateTime(2026, 11, 27, 10, 0),
+      relativePath: 'Privat/Pixiv/UgoiraArtist/AnimatedDance',
+      savedPath: ugoiraPath,
+      contentUri: '',
+      platformFolder: 'Pixiv',
+      creatorFolder: 'UgoiraArtist',
+      albumFolder: 'AnimatedDance',
+      isPrivate: true,
+    );
+
+    final manager = _FakeFilesManager([ugoiraFile], const {});
+
+    // 1) FilesScreen -> Pixiv -> UgoiraArtist -> Album grid shows VideoFirstFrameThumbnail with frame-0 Image!
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: AppTheme.darkTheme(),
+        home: Scaffold(body: FilesScreen(manager: manager)),
+      ),
+    );
+    await tester.pump();
+    await tester.tap(find.text('Pixiv'));
+    await tester.pumpAndSettle();
+    expect(find.byType(VideoFirstFrameThumbnail), findsOneWidget);
+
+    await tester.tap(find.text('UgoiraArtist'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('AnimatedDance'), findsOneWidget);
+    expect(find.byType(VideoFirstFrameThumbnail), findsOneWidget);
+    expect(find.byType(Image), findsOneWidget);
+    expect(find.byIcon(Icons.play_arrow_rounded), findsOneWidget);
+
+    // 2) PixivAlbumViewer Grid view also renders VideoFirstFrameThumbnail for Ugoira pages!
+    await tester.pumpWidget(
+      MaterialApp(
+        key: const ValueKey<String>('ugoira_album_viewer_app'),
+        theme: AppTheme.darkTheme(),
+        home: PixivAlbumViewer(
+          manager: manager,
+          platformFolder: 'Pixiv',
+          creatorFolder: 'UgoiraArtist',
+          albumName: 'AnimatedDance',
+          albumNames: const ['AnimatedDance'],
+          initialAlbumIndex: 0,
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.tap(find.byTooltip('Mode Album / Galeri'));
+    await tester.pumpAndSettle();
+
+    expect(find.byType(VideoFirstFrameThumbnail), findsOneWidget);
+    expect(find.byType(Image), findsOneWidget);
 
     manager.dispose();
   });

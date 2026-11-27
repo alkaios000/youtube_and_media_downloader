@@ -580,6 +580,24 @@ class NativeBridge {
         .toList(growable: false);
   }
 
+  Future<String?> getVideoThumbnail({
+    String? filePath,
+    String? contentUri,
+    int maxWidth = 540,
+  }) async {
+    try {
+      final path = await _channel.invokeMethod<String>('getVideoThumbnail', {
+        'filePath': filePath,
+        'contentUri': contentUri,
+        'maxWidth': maxWidth,
+      });
+      if (path == null || path.trim().isEmpty) return null;
+      return path.trim();
+    } catch (_) {
+      return null;
+    }
+  }
+
   Future<bool> setWallpaper({
     String? filePath,
     String? contentUri,

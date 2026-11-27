@@ -719,6 +719,19 @@ class MainActivity : FlutterActivity() {
                         )
                     }
 
+                    "getVideoThumbnail" -> {
+                        val filePath = call.argument<String>("filePath")
+                        val contentUri = call.argument<String>("contentUri")
+                        val maxWidth = call.argument<Int>("maxWidth") ?: 540
+                        bridge.getVideoThumbnail(
+                            filePath = filePath,
+                            contentUri = contentUri,
+                            maxWidth = maxWidth,
+                        ) { thumbPath ->
+                            result.success(thumbPath)
+                        }
+                    }
+
                     "setWallpaper" -> {
                         val filePath = call.argument<String>("filePath")
                         val contentUri = call.argument<String>("contentUri")

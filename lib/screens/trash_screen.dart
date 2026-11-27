@@ -8,6 +8,7 @@ import '../models/media_info.dart';
 import '../models/media_metadata.dart';
 import '../services/download_manager.dart';
 import '../widgets/app_feedback.dart';
+import '../widgets/video_first_frame_thumbnail.dart';
 
 /// Recycle Bin / Trash management screen displaying recently deleted files
 /// stored safely in `Documents/.all_download_vault/.trash/` with 1-tap restore
@@ -292,15 +293,23 @@ class _TrashScreenState extends State<TrashScreen> {
                                                 ),
                                               ),
                                             )
-                                          : Container(
-                                              color: const Color(0xFF0096FA)
-                                                  .withValues(alpha: 0.22),
-                                              child: const Icon(
-                                                Icons.play_circle_filled_rounded,
-                                                size: 34,
-                                                color: Colors.white,
-                                              ),
-                                            ),
+                                          : (item.isVideo
+                                              ? VideoFirstFrameThumbnail(
+                                                  filePath: item.trashPath,
+                                                  cacheWidth: 320,
+                                                  fit: BoxFit.cover,
+                                                  showPlayBadge: true,
+                                                  playBadgeSize: 30,
+                                                )
+                                              : Container(
+                                                  color: const Color(0xFF0096FA)
+                                                      .withValues(alpha: 0.22),
+                                                  child: const Icon(
+                                                    Icons.audiotrack_rounded,
+                                                    size: 34,
+                                                    color: Colors.white,
+                                                  ),
+                                                )),
                                       if (selected)
                                         Container(
                                           color: theme.colorScheme.primary

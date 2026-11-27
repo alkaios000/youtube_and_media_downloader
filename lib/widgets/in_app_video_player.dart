@@ -5,6 +5,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:video_player/video_player.dart';
 
+import 'video_first_frame_thumbnail.dart';
+
 /// Smooth hardware-accelerated in-app Video & Pixiv Ugoira player backed by
 /// Flutter's `video_player` (Android Media3 ExoPlayer).
 ///
@@ -172,17 +174,31 @@ class _InAppVideoPlayerState extends State<InAppVideoPlayer> {
 
     final ctrl = _controller;
     if (!_initialized || ctrl == null) {
-      return Container(
+      return SizedBox(
         height: widget.inlineLoop ? 260 : null,
-        color: Colors.black,
-        alignment: Alignment.center,
-        child: const SizedBox(
-          width: 30,
-          height: 30,
-          child: CircularProgressIndicator(
-            strokeWidth: 2.6,
-            color: Colors.white70,
-          ),
+        child: Stack(
+          fit: StackFit.expand,
+          children: [
+            ColoredBox(
+              color: Colors.black,
+              child: VideoFirstFrameThumbnail(
+                filePath: widget.filePath,
+                fit: BoxFit.contain,
+                cacheWidth: 540,
+                showPlayBadge: false,
+              ),
+            ),
+            const Center(
+              child: SizedBox(
+                width: 30,
+                height: 30,
+                child: CircularProgressIndicator(
+                  strokeWidth: 2.6,
+                  color: Colors.white70,
+                ),
+              ),
+            ),
+          ],
         ),
       );
     }

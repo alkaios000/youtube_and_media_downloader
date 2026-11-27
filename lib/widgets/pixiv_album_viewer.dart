@@ -15,6 +15,7 @@ import 'file_gallery_viewer.dart';
 import 'in_app_video_player.dart';
 import 'sharp_original_image.dart';
 import 'tag_albums_screen.dart';
+import 'video_first_frame_thumbnail.dart';
 import 'wallpaper_sheet.dart';
 
 enum _AlbumReaderMode { pixivScroll, galleryGrid, rowList }
@@ -1128,28 +1129,14 @@ class _PixivAlbumViewerState extends State<PixivAlbumViewer> {
                       fit: StackFit.expand,
                       children: [
                         page.mediaKind == MediaKind.video
-                            ? Container(
-                                color: const Color(0xFF0096FA)
-                                    .withValues(alpha: 0.22),
-                                child: const Column(
-                                  mainAxisAlignment: MainAxisAlignment.center,
-                                  children: [
-                                    Icon(
-                                      Icons.play_circle_filled_rounded,
-                                      size: 34,
-                                      color: Colors.white,
-                                    ),
-                                    SizedBox(height: 3),
-                                    Text(
-                                      'Ugoira',
-                                      style: TextStyle(
-                                        color: Colors.white,
-                                        fontSize: 10.5,
-                                        fontWeight: FontWeight.w800,
-                                      ),
-                                    ),
-                                  ],
-                                ),
+                            ? VideoFirstFrameThumbnail(
+                                filePath: page.savedPath,
+                                contentUri: page.contentUri,
+                                cacheWidth: 420,
+                                fit: BoxFit.cover,
+                                showPlayBadge: true,
+                                playBadgeSize: 34,
+                                badgeLabel: 'Ugoira',
                               )
                             : Image.file(
                                 File(page.savedPath),
@@ -1319,14 +1306,13 @@ class _PixivAlbumViewerState extends State<PixivAlbumViewer> {
                           width: 56,
                           height: 56,
                           child: page.mediaKind == MediaKind.video
-                              ? Container(
-                                  color: const Color(0xFF0096FA)
-                                      .withValues(alpha: 0.2),
-                                  child: const Icon(
-                                    Icons.play_circle_filled_rounded,
-                                    color: Color(0xFF0096FA),
-                                    size: 28,
-                                  ),
+                              ? VideoFirstFrameThumbnail(
+                                  filePath: page.savedPath,
+                                  contentUri: page.contentUri,
+                                  cacheWidth: 160,
+                                  fit: BoxFit.cover,
+                                  showPlayBadge: true,
+                                  playBadgeSize: 24,
                                 )
                               : Image.file(
                                   File(page.savedPath),

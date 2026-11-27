@@ -16,6 +16,7 @@ import '../widgets/app_feedback.dart';
 import '../widgets/file_gallery_viewer.dart';
 import '../widgets/pixiv_album_viewer.dart';
 import '../widgets/tag_albums_screen.dart';
+import '../widgets/video_first_frame_thumbnail.dart';
 import '../widgets/wallpaper_sheet.dart';
 import 'curated_catalog_screen.dart';
 import 'platform_all_photos_screen.dart';
@@ -1481,6 +1482,10 @@ class _FilesScreenState extends State<FilesScreen> {
           if (sampleImage == null && f.savedPath.isNotEmpty) {
             sampleImage = f;
           }
+        } else if (f.mediaKind == MediaKind.video &&
+            sampleImage == null &&
+            f.savedPath.isNotEmpty) {
+          sampleImage = f;
         }
         if (f.isPrivate) privateCount++;
         if (f.modifiedAt.isAfter(latestMod)) latestMod = f.modifiedAt;
@@ -1604,13 +1609,22 @@ class _FilesScreenState extends State<FilesScreen> {
                   width: 48,
                   height: 48,
                   child: sampleImage != null
-                      ? Image.file(
-                          File(sampleImage.savedPath),
-                          cacheWidth: 160,
-                          filterQuality: FilterQuality.low,
-                          fit: BoxFit.cover,
-                          errorBuilder: (_, _, _) => _creatorIconBox(platform),
-                        )
+                      ? (sampleImage.mediaKind == MediaKind.video
+                          ? VideoFirstFrameThumbnail(
+                              filePath: sampleImage.savedPath,
+                              contentUri: sampleImage.contentUri,
+                              cacheWidth: 160,
+                              showPlayBadge: true,
+                              playBadgeSize: 22,
+                            )
+                          : Image.file(
+                              File(sampleImage.savedPath),
+                              cacheWidth: 160,
+                              filterQuality: FilterQuality.low,
+                              fit: BoxFit.cover,
+                              errorBuilder: (_, _, _) =>
+                                  _creatorIconBox(platform),
+                            ))
                       : _creatorIconBox(platform),
                 ),
               ),
@@ -1778,14 +1792,22 @@ class _FilesScreenState extends State<FilesScreen> {
                         width: 52,
                         height: 52,
                         child: sampleImage != null
-                            ? Image.file(
-                                File(sampleImage.savedPath),
-                                cacheWidth: 160,
-                                filterQuality: FilterQuality.low,
-                                fit: BoxFit.cover,
-                                errorBuilder: (_, _, _) =>
-                                    _creatorIconBox(platform),
-                              )
+                            ? (sampleImage.mediaKind == MediaKind.video
+                                ? VideoFirstFrameThumbnail(
+                                    filePath: sampleImage.savedPath,
+                                    contentUri: sampleImage.contentUri,
+                                    cacheWidth: 160,
+                                    showPlayBadge: true,
+                                    playBadgeSize: 22,
+                                  )
+                                : Image.file(
+                                    File(sampleImage.savedPath),
+                                    cacheWidth: 160,
+                                    filterQuality: FilterQuality.low,
+                                    fit: BoxFit.cover,
+                                    errorBuilder: (_, _, _) =>
+                                        _creatorIconBox(platform),
+                                  ))
                             : _creatorIconBox(platform),
                       ),
                     ),
@@ -2109,38 +2131,14 @@ class _FilesScreenState extends State<FilesScreen> {
                           fit: StackFit.expand,
                           children: [
                             album.cover.mediaKind == MediaKind.video
-                                ? Container(
-                                    decoration: BoxDecoration(
-                                      gradient: LinearGradient(
-                                        begin: Alignment.topLeft,
-                                        end: Alignment.bottomRight,
-                                        colors: [
-                                          const Color(0xFF0096FA)
-                                              .withValues(alpha: 0.35),
-                                          const Color(0xFF1E293B),
-                                        ],
-                                      ),
-                                    ),
-                                    child: const Column(
-                                      mainAxisAlignment:
-                                          MainAxisAlignment.center,
-                                      children: [
-                                        Icon(
-                                          Icons.play_circle_filled_rounded,
-                                          size: 46,
-                                          color: Colors.white,
-                                        ),
-                                        SizedBox(height: 6),
-                                        Text(
-                                          'Ugoira MP4',
-                                          style: TextStyle(
-                                            color: Colors.white70,
-                                            fontSize: 11.5,
-                                            fontWeight: FontWeight.w800,
-                                          ),
-                                        ),
-                                      ],
-                                    ),
+                                ? VideoFirstFrameThumbnail(
+                                    filePath: album.cover.savedPath,
+                                    contentUri: album.cover.contentUri,
+                                    cacheWidth: 540,
+                                    fit: BoxFit.cover,
+                                    showPlayBadge: true,
+                                    playBadgeSize: 40,
+                                    badgeLabel: 'Ugoira MP4',
                                   )
                                 : Image.file(
                                     File(album.cover.savedPath),
@@ -2347,14 +2345,13 @@ class _FilesScreenState extends State<FilesScreen> {
                           width: 60,
                           height: 60,
                           child: album.cover.mediaKind == MediaKind.video
-                              ? Container(
-                                  color: const Color(0xFF0096FA)
-                                      .withValues(alpha: 0.2),
-                                  child: const Icon(
-                                    Icons.play_circle_filled_rounded,
-                                    color: Color(0xFF0096FA),
-                                    size: 30,
-                                  ),
+                              ? VideoFirstFrameThumbnail(
+                                  filePath: album.cover.savedPath,
+                                  contentUri: album.cover.contentUri,
+                                  cacheWidth: 160,
+                                  fit: BoxFit.cover,
+                                  showPlayBadge: true,
+                                  playBadgeSize: 26,
                                 )
                               : Image.file(
                                   File(album.cover.savedPath),
@@ -3292,6 +3289,16 @@ class _GalleryFileTile extends StatelessWidget {
                   fit: BoxFit.cover,
                   errorBuilder: (_, _, _) => _mediaFallback(theme),
                 )
+              else if (file.mediaKind == MediaKind.video &&
+                  file.savedPath.isNotEmpty)
+                VideoFirstFrameThumbnail(
+                  filePath: file.savedPath,
+                  contentUri: file.contentUri,
+                  cacheWidth: 320,
+                  fit: BoxFit.cover,
+                  showPlayBadge: true,
+                  playBadgeSize: 32,
+                )
               else
                 _mediaFallback(theme),
 
@@ -3780,6 +3787,8 @@ class _FileThumb extends StatelessWidget {
   Widget build(BuildContext context) {
     final isLocalImg =
         file.mediaKind == MediaKind.image && file.savedPath.isNotEmpty;
+    final isLocalVideo = file.mediaKind == MediaKind.video &&
+        (file.savedPath.isNotEmpty || file.contentUri.isNotEmpty);
 
     final icon = switch (file.mediaKind) {
       MediaKind.video => Icons.play_circle_filled_rounded,
@@ -3800,7 +3809,15 @@ class _FileThumb extends StatelessWidget {
                 fit: BoxFit.cover,
                 errorBuilder: (_, _, _) => _fallback(context, icon),
               )
-            : _fallback(context, icon),
+            : isLocalVideo
+                ? VideoFirstFrameThumbnail(
+                    filePath: file.savedPath,
+                    contentUri: file.contentUri,
+                    cacheWidth: 160,
+                    showPlayBadge: true,
+                    playBadgeSize: 22,
+                  )
+                : _fallback(context, icon),
       ),
     );
   }

@@ -9,6 +9,7 @@ import '../services/download_manager.dart';
 import 'app_feedback.dart';
 import 'pixiv_album_viewer.dart';
 import 'route_aware_listener.dart';
+import 'video_first_frame_thumbnail.dart';
 
 /// Displays all visible albums across all artists/platforms that share [tag],
 /// with live **Multi-Tag Refinement** (`+ #Tag` AND filter, `- #Tag` exclude)
@@ -832,14 +833,14 @@ class _TaggedAlbumCard extends StatelessWidget {
                 fit: StackFit.expand,
                 children: [
                   cover.mediaKind == MediaKind.video
-                      ? Container(
-                          color:
-                              const Color(0xFF0096FA).withValues(alpha: 0.22),
-                          child: const Icon(
-                            Icons.play_circle_filled_rounded,
-                            size: 42,
-                            color: Colors.white,
-                          ),
+                      ? VideoFirstFrameThumbnail(
+                          filePath: cover.savedPath,
+                          contentUri: cover.contentUri,
+                          cacheWidth: 420,
+                          fit: BoxFit.cover,
+                          showPlayBadge: true,
+                          playBadgeSize: 38,
+                          badgeLabel: 'Ugoira',
                         )
                       : Image.file(
                           File(cover.savedPath),
