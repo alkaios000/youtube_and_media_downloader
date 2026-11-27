@@ -26,6 +26,30 @@ List<Map<String, dynamic>> _decodeJsonMapList(String raw) {
 
 String _encodeJsonPayload(Object payload) => jsonEncode(payload);
 
+/// Top-level isolate helpers so closures NEVER capture `StorageService` `this`.
+Future<List<Map<String, dynamic>>> _decodeJsonMapListInIsolate(
+  String raw,
+) async {
+  if (raw.length <= 65536) return _decodeJsonMapList(raw);
+  try {
+    return await Isolate.run(() => _decodeJsonMapList(raw));
+  } catch (_) {
+    return _decodeJsonMapList(raw);
+  }
+}
+
+Future<String> _encodeJsonPayloadInIsolate(
+  Object payload, {
+  required bool useIsolate,
+}) async {
+  if (!useIsolate) return _encodeJsonPayload(payload);
+  try {
+    return await Isolate.run(() => _encodeJsonPayload(payload));
+  } catch (_) {
+    return _encodeJsonPayload(payload);
+  }
+}
+
 class BackupDataBundle {
   final AppSettings settings;
   final Set<String> downloadedMarkers;
@@ -265,9 +289,7 @@ class StorageService {
   }
 
   Future<List<DownloadItem>> _parseHistoryRaw(String raw) async {
-    final maps = raw.length > 65536
-        ? await Isolate.run(() => _decodeJsonMapList(raw))
-        : _decodeJsonMapList(raw);
+    final maps = await _decodeJsonMapListInIsolate(raw);
     return maps.map((m) {
       final item = DownloadItem.fromJson(m);
       // If app was terminated mid-download, auto-convert into resumable Paused state!
@@ -351,9 +373,10 @@ class StorageService {
 
   Future<void> _persistHistoryBatch(List<DownloadItem> items) async {
     final toSave = items.map((e) => e.toJson()).toList(growable: false);
-    final encoded = items.length >= 60
-        ? await Isolate.run(() => _encodeJsonPayload(toSave))
-        : jsonEncode(toSave);
+    final encoded = await _encodeJsonPayloadInIsolate(
+      toSave,
+      useIsolate: items.length >= 60,
+    );
 
     final file = await _supportFileOrNull('download_history_v2.json');
     if (file != null) {
@@ -428,9 +451,10 @@ class StorageService {
         final batch = _pendingMarkersWrite!;
         _pendingMarkersWrite = null;
         final list = batch.toList(growable: false);
-        final encoded = list.length >= 500
-            ? await Isolate.run(() => _encodeJsonPayload(list))
-            : jsonEncode(list);
+        final encoded = await _encodeJsonPayloadInIsolate(
+          list,
+          useIsolate: list.length >= 500,
+        );
         final file = await _supportFileOrNull('downloaded_markers_v2.json');
         if (file != null) {
           await _writeAtomicFile(file, encoded);
@@ -541,9 +565,10 @@ class StorageService {
         _pendingAlbumMetaWrite = null;
         final list =
             batch.values.map((e) => e.toJson()).toList(growable: false);
-        final encoded = list.length >= 150
-            ? await Isolate.run(() => _encodeJsonPayload(list))
-            : jsonEncode(list);
+        final encoded = await _encodeJsonPayloadInIsolate(
+          list,
+          useIsolate: list.length >= 150,
+        );
         final file = await _supportFileOrNull('album_metadata_v1.json');
         if (file != null) {
           await _writeAtomicFile(file, encoded);
@@ -616,9 +641,10 @@ class StorageService {
             serialized[k] = v.name;
           }
         });
-        final encoded = serialized.length >= 300
-            ? await Isolate.run(() => _encodeJsonPayload(serialized))
-            : jsonEncode(serialized);
+        final encoded = await _encodeJsonPayloadInIsolate(
+          serialized,
+          useIsolate: serialized.length >= 300,
+        );
         final file = await _supportFileOrNull('photo_ratings_v1.json');
         if (file != null) {
           await _writeAtomicFile(file, encoded);
@@ -642,10 +668,7 @@ class StorageService {
     try {
       final raw = await file.readAsString();
       if (raw.isEmpty) return const <ManagedFile>[];
-      if (raw.length > 65536) {
-        return await Isolate.run(() => parsePackedManagedFiles(raw));
-      }
-      return parsePackedManagedFiles(raw);
+      return await parsePackedManagedFilesInIsolate(raw);
     } catch (_) {
       return const <ManagedFile>[];
     }
@@ -672,9 +695,7 @@ class StorageService {
 
   Future<void> saveManagedFilesCache(List<ManagedFile> files) async {
     try {
-      final packed = files.length >= 200
-          ? await Isolate.run(() => encodePackedManagedFiles(files))
-          : encodePackedManagedFiles(files);
+      final packed = await encodePackedManagedFilesInIsolate(files);
       await saveManagedFilesCacheRaw(packed);
     } catch (_) {}
   }
@@ -713,9 +734,7 @@ class StorageService {
   Future<Map<String, CuratedWorkRecord>> _parseCuratedCatalogRaw(
     String raw,
   ) async {
-    final maps = raw.length > 65536
-        ? await Isolate.run(() => _decodeJsonMapList(raw))
-        : _decodeJsonMapList(raw);
+    final maps = await _decodeJsonMapListInIsolate(raw);
     final out = <String, CuratedWorkRecord>{};
     for (final m in maps) {
       final rec = CuratedWorkRecord.fromJson(m);
@@ -741,9 +760,10 @@ class StorageService {
             .where((r) => r.markerKey.isNotEmpty && r.keptFiles.isNotEmpty)
             .map((e) => e.toJson())
             .toList(growable: false);
-        final encoded = list.length >= 120
-            ? await Isolate.run(() => _encodeJsonPayload(list))
-            : jsonEncode(list);
+        final encoded = await _encodeJsonPayloadInIsolate(
+          list,
+          useIsolate: list.length >= 120,
+        );
         final file = await _supportFileOrNull('curated_catalog_v1.json');
         if (file != null) {
           await _writeAtomicFile(file, encoded);

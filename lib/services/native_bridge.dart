@@ -1,5 +1,3 @@
-import 'dart:isolate';
-
 import 'package:flutter/services.dart';
 
 import '../models/managed_file.dart';
@@ -572,11 +570,7 @@ class NativeBridge {
   Future<List<ManagedFile>> listManagedFiles() async {
     final packed = await listManagedFilesPacked();
     if (packed != null) {
-      if (packed.isEmpty) return const [];
-      if (packed.length > 65536) {
-        return Isolate.run(() => parsePackedManagedFiles(packed));
-      }
-      return parsePackedManagedFiles(packed);
+      return parsePackedManagedFilesInIsolate(packed);
     }
     final result = await _channel.invokeMethod<List<dynamic>>('listManagedFiles');
     if (result == null) return const [];

@@ -1844,88 +1844,101 @@ class MediaEngineBridge(private val context: Context) {
         }
 
         // Also scan Private Vault roots (uninstall-proof Documents/.all_download_vault/media + legacy fallback).
-        // On Android 8+ (API 26+), use NIO Files.walkFileTree + BasicFileAttributes to cut FUSE syscalls by 3x!
+        // On Android 8+ (API 26+), use NIO Files.walkFileTree + BasicFileAttributes to cut FUSE syscalls by 3x,
+        // with an automatic fallback to classic walkTopDown() if NIO fails on any OEM filesystem quirk!
         val seenPrivateLogical = HashSet<String>(512)
         for (vault in allPrivateVaultRoots()) {
             runCatching {
                 if (!vault.exists()) return@runCatching
+                val beforeCount = results.size
+                var usedNioOk = false
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                    val vaultPath = vault.toPath()
-                    Files.walkFileTree(
-                        vaultPath,
-                        object : SimpleFileVisitor<Path>() {
-                            override fun preVisitDirectory(
-                                dir: Path,
-                                attrs: BasicFileAttributes,
-                            ): FileVisitResult {
-                                if (dir != vaultPath) {
-                                    val dirName = dir.fileName?.toString().orEmpty()
-                                    if (dirName.startsWith(".")) {
-                                        return FileVisitResult.SKIP_SUBTREE
+                    usedNioOk = runCatching {
+                        val vaultPath = vault.toPath()
+                        Files.walkFileTree(
+                            vaultPath,
+                            object : SimpleFileVisitor<Path>() {
+                                override fun preVisitDirectory(
+                                    dir: Path,
+                                    attrs: BasicFileAttributes,
+                                ): FileVisitResult {
+                                    if (dir != vaultPath) {
+                                        val dirName = dir.fileName?.toString().orEmpty()
+                                        if (dirName.startsWith(".")) {
+                                            return FileVisitResult.SKIP_SUBTREE
+                                        }
                                     }
+                                    return FileVisitResult.CONTINUE
                                 }
-                                return FileVisitResult.CONTINUE
-                            }
 
-                            override fun visitFile(
-                                file: Path,
-                                attrs: BasicFileAttributes,
-                            ): FileVisitResult {
-                                if (!attrs.isRegularFile) return FileVisitResult.CONTINUE
-                                val size = attrs.size()
-                                if (size <= 0L) return FileVisitResult.CONTINUE
-                                val name = file.fileName?.toString().orEmpty()
-                                if (name.isEmpty() || name.startsWith(".")) return FileVisitResult.CONTINUE
-                                val absPath = file.toString()
-                                if (!seenPaths.add(absPath)) return FileVisitResult.CONTINUE
+                                override fun visitFile(
+                                    file: Path,
+                                    attrs: BasicFileAttributes,
+                                ): FileVisitResult {
+                                    if (!attrs.isRegularFile) return FileVisitResult.CONTINUE
+                                    val size = attrs.size()
+                                    if (size <= 0L) return FileVisitResult.CONTINUE
+                                    val name = file.fileName?.toString().orEmpty()
+                                    if (name.isEmpty() || name.startsWith(".")) return FileVisitResult.CONTINUE
+                                    val absPath = file.toString()
+                                    if (!seenPaths.add(absPath)) return FileVisitResult.CONTINUE
 
-                                val parentPath = file.parent
-                                val relDir = if (parentPath != null && parentPath != vaultPath) {
-                                    runCatching { vaultPath.relativize(parentPath).toString().replace('\\', '/') }
-                                        .getOrDefault("")
-                                } else {
-                                    ""
+                                    val parentPath = file.parent
+                                    val relDir = if (parentPath != null && parentPath != vaultPath) {
+                                        runCatching { vaultPath.relativize(parentPath).toString().replace('\\', '/') }
+                                            .getOrDefault("")
+                                    } else {
+                                        ""
+                                    }
+                                    val parts = relDir.split('/').filter { it.isNotBlank() }
+                                    val platformName = parts.getOrNull(0) ?: "Pixiv"
+                                    val creatorName = parts.getOrNull(1) ?: "Umum"
+                                    val albumName = parts.getOrNull(2) ?: ""
+                                    val logicalKey = "$platformName/$creatorName/$albumName/$name".lowercase(Locale.US)
+                                    if (!seenPrivateLogical.add(logicalKey)) return FileVisitResult.CONTINUE
+
+                                    val mime = detectMimeType(name)
+                                    val kind = when {
+                                        mime.startsWith("video/") -> "video"
+                                        mime.startsWith("audio/") -> "audio"
+                                        mime.startsWith("image/") -> "image"
+                                        else -> "image"
+                                    }
+                                    results.add(
+                                        PackedFileRow(
+                                            fileName = name,
+                                            mimeType = mime,
+                                            mediaKind = kind,
+                                            fileSize = size,
+                                            modifiedMs = attrs.lastModifiedTime().toMillis(),
+                                            relativePath = "Privat/$relDir",
+                                            savedPath = absPath,
+                                            contentUri = "",
+                                            platformFolder = platformName,
+                                            creatorFolder = creatorName,
+                                            albumFolder = albumName,
+                                            isPrivate = true,
+                                        ),
+                                    )
+                                    return FileVisitResult.CONTINUE
                                 }
-                                val parts = relDir.split('/').filter { it.isNotBlank() }
-                                val platformName = parts.getOrNull(0) ?: "Pixiv"
-                                val creatorName = parts.getOrNull(1) ?: "Umum"
-                                val albumName = parts.getOrNull(2) ?: ""
-                                val logicalKey = "$platformName/$creatorName/$albumName/$name".lowercase(Locale.US)
-                                if (!seenPrivateLogical.add(logicalKey)) return FileVisitResult.CONTINUE
 
-                                val mime = detectMimeType(name)
-                                val kind = when {
-                                    mime.startsWith("video/") -> "video"
-                                    mime.startsWith("audio/") -> "audio"
-                                    mime.startsWith("image/") -> "image"
-                                    else -> "image"
-                                }
-                                results.add(
-                                    PackedFileRow(
-                                        fileName = name,
-                                        mimeType = mime,
-                                        mediaKind = kind,
-                                        fileSize = size,
-                                        modifiedMs = attrs.lastModifiedTime().toMillis(),
-                                        relativePath = "Privat/$relDir",
-                                        savedPath = absPath,
-                                        contentUri = "",
-                                        platformFolder = platformName,
-                                        creatorFolder = creatorName,
-                                        albumFolder = albumName,
-                                        isPrivate = true,
-                                    ),
-                                )
-                                return FileVisitResult.CONTINUE
-                            }
+                                override fun visitFileFailed(
+                                    file: Path?,
+                                    exc: java.io.IOException?,
+                                ): FileVisitResult = FileVisitResult.CONTINUE
+                            },
+                        )
+                        true
+                    }.onFailure {
+                        Log.w(TAG, "NIO walkFileTree failed for ${vault.absolutePath}, falling back", it)
+                    }.getOrDefault(false)
+                }
 
-                            override fun visitFileFailed(
-                                file: Path?,
-                                exc: java.io.IOException?,
-                            ): FileVisitResult = FileVisitResult.CONTINUE
-                        },
-                    )
-                } else {
+                val nioFoundNothing = usedNioOk &&
+                    results.size == beforeCount &&
+                    (vault.listFiles()?.any { !it.name.startsWith(".") } == true)
+                if (!usedNioOk || nioFoundNothing) {
                     vault.walkTopDown()
                         .onEnter { it == vault || !it.name.startsWith(".") }
                         .filter { it.isFile && !it.name.startsWith(".") && it.length() > 0 }
@@ -1988,6 +2001,7 @@ class MediaEngineBridge(private val context: Context) {
                     rows[i].appendTsvLine(sb)
                 }
                 val payload = sb.toString()
+                Log.i(TAG, "listManagedFilesPacked: ${rows.size} rows, ${payload.length} chars")
                 postToMain { onSuccess(payload) }
             } catch (t: Throwable) {
                 Log.e(TAG, "listManagedFilesPacked failed", t)

@@ -430,7 +430,7 @@ void main() {
   });
 
   group('Extreme-scale ManagedFile packed TSV & zero-alloc natural sort', () {
-    test('round-trips 5,000 ManagedFiles via packed TSV and sorts naturally without RegExp', () {
+    test('round-trips 5,000 ManagedFiles via packed TSV in background Isolate and sorts naturally without RegExp', () async {
       final files = List<ManagedFile>.generate(
         5000,
         (i) => ManagedFile(
@@ -449,8 +449,9 @@ void main() {
         ),
       );
 
-      final packed = encodePackedManagedFiles(files);
-      final parsed = parsePackedManagedFiles(packed);
+      final packed = await encodePackedManagedFilesInIsolate(files);
+      expect(packed.length, greaterThan(65536));
+      final parsed = await parsePackedManagedFilesInIsolate(packed);
       expect(parsed.length, 5000);
       expect(parsed.first.fileName, files.first.fileName);
       expect(parsed.first.ratingKey, files.first.ratingKey);

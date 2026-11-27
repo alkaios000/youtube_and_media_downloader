@@ -1,7 +1,6 @@
 import 'dart:async';
 import 'dart:collection';
 import 'dart:io';
-import 'dart:isolate';
 
 import 'package:dio/dio.dart';
 import 'package:dio/io.dart';
@@ -1391,11 +1390,7 @@ class DownloadManager extends ChangeNotifier {
     try {
       final packed = await _bridge.listManagedFilesPacked();
       if (packed != null) {
-        final parsed = packed.isEmpty
-            ? const <ManagedFile>[]
-            : (packed.length > 65536
-                ? await Isolate.run(() => parsePackedManagedFiles(packed))
-                : parsePackedManagedFiles(packed));
+        final parsed = await parsePackedManagedFilesInIsolate(packed);
         _managedFiles = List<ManagedFile>.unmodifiable(
           _pendingDeletedKeys.isEmpty
               ? parsed
@@ -1413,8 +1408,21 @@ class DownloadManager extends ChangeNotifier {
         _lastManagedFilesRefresh = DateTime.now();
         unawaited(_storage.saveManagedFilesCache(_managedFiles));
       }
-    } catch (_) {
-      // Keep previous list if plugin unavailable (e.g. unit tests)
+    } catch (e) {
+      debugPrint('refreshManagedFiles error: $e');
+      // Fallback to legacy Map listing if packed transfer ever failed
+      try {
+        final fresh = await _bridge.listManagedFiles();
+        if (fresh.isNotEmpty) {
+          _managedFiles = List<ManagedFile>.unmodifiable(
+            _pendingDeletedKeys.isEmpty
+                ? fresh
+                : fresh
+                    .where((f) => !_pendingDeletedKeys.contains(f.uniqueKey)),
+          );
+          _lastManagedFilesRefresh = DateTime.now();
+        }
+      } catch (_) {}
     } finally {
       _isLoadingFiles = false;
       if (!completer.isCompleted) completer.complete();

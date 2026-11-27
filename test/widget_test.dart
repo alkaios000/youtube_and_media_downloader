@@ -1995,6 +1995,30 @@ void main() {
     expect(find.text('Sunset_4.jpg'), findsOneWidget);
     expect(find.text('Sunset_1.jpg'), findsNothing);
 
+    // Regression test: real DownloadManager.refreshManagedFiles with 1,500 files (>200KB packed TSV)
+    // MUST parse cleanly via background Isolate.run without capturing DownloadManager `this`!
+    mockBridge.diskFiles.clear();
+    for (int i = 0; i < 1500; i++) {
+      mockBridge.diskFiles.add(
+        ManagedFile(
+          fileName: 'LargeCollection_${i}_page.jpg',
+          mimeType: 'image/jpeg',
+          mediaKind: MediaKind.image,
+          fileSize: 8192 + i,
+          modifiedAt: DateTime(2026, 11, 27, 10, i % 60),
+          relativePath: 'Privat/Pixiv/BigArtist/Album_${i % 100}',
+          savedPath: '/sdcard/Documents/.all_download_vault/media/Pixiv/BigArtist/Album_${i % 100}/LargeCollection_${i}_page.jpg',
+          contentUri: '',
+          platformFolder: 'Pixiv',
+          creatorFolder: 'BigArtist',
+          albumFolder: 'Album_${i % 100}',
+          isPrivate: true,
+        ),
+      );
+    }
+    await tester.runAsync(() => manager.refreshManagedFiles(force: true));
+    expect(manager.managedFiles.length, 1500);
+
     manager.dispose();
   });
 }

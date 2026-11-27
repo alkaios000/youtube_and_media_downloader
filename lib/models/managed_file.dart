@@ -1,3 +1,5 @@
+import 'dart:isolate';
+
 import 'media_info.dart';
 import 'media_platform.dart';
 
@@ -21,34 +23,14 @@ class ManagedFile {
   final String albumFolder;
   final bool isPrivate;
 
-  /// Cached derived keys — computed at most once per instance (O(1) on all
-  /// subsequent accesses across 30,000–50,000+ file scans, filters, & groupings).
-  late final String uniqueKey =
-      contentUri.isNotEmpty ? contentUri : savedPath;
-
-  late final MediaPlatform platform =
-      MediaPlatformMeta.fromKey(platformFolder);
-
-  late final String extension = _computeExtension(fileName);
-
-  /// Resolves the logical album / artwork name for Pixiv per-page album grouping.
-  /// Uses [albumFolder] when present, or automatically derives the album base title
-  /// from legacy filenames (e.g. `Sunset_1.jpg`, `Sunset_2.jpg` -> `Sunset`).
-  late final String effectiveAlbumName =
-      _computeEffectiveAlbumName(albumFolder, fileName);
-
-  /// Stable lowercase album lookup key matching [AlbumMetadata.buildLookupKey].
-  late final String albumLookupKey =
-      '${platformFolder.trim().toLowerCase()}|${creatorFolder.trim().toLowerCase()}|${effectiveAlbumName.trim().toLowerCase()}';
-
-  /// Stable logical key across Private Vault <-> Public Gallery moves & backups,
-  /// used to persist per-photo content ratings (Biasa / Ecchi / NSFW).
-  late final String ratingKey = buildPhotoRatingKey(
-    platformFolder: platformFolder,
-    creatorFolder: creatorFolder,
-    albumName: effectiveAlbumName,
-    fileName: fileName,
-  );
+  // Plain nullable cache fields (100% isolate-safe in Dart JIT & AOT release,
+  // zero RegExp/string re-allocations across 30,000–50,000+ file operations).
+  String? _uniqueKey;
+  MediaPlatform? _platform;
+  String? _extension;
+  String? _effectiveAlbumName;
+  String? _albumLookupKey;
+  String? _ratingKey;
 
   ManagedFile({
     required this.fileName,
@@ -64,6 +46,33 @@ class ManagedFile {
     this.albumFolder = '',
     this.isPrivate = false,
   });
+
+  String get uniqueKey =>
+      _uniqueKey ??= (contentUri.isNotEmpty ? contentUri : savedPath);
+
+  MediaPlatform get platform =>
+      _platform ??= MediaPlatformMeta.fromKey(platformFolder);
+
+  String get extension => _extension ??= _computeExtension(fileName);
+
+  /// Resolves the logical album / artwork name for Pixiv per-page album grouping.
+  /// Uses [albumFolder] when present, or automatically derives the album base title
+  /// from legacy filenames (e.g. `Sunset_1.jpg`, `Sunset_2.jpg` -> `Sunset`).
+  String get effectiveAlbumName =>
+      _effectiveAlbumName ??= _computeEffectiveAlbumName(albumFolder, fileName);
+
+  /// Stable lowercase album lookup key matching [AlbumMetadata.buildLookupKey].
+  String get albumLookupKey => _albumLookupKey ??=
+      '${platformFolder.trim().toLowerCase()}|${creatorFolder.trim().toLowerCase()}|${effectiveAlbumName.trim().toLowerCase()}';
+
+  /// Stable logical key across Private Vault <-> Public Gallery moves & backups,
+  /// used to persist per-photo content ratings (Biasa / Ecchi / NSFW).
+  String get ratingKey => _ratingKey ??= buildPhotoRatingKey(
+        platformFolder: platformFolder,
+        creatorFolder: creatorFolder,
+        albumName: effectiveAlbumName,
+        fileName: fileName,
+      );
 
   static String buildPhotoRatingKey({
     required String platformFolder,
@@ -95,10 +104,12 @@ class ManagedFile {
     return base.isNotEmpty ? base : fileName;
   }
 
-  /// Eagerly primes all derived keys (ideal inside a background [Isolate.run]
-  /// so the Flutter UI thread incurs zero allocation cost on first build).
+  /// Eagerly primes all derived keys inside a background worker isolate so the
+  /// Flutter UI thread incurs zero string allocation cost on first build.
   void warmKeys() {
     uniqueKey;
+    platform;
+    extension;
     effectiveAlbumName;
     albumLookupKey;
     ratingKey;
@@ -203,6 +214,17 @@ List<ManagedFile> parsePackedManagedFiles(String raw) {
   return out;
 }
 
+/// Top-level isolate runner (captures ZERO enclosing `this` instance!).
+Future<List<ManagedFile>> parsePackedManagedFilesInIsolate(String raw) async {
+  if (raw.isEmpty) return const <ManagedFile>[];
+  if (raw.length <= 65536) return parsePackedManagedFiles(raw);
+  try {
+    return await Isolate.run(() => parsePackedManagedFiles(raw));
+  } catch (_) {
+    return parsePackedManagedFiles(raw);
+  }
+}
+
 /// Top-level isolate-safe serializer for caching [ManagedFile] lists to disk.
 String encodePackedManagedFiles(List<ManagedFile> files) {
   if (files.isEmpty) return '';
@@ -212,6 +234,19 @@ String encodePackedManagedFiles(List<ManagedFile> files) {
     sb.write(files[i].toPackedLine());
   }
   return sb.toString();
+}
+
+/// Top-level isolate runner (captures ZERO enclosing `this` instance!).
+Future<String> encodePackedManagedFilesInIsolate(
+  List<ManagedFile> files,
+) async {
+  if (files.isEmpty) return '';
+  if (files.length < 200) return encodePackedManagedFiles(files);
+  try {
+    return await Isolate.run(() => encodePackedManagedFiles(files));
+  } catch (_) {
+    return encodePackedManagedFiles(files);
+  }
 }
 
 /// Zero-allocation natural numeric comparator so Pixiv album pages sort
